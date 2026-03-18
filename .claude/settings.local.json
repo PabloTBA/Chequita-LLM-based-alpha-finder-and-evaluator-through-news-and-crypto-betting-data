@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(winpty gh:*)",
+      "Bash(cmd /c \"gh --version\")"
+    ]
+  }
+}
