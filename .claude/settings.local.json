@@ -2,7 +2,16 @@
   "permissions": {
     "allow": [
       "Bash(winpty gh:*)",
-      "Bash(cmd /c \"gh --version\")"
+      "Bash(cmd /c \"gh --version\")",
+      "Bash(python -m pytest test_stage1_data_collector.py -v)",
+      "Bash(pip install:*)",
+      "Bash(python -m pytest test_stage1_data_collector.py -v --tb=no -q)",
+      "WebSearch",
+      "WebFetch(domain:docs.benzinga.com)",
+      "WebFetch(domain:docs.benzinga.io)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(python -m pytest test_stage1_data_collector.py -v --tb=short)",
+      "Bash(python -m pytest test_stage1_data_collector.py -q --tb=no)"
     ]
   }
 }
