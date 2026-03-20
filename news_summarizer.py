@@ -124,8 +124,9 @@ class NewsSummarizer:
         global_df: pd.DataFrame,
         industry_df: pd.DataFrame,
         as_of_date: str,
+        markets: list | None = None,
     ) -> str:
-        return PROMPT_TEMPLATE.format(
+        base = PROMPT_TEMPLATE.format(
             window_days   = self.window_days,
             as_of_date    = as_of_date,
             n             = TOP_N_PER_SOURCE,
@@ -133,6 +134,16 @@ class NewsSummarizer:
             global_news   = self._format_articles(self._top_articles(global_df)),
             industry_news = self._format_articles(self._top_articles(industry_df)),
         )
+        if markets:
+            sorted_mkts = sorted(markets, key=lambda m: m.get("volume", 0), reverse=True)
+            lines = [m["formatted_text"] for m in sorted_mkts[:TOP_N_PER_SOURCE * 4]]
+            markets_block = "\n".join(lines)
+            base += (
+                f"\n\n--- ACTIVE PREDICTION MARKETS (top by volume) ---\n"
+                f"{markets_block}\n\n"
+                "Factor the above prediction market probabilities into your macro thesis."
+            )
+        return base
 
     def _parse_llm_response(self, raw: str) -> dict:
         """
@@ -167,6 +178,7 @@ class NewsSummarizer:
         self,
         articles: dict[str, pd.DataFrame],
         as_of_date: str,
+        markets: list | None = None,
     ) -> dict:
         """
         Generate a structured news summary for the lookback window.
@@ -210,7 +222,7 @@ class NewsSummarizer:
             self._log("[NewsSummarizer] no articles in window — returning no-data result (LLM skipped)")
             return {**base, **NO_DATA_RESULT}
 
-        prompt = self._build_prompt(stock_df, global_df, industry_df, as_of_date)
+        prompt = self._build_prompt(stock_df, global_df, industry_df, as_of_date, markets)
         self._log(f"[NewsSummarizer] prompt built — {len(prompt)} chars, sending to LLM...")
 
         raw    = self.llm_client(prompt)

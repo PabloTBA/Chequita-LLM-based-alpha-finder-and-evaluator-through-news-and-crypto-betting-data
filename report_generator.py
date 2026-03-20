@@ -58,6 +58,7 @@ class ReportGenerator:
             self._diagnostic_section(pipeline_output),
             self._backtest_section(pipeline_output),
             self._monte_carlo_section(pipeline_output),
+            self._execution_brief_section(pipeline_output),
         ]
 
         with open(filepath, "w", encoding="utf-8") as f:
@@ -81,6 +82,18 @@ class ReportGenerator:
         watches = [v["ticker"] for v in vds if v.get("verdict") == "watch"]
         avoids  = [v["ticker"] for v in vds if v.get("verdict") == "avoid"]
 
+        # Portfolio-level risk from active signals
+        strategies   = po.get("strategies", [])
+        active_sigs  = [s for s in strategies if s.get("current_signal", {}).get("signal_active")]
+        n_active     = len(active_sigs)
+        total_risk   = sum(
+            s["current_signal"]["setup"].get("dollar_risk", 0.0)
+            for s in active_sigs
+            if s["current_signal"].get("setup")
+        )
+        portfolio    = 100_000.0   # default; real value embedded in setup sizing
+        risk_pct     = (total_risk / portfolio * 100) if portfolio else 0.0
+
         lines = [
             "## Executive Summary",
             "",
@@ -97,11 +110,42 @@ class ReportGenerator:
             "",
             "**Key risks:** " + ", ".join(s.get("key_risks", [])),
         ]
+
+        # Prediction markets block — top 5 by volume
+        markets = po.get("markets", [])
+        if markets:
+            top5 = sorted(markets, key=lambda m: m.get("volume", 0), reverse=True)[:5]
+            lines += ["", "### Key Prediction Markets", ""]
+            lines += [
+                "| Event | Probability | Volume |",
+                "|-------|-------------|--------|",
+            ]
+            for m in top5:
+                prob = f"{int(round(m.get('probability', 0) * 100))}%"
+                vol  = m.get("formatted_text", "").split("Volume: ")[-1].split(" |")[0] if "Volume:" in m.get("formatted_text", "") else "N/A"
+                lines.append(f"| {m['event']} | {prob} | {vol} |")
+
+        # Portfolio risk block — only shown when there are active signals
+        if n_active > 0:
+            lines += [
+                "",
+                "### Portfolio Risk (Active Signals Today)",
+                "",
+                f"**{n_active} signal{'s' if n_active != 1 else ''} active** — "
+                f"if all are entered simultaneously:",
+                "",
+                f"- Total capital at risk: **${total_risk:,.0f}** "
+                f"({risk_pct:.1f}% of a $100k portfolio)",
+                f"- Each position risks ~$1,000 (1% rule); "
+                f"{'within normal diversification limits.' if risk_pct <= 5 else 'consider staggering entries to avoid overexposure.'}",
+            ]
+
         return "\n".join(lines)
 
     @staticmethod
     def _macro_section(po: dict) -> str:
-        m = po.get("macro", {})
+        m       = po.get("macro", {})
+        markets = po.get("markets", [])
         lines = [
             "## Macro Environment",
             "",
@@ -113,6 +157,23 @@ class ReportGenerator:
             "",
             f"> {m.get('reasoning', '')}",
         ]
+        if markets:
+            sorted_mkts = sorted(markets, key=lambda x: x.get("volume", 0), reverse=True)
+            lines += [
+                "",
+                "### Prediction Markets",
+                "",
+                "| Status | Category | Event | Probability | Volume |",
+                "|--------|----------|-------|-------------|--------|",
+            ]
+            for mk in sorted_mkts:
+                prob   = f"{int(round(mk.get('probability', 0) * 100))}%"
+                status = mk.get("status", "active").upper()
+                vol    = mk.get("formatted_text", "").split("Volume: ")[-1].split(" |")[0] if "Volume:" in mk.get("formatted_text", "") else "N/A"
+                lines.append(
+                    f"| {status} | {mk.get('category', '')} "
+                    f"| {mk['event']} | {prob} | {vol} |"
+                )
         return "\n".join(lines)
 
     @staticmethod
@@ -202,6 +263,13 @@ class ReportGenerator:
                     f"| Position size | {setup['position_size']:,} shares |",
                     f"| Dollar risk | ${setup['dollar_risk']:,.0f}  (1% of portfolio) |",
                     f"| Current ATR₁₄ | ${setup['current_atr']:,.2f} |",
+                ]
+                _slip_per_share = setup['entry_price'] * 0.0015
+                _slip_total     = _slip_per_share * setup['position_size']
+                _adj_risk       = setup['dollar_risk'] + _slip_total
+                blocks += [
+                    f"| Est. slippage (~0.15% of price) | ${_slip_per_share:.4f}/share → ${_slip_total:,.2f} total |",
+                    f"| Adjusted net risk (incl. slippage) | ${_adj_risk:,.0f} |",
                 ]
                 if setup.get("current_ma"):
                     ma_label = f"{params.get('ma_exit_period', '?')}-day MA" if s["strategy"] == "Momentum" else f"{params.get('bb_period', '?')}-day SMA (middle BB)"
@@ -385,6 +453,66 @@ class ReportGenerator:
         return "\n".join(blocks)
 
     @staticmethod
+    def _execution_brief_section(po: dict) -> str:
+        eb = po.get("execution_brief", {})
+        active   = eb.get("active_signals", [])
+        p_risk   = eb.get("portfolio_risk", {})
+        warnings = eb.get("warnings", [])
+
+        blocks = ["## Execution Brief", ""]
+
+        if not active:
+            blocks.append(
+                "_No active entry signals today — no execution required._  \n"
+                f"**Inactive signals:** {eb.get('inactive_count', 0)}"
+            )
+            return "\n".join(blocks)
+
+        blocks += [
+            "### Portfolio-Level Risk",
+            "",
+            "| Metric | Value |",
+            "|--------|-------|",
+            f"| Active signals | {p_risk.get('active_count', 0)} |",
+            f"| Total adjusted dollar risk | ${p_risk.get('total_dollar_risk', 0):,.0f} |",
+            f"| % of portfolio | {p_risk.get('pct_of_portfolio', 0):.2f}% |",
+            "",
+        ]
+
+        if warnings:
+            blocks.append("### Warnings")
+            blocks.append("")
+            for w in warnings:
+                blocks.append(f"- ⚠️  {w}")
+            blocks.append("")
+
+        blocks += [
+            "### Active Signal Execution Details",
+            "",
+            "| Ticker | Entry | Stop | Size | Dollar Risk | Adj. Risk | Spread | Slippage | Impact | Note |",
+            "|--------|-------|------|------|-------------|-----------|--------|----------|--------|------|",
+        ]
+        for s in active:
+            spread_str   = f"${s['spread']:.4f}"  if s.get("spread")  is not None else "N/A (ATR est.)"
+            entry_str    = f"${s['entry_price']:,.2f}" if s.get("entry_price") is not None else "N/A"
+            stop_str     = f"${s['stop_price']:,.2f}"  if s.get("stop_price")  is not None else "N/A"
+            blocks.append(
+                f"| {s['ticker']} "
+                f"| {entry_str} "
+                f"| {stop_str} "
+                f"| {s['position_size']:,} "
+                f"| ${s['dollar_risk']:,.0f} "
+                f"| ${s['adjusted_risk']:,.0f} "
+                f"| {spread_str} "
+                f"| ${s['slippage_total']:,.2f} "
+                f"| {s['market_impact'].upper()} "
+                f"| {s['execution_note']} |"
+            )
+
+        blocks.append("")
+        return "\n".join(blocks)
+
+    @staticmethod
     def _monte_carlo_section(po: dict) -> str:
         monte_carlos = po.get("monte_carlos", [])
         blocks = ["## Monte Carlo Stress Test", ""]
@@ -463,6 +591,13 @@ def _render_mechanics(strategy: str, params: dict) -> list[str]:
         ma  = params.get("ma_exit_period", "N")
         mh  = params.get("max_holding_days", "N")
         lines += [
+            "**Why it works:** Momentum strategies exploit the empirical tendency of assets"
+            " with high Hurst exponents (H > 0.55) to persist in their current direction."
+            " Requiring a volume surge at breakout filters false breakouts driven by thin"
+            " liquidity, keeping the signal anchored to genuine institutional participation."
+            " ATR-based stops let volatility scale the exit distance, avoiding premature"
+            " stops in volatile regimes while still capping loss per trade at ~1% of capital.",
+            "",
             "**Order type:** Market order at next session open.",
             "",
             "**Entry (both conditions required):**",
@@ -485,6 +620,14 @@ def _render_mechanics(strategy: str, params: dict) -> list[str]:
         sl  = params.get("stop_loss_atr", "N")
         mh  = params.get("max_holding_days", "N")
         lines += [
+            "**Why it works:** Mean-reversion strategies exploit the empirical tendency of"
+            " low-Hurst assets (H < 0.45) to oscillate around a statistical mean."
+            " Requiring both RSI oversold and a close below the lower Bollinger Band"
+            " creates a dual-confirmation filter — RSI measures rate-of-change exhaustion"
+            " while Bollinger Bands measure statistical deviation from the rolling mean."
+            " The position is sized so that even a full ATR move against the trade risks"
+            " only 1% of capital, giving the reversion room to play out over several days.",
+            "",
             "**Order type:** Market order at next session open.",
             "",
             "**Entry (both conditions required):**",

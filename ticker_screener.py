@@ -163,7 +163,13 @@ class TickerScreener:
 
     # ── Step 3: screen_tickers ────────────────────────────────────────────────
 
-    def screen_tickers(self, tickers: list[str], macro: dict, ohlcv: dict) -> list[dict]:
+    def screen_tickers(
+        self,
+        tickers:   list[str],
+        macro:     dict,
+        ohlcv:     dict,
+        rag_store: object = None,
+    ) -> list[dict]:
         """One LLM call per ticker. Returns list of verdict dicts."""
         results = []
         for ticker in tickers:
@@ -176,6 +182,11 @@ class TickerScreener:
                 bias        = macro.get("market_bias", "neutral"),
                 ohlcv_block = self._format_ohlcv({ticker: ohlcv.get(ticker)}),
             )
+            if rag_store is not None:
+                chunks = rag_store.retrieve(ticker, collection="news", k=3)
+                if chunks:
+                    news_block = "\n".join(f"- {c}" for c in chunks)
+                    prompt += f"\n\nRelevant news:\n{news_block}"
             raw = self.llm_client(prompt)
             results.append({"ticker": ticker, **self._parse_verdict(raw)})
         return results

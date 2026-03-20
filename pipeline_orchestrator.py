@@ -43,6 +43,10 @@ def _yesterday() -> str:
     return (datetime.now(tz_ph) - timedelta(days=1)).strftime("%Y-%m-%d")
 
 
+def _today_utc() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
 def _subtract_days(date_str: str, days: int) -> str:
     dt = datetime.strptime(date_str, "%Y-%m-%d")
     return (dt - timedelta(days=days)).strftime("%Y-%m-%d")
@@ -58,22 +62,37 @@ class PipelineOrchestrator:
     # ── public ────────────────────────────────────────────────────────────────
 
     def run(self, date: str | None = None) -> dict:
-        run_date = date if date is not None else _yesterday()
-        start    = _subtract_days(run_date, 90)
+        run_date     = date if date is not None else _yesterday()
+        start        = _subtract_days(run_date, 90)
+        collect_end  = _today_utc()   # include today's UTC articles even if run_date is yesterday
 
         m = self._modules
 
         # ── Stage 1: collect ──────────────────────────────────────────────────
         articles = self._safe(
             "collector",
-            lambda: m["collector"].collect_range(start, run_date),
+            lambda: m["collector"].collect_range(start, collect_end),
             {},
         )
+
+        # ── Stage 1b: RAG insert news ─────────────────────────────────────────
+        self._safe(
+            "rag_store.insert_news",
+            lambda: m["rag_store"].insert_news(articles),
+            None,
+        )
+
+        # ── Stage 1c: fetch + embed prediction markets ────────────────────────
+        markets = self._safe(
+            "market_client.fetch",
+            lambda: m["market_client"].fetch(run_date),
+            [],
+        ) or []
 
         # ── Stage 2: summarize ────────────────────────────────────────────────
         summary = self._safe(
             "summarizer",
-            lambda: m["summarizer"].summarize(articles, as_of_date=run_date),
+            lambda: m["summarizer"].summarize(articles, as_of_date=run_date, markets=markets),
             {},
         )
 
@@ -95,7 +114,12 @@ class PipelineOrchestrator:
         if top50 is None or (isinstance(top50, pd.DataFrame) and top50.empty):
             return self._finish(
                 m, run_date, summary, macro,
+                markets=markets,
                 ticker_verdicts=[], regimes=[], strategies=[], diagnostics=[], backtests=[],
+                monte_carlos=[],
+                execution_brief={"active_signals": [], "inactive_count": 0,
+                                 "portfolio_risk": {"active_count": 0, "total_dollar_risk": 0.0, "pct_of_portfolio": 0.0},
+                                 "warnings": []},
             )
 
         tickers = top50["ticker"].tolist()
@@ -131,7 +155,9 @@ class PipelineOrchestrator:
         # ── Stage 8: verdicts ─────────────────────────────────────────────────
         ticker_verdicts = self._safe(
             "screener.screen_tickers",
-            lambda: m["screener"].screen_tickers(shortlisted, macro, features),
+            lambda: m["screener"].screen_tickers(
+                shortlisted, macro, features, rag_store=m["rag_store"]
+            ),
             [],
         )
 
@@ -209,14 +235,25 @@ class PipelineOrchestrator:
                 if mc_result:
                     monte_carlos.append({"ticker": ticker, **mc_result})
 
+        # ── Stage 11: execution brief ─────────────────────────────────────────
+        execution_brief = self._safe(
+            "execution_advisor.advise",
+            lambda: m["execution_advisor"].advise(strategies),
+            {"active_signals": [], "inactive_count": 0,
+             "portfolio_risk": {"active_count": 0, "total_dollar_risk": 0.0, "pct_of_portfolio": 0.0},
+             "warnings": []},
+        )
+
         return self._finish(
             m, run_date, summary, macro,
+            markets=markets,
             ticker_verdicts=ticker_verdicts or [],
             regimes=regimes or [],
             strategies=strategies,
             diagnostics=diagnostics,
             backtests=backtests,
             monte_carlos=monte_carlos,
+            execution_brief=execution_brief,
         )
 
     # ── internal helpers ──────────────────────────────────────────────────────
@@ -259,9 +296,13 @@ class PipelineOrchestrator:
         from strategy_selector    import StrategySelector
         from backtester           import Backtester
         from diagnostics_engine   import DiagnosticsEngine
-        from monte_carlo_engine   import MonteCarloEngine
-        from report_generator     import ReportGenerator
+        from monte_carlo_engine          import MonteCarloEngine
+        from report_generator            import ReportGenerator
+        from execution_advisor           import ExecutionAdvisor
+        from rag_store                   import RAGStore
+        from prediction_market_client    import PredictionMarketClient
 
+        rag = RAGStore(persist_dir=cfg.get("chroma_dir", "data/chroma"))
         return {
             "collector":     Stage1DataCollector(
                                 api_key=cfg["benzinga_api_key"],
@@ -286,6 +327,17 @@ class PipelineOrchestrator:
                              ),
             "reporter":      ReportGenerator(
                                 output_dir=cfg.get("output_dir", "reports")
+                             ),
+            "execution_advisor": ExecutionAdvisor(
+                                initial_portfolio=cfg.get("initial_portfolio", 100_000.0)
+                             ),
+            "rag_store":     rag,
+            "market_client": PredictionMarketClient(
+                                cache_dir=cfg.get("cache_dir", "data/cache"),
+                                min_volume=cfg.get("market_min_volume", 100_000.0),
+                                categories=cfg.get("market_categories",
+                                                   ["Economics", "Politics", "Crypto"]),
+                                rag_store=rag,
                              ),
         }
 

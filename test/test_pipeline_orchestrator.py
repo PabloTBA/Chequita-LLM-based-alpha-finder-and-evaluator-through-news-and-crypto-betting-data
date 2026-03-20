@@ -92,10 +92,26 @@ CONFIG = {
     "window_days":      7,
 }
 
+MOCK_MARKETS = [
+    {
+        "market_id": "mkt-001", "event": "Will Fed cut rates?", "probability": 0.73,
+        "volume": 5_000_000.0, "status": "active", "resolved_yes": None,
+        "end_date": "2026-06-30", "category": "Economics",
+        "formatted_text": "[Economics] Will Fed cut rates? → 73% YES | Vol: $5.0M | Active until 2026-06-30",
+    }
+]
+
 RESULT_REQUIRED_KEYS = {
     "report_path", "run_date", "summary", "macro",
     "ticker_verdicts", "regimes", "strategies", "diagnostics", "backtests",
-    "monte_carlos",
+    "monte_carlos", "execution_brief", "markets",
+}
+
+MOCK_EXECUTION_BRIEF = {
+    "active_signals": [],
+    "inactive_count": 0,
+    "portfolio_risk": {"active_count": 0, "total_dollar_risk": 0.0, "pct_of_portfolio": 0.0},
+    "warnings": [],
 }
 
 
@@ -103,7 +119,7 @@ def make_mock_modules(report_path: str = MOCK_REPORT_PATH) -> dict:
     mods = {k: MagicMock() for k in (
         "collector", "summarizer", "macro_screener", "screener",
         "fetcher", "classifier", "selector", "diagnostics", "backtester",
-        "monte_carlo", "reporter",
+        "monte_carlo", "reporter", "execution_advisor", "rag_store", "market_client",
     )}
     mods["collector"].collect_range.return_value      = MOCK_ARTICLES
     mods["summarizer"].summarize.return_value         = MOCK_SUMMARY
@@ -119,6 +135,10 @@ def make_mock_modules(report_path: str = MOCK_REPORT_PATH) -> dict:
     mods["diagnostics"].run.return_value              = MOCK_DIAGNOSTIC
     mods["monte_carlo"].run.return_value              = MOCK_MC
     mods["reporter"].generate.return_value            = report_path
+    mods["execution_advisor"].advise.return_value     = MOCK_EXECUTION_BRIEF
+    mods["market_client"].fetch.return_value          = MOCK_MARKETS
+    mods["rag_store"].insert_news.return_value        = None
+    mods["rag_store"].retrieve.return_value           = []
     return mods
 
 
@@ -161,19 +181,23 @@ class TestDateHandling:
         r = orch.run()   # no date arg
         assert r["run_date"] == yesterday
 
-    def test_collect_range_end_date_matches_run_date(self):
+    def test_collect_range_end_date_is_today_utc(self):
+        """Collection always extends to today (UTC) to capture same-day articles."""
+        from datetime import timezone as tz
+        today_utc = datetime.now(tz.utc).strftime("%Y-%m-%d")
         mods = make_mock_modules()
         PipelineOrchestrator(CONFIG, _modules=mods).run("2026-03-19")
         _, end = mods["collector"].collect_range.call_args[0]
-        assert end == "2026-03-19"
+        assert end == today_utc
 
-    def test_collect_range_window_is_90_days(self):
+    def test_collect_range_start_is_90_days_before_run_date(self):
+        """Start is always 90 days before the analysis run_date, not before today."""
         mods = make_mock_modules()
         PipelineOrchestrator(CONFIG, _modules=mods).run("2026-03-19")
-        start, end = mods["collector"].collect_range.call_args[0]
-        dt_start = datetime.strptime(start, "%Y-%m-%d")
-        dt_end   = datetime.strptime(end,   "%Y-%m-%d")
-        assert (dt_end - dt_start).days == 90
+        start, _ = mods["collector"].collect_range.call_args[0]
+        dt_start   = datetime.strptime(start,       "%Y-%m-%d")
+        dt_run     = datetime.strptime("2026-03-19", "%Y-%m-%d")
+        assert (dt_run - dt_start).days == 90
 
 
 # ── Cycle 3: stage invocation ─────────────────────────────────────────────────
