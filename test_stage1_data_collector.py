@@ -58,9 +58,10 @@ class TestScoreArticle:
 
     def test_ticker_score_capped_at_10(self):
         """ticker_score is capped at 10 even if >10 tickers are present."""
+        # Benzinga returns tickers in "stocks": [{"name": "AAPL", "exchange": "NYSE"}, ...]
         article = {
             "title":     "Market update",
-            "tickers":   [f"T{i}" for i in range(15)],
+            "stocks":    [{"name": f"T{chr(65+i)}{chr(65+i)}", "exchange": "NYSE"} for i in range(15)],
             "source":    "Unknown Blog",
             "published": "2026-03-19T00:00:00Z",
         }
@@ -120,12 +121,12 @@ class TestCaching:
     """collect(date) serves from cache when available; calls API when not."""
 
     def test_cache_hit_skips_http(self, tmp_path):
-        """If cache file exists, no HTTP call is made."""
+        """If cache file exists for all sources, no HTTP call is made."""
         collector = Stage1DataCollector(api_key="test_key", cache_dir=str(tmp_path))
         date = "2026-03-19"
 
-        # Pre-populate cache for all 3 sources
-        for source in ("stock_news", "global_news", "industry_news"):
+        # Pre-populate cache for all 4 sources (including ticker_news)
+        for source in ("stock_news", "global_news", "industry_news", "ticker_news"):
             cache_file = tmp_path / f"{date}_{source}.json"
             cache_file.write_text(json.dumps([{
                 "date": date, "title": f"Cached {source}", "url": f"http://example.com/{source}",
@@ -172,10 +173,10 @@ class TestCaching:
 # ──────────────────────────────────────────────────────────────
 
 class TestCollectOutputShape:
-    """collect() always returns a dict with exactly 3 DataFrames."""
+    """collect() always returns a dict with exactly 4 DataFrames."""
 
-    def test_returns_three_dataframes(self, tmp_path):
-        """collect() result has keys: stock_news, global_news, industry_news."""
+    def test_returns_four_dataframes(self, tmp_path):
+        """collect() result has keys: stock_news, global_news, industry_news, ticker_news."""
         import pandas as pd
         collector = Stage1DataCollector(api_key="test_key", cache_dir=str(tmp_path))
 
@@ -186,7 +187,7 @@ class TestCollectOutputShape:
         with patch("Stage1DataCollector.requests.get", return_value=mock_resp):
             result = collector.collect("2026-03-19")
 
-        assert set(result.keys()) == {"stock_news", "global_news", "industry_news"}
+        assert set(result.keys()) == {"stock_news", "global_news", "industry_news", "ticker_news"}
         for df in result.values():
             assert isinstance(df, pd.DataFrame)
 

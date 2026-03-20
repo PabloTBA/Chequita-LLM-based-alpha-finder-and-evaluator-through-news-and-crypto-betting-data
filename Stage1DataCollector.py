@@ -1,8 +1,8 @@
 """
 Stage1DataCollector
 ====================
-Fetches stock news, global/macro news, and industry news from the Benzinga API.
-Supports per-date JSON caching and composite impact scoring.
+Fetches stock news, global/macro news, industry news, and ticker-specific news
+from the Benzinga API.  Supports per-date JSON caching and composite impact scoring.
 
 Environment:
     BENZINGA_API — Benzinga API token (set in .env)
@@ -11,6 +11,7 @@ Cache layout:
     {cache_dir}/YYYY-MM-DD_stock_news.json
     {cache_dir}/YYYY-MM-DD_global_news.json
     {cache_dir}/YYYY-MM-DD_industry_news.json
+    {cache_dir}/YYYY-MM-DD_ticker_news.json
 """
 
 import json
@@ -30,11 +31,29 @@ load_dotenv()
 BENZINGA_BASE_URL = "https://api.benzinga.com/api/v2/news"
 REQUEST_DELAY     = 1.0   # seconds between API calls
 MAX_PAGE_SIZE     = 100   # articles per request
+TICKER_BATCH_SIZE = 30    # tickers per Benzinga ticker-news request
 
 # Channels used per source type
 STOCK_CHANNELS    = "News"
 GLOBAL_CHANNELS   = "Global,Economics,Markets"
 INDUSTRY_CHANNELS = "Healthcare,Technology,Energy,Finance,Industrials,ConsumerGoods"
+
+# S&P 500 watchlist — top ~150 by market cap
+# Benzinga ticker-filtered news will only tag articles that mention these symbols
+SP500_WATCHLIST = [
+    "AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","BRK.B","AVGO","JPM",
+    "LLY","UNH","V","XOM","MA","COST","HD","PG","ORCL","WMT","BAC","ABBV",
+    "NFLX","AMD","KO","CRM","CVX","MRK","ADBE","PEP","TMO","MCD","CSCO",
+    "ABT","ACN","LIN","DHR","TXN","WFC","PM","INTU","NEE","AMGN","IBM","RTX",
+    "QCOM","SPGI","LOW","ISRG","GS","CAT","MS","BKNG","NOW","ELV","PFE",
+    "AMAT","MDT","T","DE","GILD","AXP","SYK","VRTX","MDLZ","C","ADI","MU",
+    "ETN","SCHW","BMY","CB","PANW","ZTS","BSX","REGN","MMC","LRCX","AON",
+    "PLD","COP","SO","DUK","ICE","APH","MCO","SHW","ITW","NOC","HUM","TGT",
+    "USB","PH","KLAC","CME","EMR","NSC","FCX","BDX","FI","ROP","MAR","HCA",
+    "MO","TJX","EOG","AIG","PSA","GD","CL","EW","F","GM","UBER","ABNB",
+    "CRWD","SNOW","COIN","PLTR","SOFI","RBLX","RIVN","LCID","NIO","BIDU",
+    "JNJ","GE","HON","MMM","BA","DIS","SBUX","NKE","PYPL","SQ","SHOP",
+]
 
 # ──────────────────────────────────────────────────────────────
 # Scoring: keyword lists
@@ -109,12 +128,15 @@ def score_article(article: dict, date_str: str) -> dict:
     publisher = article.get("source") or article.get("author") or ""
     url       = article.get("url") or article.get("link") or ""
 
-    # Tickers: Benzinga returns list of dicts [{"name": "AAPL", ...}] or plain strings
-    raw_tickers = article.get("tickers") or []
-    if raw_tickers and isinstance(raw_tickers[0], dict):
-        tickers = [t.get("name", "") for t in raw_tickers]
+    # Benzinga returns tickers in "stocks": [{"name": "AAPL", "exchange": "NASDAQ"}, ...]
+    # Fallback to legacy "tickers" field for backwards compatibility.
+    raw_stocks = article.get("stocks") or article.get("tickers") or []
+    if raw_stocks and isinstance(raw_stocks[0], dict):
+        tickers = [t.get("name", "").lstrip("$") for t in raw_stocks]
     else:
-        tickers = list(raw_tickers)
+        tickers = [str(t).lstrip("$") for t in raw_stocks]
+    # Keep only clean equity-like symbols (1–5 uppercase letters, no crypto junk)
+    tickers = [t for t in tickers if t and t.isalpha() and t.isupper() and 1 <= len(t) <= 5]
 
     # keyword_score
     keyword_hits  = [kw for kw in ALL_IMPACT_KEYWORDS if kw in title]
@@ -267,6 +289,95 @@ class Stage1DataCollector:
 
         return articles
 
+    def _fetch_benzinga_by_tickers(self, date_str: str, tickers: list[str]) -> list[dict] | None:
+        """
+        Fetch articles from Benzinga filtered by a list of ticker symbols.
+        Uses the `tickers` query param instead of `channels`.
+        Returns list[dict] on success, None on HTTP error.
+        """
+        params = {
+            "token":         self.api_key,
+            "displayOutput": "full",
+            "dateFrom":      date_str,
+            "dateTo":        date_str,
+            "tickers":       ",".join(tickers),
+            "pageSize":      MAX_PAGE_SIZE,
+            "page":          0,
+        }
+        headers  = {"accept": "application/json"}
+        articles = []
+        seen_urls: set[str] = set()
+
+        while True:
+            try:
+                resp = requests.get(BENZINGA_BASE_URL, params=params, headers=headers, timeout=30)
+                if resp.status_code != 200:
+                    print(f"  [WARN] Benzinga HTTP {resp.status_code} for {date_str} tickers-batch")
+                    return None
+                if not resp.text.strip():
+                    return None
+                page_articles = resp.json() or []
+            except Exception as e:
+                print(f"  [ERROR] Benzinga ticker-news fetch failed ({date_str}): {e}")
+                return None
+
+            if not page_articles:
+                break
+
+            for art in page_articles:
+                url = art.get("url") or art.get("link") or ""
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    articles.append(art)
+                elif not url:
+                    articles.append(art)
+
+            if len(page_articles) < MAX_PAGE_SIZE:
+                break
+
+            params["page"] += 1
+            time.sleep(REQUEST_DELAY)
+
+        return articles
+
+    def _collect_ticker_news(self, date_str: str, watchlist: list[str]) -> list[dict]:
+        """
+        Fetch and score ticker-tagged news for the given watchlist.
+        Batches watchlist into groups of TICKER_BATCH_SIZE.
+        Deduplicates by URL across batches.
+        Caches result as ticker_news.
+        """
+        cached = self._load_cache(date_str, "ticker_news")
+        if cached is not None:
+            print(f"  [CACHE] {date_str} ticker_news: {len(cached)} rows")
+            return cached
+
+        all_articles: list[dict] = []
+        seen_urls: set[str] = set()
+
+        batches = [watchlist[i:i + TICKER_BATCH_SIZE] for i in range(0, len(watchlist), TICKER_BATCH_SIZE)]
+        print(f"  [API]   {date_str} ticker_news: fetching {len(batches)} batches × {TICKER_BATCH_SIZE} tickers...")
+
+        for batch in batches:
+            raw = self._fetch_benzinga_by_tickers(date_str, batch)
+            if raw is None:
+                continue
+            for art in raw:
+                url = art.get("url") or art.get("link") or ""
+                if url and url in seen_urls:
+                    continue
+                if url:
+                    seen_urls.add(url)
+                all_articles.append(art)
+            time.sleep(REQUEST_DELAY)
+
+        rows = [score_article(art, date_str) for art in all_articles]
+        print(f"  [API]   {date_str} ticker_news: {len(rows)} unique articles")
+
+        if rows:
+            self._save_cache(date_str, "ticker_news", rows)
+        return rows
+
     def debug_raw(self, date: str) -> None:
         """
         Print the raw Benzinga API response for one date (stock_news only).
@@ -347,16 +458,18 @@ class Stage1DataCollector:
 
     # ── Public API ────────────────────────────────────────────
 
-    def collect(self, date: str, save_csv: bool = False) -> dict[str, pd.DataFrame]:
+    def collect(self, date: str, save_csv: bool = False,
+                watchlist: list[str] | None = None) -> dict[str, pd.DataFrame]:
         """
-        Collect all three news sources for a single date.
+        Collect all four news sources for a single date.
 
         Args:
-            date:     'YYYY-MM-DD'
-            save_csv: If True, write each source to {csv_dir}/{date}_{source}.csv
+            date:      'YYYY-MM-DD'
+            save_csv:  If True, write each source to {csv_dir}/{date}_{source}.csv
+            watchlist: Ticker list for ticker_news fetch (default: SP500_WATCHLIST)
 
         Returns:
-            {'stock_news': DataFrame, 'global_news': DataFrame, 'industry_news': DataFrame}
+            {'stock_news': df, 'global_news': df, 'industry_news': df, 'ticker_news': df}
             Each DataFrame is sorted by composite_score descending.
         """
         result = {}
@@ -367,12 +480,21 @@ class Stage1DataCollector:
                 df = df.sort_values("composite_score", ascending=False).reset_index(drop=True)
             result[source] = df
 
+        # Ticker-specific news (Option B: Benzinga tickers= param)
+        wl   = watchlist if watchlist is not None else SP500_WATCHLIST
+        rows = self._collect_ticker_news(date, wl)
+        df   = pd.DataFrame(rows)
+        if not df.empty:
+            df = df.sort_values("composite_score", ascending=False).reset_index(drop=True)
+        result["ticker_news"] = df
+
         if save_csv:
             self._export_csv(result, date)
 
         return result
 
-    def collect_range(self, start_date: str, end_date: str, save_csv: bool = False) -> dict[str, pd.DataFrame]:
+    def collect_range(self, start_date: str, end_date: str, save_csv: bool = False,
+                      watchlist: list[str] | None = None) -> dict[str, pd.DataFrame]:
         """
         Collect all three news sources across a date range (max 3 months).
 
@@ -397,12 +519,13 @@ class Stage1DataCollector:
                 f"Benzinga history is limited to ~3 months."
             )
 
-        all_frames: dict[str, list[pd.DataFrame]] = {s: [] for s in self.SOURCE_CHANNELS}
+        all_sources = list(self.SOURCE_CHANNELS) + ["ticker_news"]
+        all_frames: dict[str, list[pd.DataFrame]] = {s: [] for s in all_sources}
 
         current = start
         while current <= end:
             date_str = current.strftime("%Y-%m-%d")
-            daily    = self.collect(date_str)
+            daily    = self.collect(date_str, watchlist=watchlist)
             for source, df in daily.items():
                 if not df.empty:
                     all_frames[source].append(df)

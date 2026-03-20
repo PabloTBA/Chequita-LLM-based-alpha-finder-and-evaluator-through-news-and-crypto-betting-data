@@ -91,7 +91,7 @@ The system is implemented as a linear pipeline of stages. Each stage consumes th
 | `data_collector` | Orchestrates all API scraping with per-date caching; delegates to source-specific clients |
 | `prediction_market_client` | Fetches prediction market event probabilities and bet volumes from chosen API (Kalshi or Polymarket — **TBD**) |
 | `rag_store` | ChromaDB wrapper; persistent across runs; exposes insert(articles) and retrieve(ticker, k=3) |
-| `llm_client` | Local Qwen2.5-7B wrapper; enforces structured JSON output; retries up to 3× on parse failure; marks ticker "watch" after exhausted retries |
+| `llm_client` | Local Qwen3-8B wrapper; enforces structured JSON output; retries up to 3× on parse failure; marks ticker "watch" after exhausted retries |
 | `news_summarizer` | Generates daily LLM summary of last 7–14 days of news for use as screener context |
 | `ohlcv_fetcher` | yfinance integration; fetches 2 years of daily OHLCV; computes summary features (20-day return, RSI, ATR, 52-week proximity, volume ratio) |
 | `macro_screener` | Runs macro filter LLM call; returns favored sectors, avoid sectors, active macro risks |
@@ -104,7 +104,7 @@ The system is implemented as a linear pipeline of stages. Each stage consumes th
 
 ### Key Technical Decisions
 
-- **LLM**: Qwen2.5-7B running locally (via Ollama or llama.cpp). All LLM calls use structured JSON output mode. Parse failures trigger retry up to 3×.
+- **LLM**: Qwen3-8B running locally (via Ollama or llama.cpp). All LLM calls use structured JSON output mode. Parse failures trigger retry up to 3×.
 - **Vector Store**: ChromaDB, persistent on disk. Built incrementally — articles are inserted on scrape and never re-embedded if already present (deduplicated by article URL or ID).
 - **RAG Retrieval**: Max 3 chunks per ticker per call to control context window size.
 - **Pre-filter before LLM shortlisting**: Top 50 tickers by composite news score (keyword score × 3 + ticker mentions × 2 + publisher trust + recency) are passed to the LLM. The LLM picks 20 from this set.
@@ -165,15 +165,15 @@ Tests should verify the external behavior of a module given defined inputs — n
 - **Live paper trading simulation**: No connection to a simulated brokerage environment.
 - **Web UI or dashboard**: Output is a Markdown file. No frontend.
 - **Multi-user support**: Single-user local installation only.
-- **Model fine-tuning**: Qwen2.5-7B is used as-is. No fine-tuning on financial data.
+- **Model fine-tuning**: Qwen3-8B is used as-is. No fine-tuning on financial data.
 - **Women's or other market prediction models**: March Madness predictor already in the repo is a separate, independent module and is not integrated into this pipeline.
 
 ---
 
 ## Further Notes
 
-- **Cost profile**: All LLM inference is local (Qwen2.5-7B via Ollama or llama.cpp). Only costs are API calls to news sources and yfinance (free tier). The system is designed to run on a consumer GPU or CPU with sufficient RAM.
-- **7B model quality caveat**: Qwen2.5-7B is capable but will produce lower-quality reasoning on complex financial prompts compared to larger models. Mitigation: structured output enforcement, retry logic, hard quantitative floors before LLM review, and small context windows per call (≤ 4K tokens per ticker call).
+- **Cost profile**: All LLM inference is local (Qwen3-8B via Ollama or llama.cpp). Only costs are API calls to news sources and yfinance (free tier). The system is designed to run on a consumer GPU or CPU with sufficient RAM.
+- **8B model quality caveat**: Qwen3-8B is capable but will produce lower-quality reasoning on complex financial prompts compared to larger models. Mitigation: structured output enforcement, retry logic, hard quantitative floors before LLM review, and small context windows per call (≤ 4K tokens per ticker call).
 - **3-month news vs. 2-year backtest asymmetry**: The news corpus drives screener and regime inputs. The backtest uses 2 years of price history. These are intentionally decoupled — the screener finds *current* opportunity, the backtest validates *historical* strategy viability.
 - **Existing codebase reuse**: `stock_news.py`, `global_news.py`, `industry_news.py`, and `dataset_curator.py` already implement the news fetch + composite scoring pipeline. These should be refactored into the `data_collector` module rather than rebuilt. The composite score they produce feeds directly into the pre-filter step.
 - **Recommended run time**: Pre-market (7:00–9:00 AM ET) for maximum news freshness and time to review the report before the open.

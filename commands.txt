@@ -1,3 +1,5 @@
 python -m pytest test_stage1_data_collector.py -v
 
-python Stage1DataCollector.py
+python Stage1DataCollector.py -no_csv
+
+python -m pytest test_ohlcv_fetcher.py -v

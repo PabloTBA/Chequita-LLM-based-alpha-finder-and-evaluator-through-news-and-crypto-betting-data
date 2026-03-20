@@ -1,0 +1,58 @@
+[
+  {
+    "date": "2026-01-24",
+    "title": "Gene Munster Says C-Suite Can't Discuss Openly About AI Job Cuts After Anthropic CEO Warns Unemployment Could Hit 10%: 'Hard To Talk About'",
+    "url": "https://www.benzinga.com/markets/tech/26/01/50115848/gene-munster-says-c-suite-cant-discuss-openly-about-ai-job-cuts-after-anthropic-ceo-warns-unemployment-could-hit-10-hard-to-talk-about",
+    "publisher": "Ananya Gairola",
+    "tickers": "AMZN, C, ERIC, JPM, TSLA",
+    "keywords_matched": "ceo, war, unemployment",
+    "catalyst_type": "Mixed",
+    "keyword_score": 3,
+    "ticker_score": 5,
+    "publisher_score": 0,
+    "recency_score": 0,
+    "composite_score": 19
+  },
+  {
+    "date": "2026-01-24",
+    "title": "Gene Munster Says C-Suite Can't Discuss Openly About AI Job Cuts After Anthropic CEO Warns Unemployment Could Hit 10%: 'Hard To Talk About'",
+    "url": "https://www.benzinga.com/markets/tech/26/01/50115942/gene-munster-says-c-suite-cant-discuss-openly-about-ai-job-cuts-after-anthropic-ceo-warns-unemployment-could-hit-10-hard-to-talk-about",
+    "publisher": "Ananya Gairola",
+    "tickers": "AMZN, C, ERIC, JPM, TSLA",
+    "keywords_matched": "ceo, war, unemployment",
+    "catalyst_type": "Mixed",
+    "keyword_score": 3,
+    "ticker_score": 5,
+    "publisher_score": 0,
+    "recency_score": 0,
+    "composite_score": 19
+  },
+  {
+    "date": "2026-01-24",
+    "title": "Uber CEO Once Called Bitcoin A 'Proven Commodity,' But Found These Cryptos More 'Practical' For This Reason",
+    "url": "https://www.benzinga.com/crypto/cryptocurrency/26/01/50116712/uber-ceo-once-called-bitcoin-a-proven-commodity-but-found-these-cryptos-more-practical-for-this-reason",
+    "publisher": "Aniket Verma",
+    "tickers": "BTC, DOGE, ZEC, META, UBER, V",
+    "keywords_matched": "ceo",
+    "catalyst_type": "Corporate Event",
+    "keyword_score": 1,
+    "ticker_score": 6,
+    "publisher_score": 0,
+    "recency_score": 0,
+    "composite_score": 15
+  },
+  {
+    "date": "2026-01-24",
+    "title": "Libya Signs 25-Year Oil Deal Worth Billions With TotalEnergies, ConocoPhillips",
+    "url": "https://www.benzinga.com/markets/equities/26/01/50116898/libya-signs-25-year-oil-deal-worth-billions-with-totalenergies-conocophillips",
+    "publisher": "Nabaparna Bhattacharya",
+    "tickers": "COP, CVX, TTE",
+    "keywords_matched": "deal",
+    "catalyst_type": "Corporate Event",
+    "keyword_score": 1,
+    "ticker_score": 3,
+    "publisher_score": 0,
+    "recency_score": 0,
+    "composite_score": 9
+  }
+]
