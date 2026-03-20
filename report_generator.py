@@ -57,6 +57,7 @@ class ReportGenerator:
             self._strategy_section(pipeline_output),
             self._diagnostic_section(pipeline_output),
             self._backtest_section(pipeline_output),
+            self._monte_carlo_section(pipeline_output),
         ]
 
         with open(filepath, "w", encoding="utf-8") as f:
@@ -151,13 +152,20 @@ class ReportGenerator:
         for s in strategies:
             params = s.get("adjusted_params", {})
             adj    = s.get("llm_adjustments", [])
+            sig    = s.get("current_signal", {})
             blocks += [
                 f"### {s['ticker']} — {s['strategy']}",
                 "",
                 f"**Regime:** {s.get('regime', 'N/A')}  ",
                 f"**Reasoning:** {s.get('reasoning', '')}",
                 "",
-                "**Adjusted parameters:**",
+                "#### Strategy Mechanics",
+                "",
+            ]
+            blocks += _render_mechanics(s["strategy"], params)
+            blocks += [
+                "",
+                "#### Adjusted Parameters",
                 "",
                 "| Parameter | Value |",
                 "|-----------|-------|",
@@ -168,6 +176,42 @@ class ReportGenerator:
                 blocks += ["", "**LLM adjustments:**", ""]
                 for note in adj:
                     blocks.append(f"- {note}")
+            # Current signal status
+            blocks += ["", "#### Current Entry Signal (as of run date)", ""]
+            if sig.get("signal_active") is True:
+                blocks.append("**Status: ✅ ACTIVE — entry condition met on latest bar**")
+            elif sig.get("signal_active") is False:
+                blocks.append("**Status: ⏸ INACTIVE — entry condition not met**")
+            else:
+                blocks.append("**Status: N/A**")
+            if sig.get("details"):
+                blocks.append(f"```\n{sig['details']}\n```")
+            # Trade setup — only shown when signal is active
+            setup = sig.get("setup")
+            if setup:
+                blocks += [
+                    "",
+                    "#### Trade Setup",
+                    "",
+                    "| | Value |",
+                    "|---|-------|",
+                    f"| Suggested entry | Market order at next open (~${setup['entry_price']:,.2f}) |",
+                    f"| Stop loss | ${setup['stop_price']:,.2f}  "
+                    f"(entry − {params.get('stop_loss_atr', '?')} × ATR₁₄ ${setup['current_atr']:,.2f}) |",
+                    f"| Stop distance | ${setup['stop_dist']:,.2f} |",
+                    f"| Position size | {setup['position_size']:,} shares |",
+                    f"| Dollar risk | ${setup['dollar_risk']:,.0f}  (1% of portfolio) |",
+                    f"| Current ATR₁₄ | ${setup['current_atr']:,.2f} |",
+                ]
+                if setup.get("current_ma"):
+                    ma_label = f"{params.get('ma_exit_period', '?')}-day MA" if s["strategy"] == "Momentum" else f"{params.get('bb_period', '?')}-day SMA (middle BB)"
+                    blocks.append(f"| {ma_label} | ${setup['current_ma']:,.2f} |")
+                if setup.get("target"):
+                    pot = setup.get("potential_gain", 0)
+                    blocks.append(
+                        f"| Target (mean-reversion) | ${setup['target']:,.2f}  "
+                        f"(potential gain ~${pot:,.0f}) |"
+                    )
             blocks.append("")
         return "\n".join(blocks)
 
@@ -339,6 +383,125 @@ class ReportGenerator:
             blocks.append("")
 
         return "\n".join(blocks)
+
+    @staticmethod
+    def _monte_carlo_section(po: dict) -> str:
+        monte_carlos = po.get("monte_carlos", [])
+        blocks = ["## Monte Carlo Stress Test", ""]
+
+        if not monte_carlos:
+            blocks.append("_No Monte Carlo results — no strategies passed diagnostics._")
+            return "\n".join(blocks)
+
+        for mc in monte_carlos:
+            ticker = mc.get("ticker", "Unknown")
+            blocks += [
+                f"### {ticker}",
+                "",
+                "#### Outcome Distribution (10,000 simulations)",
+                "",
+                "| Metric | P5 | Median | P95 |",
+                "|--------|----|--------|-----|",
+                f"| Final Portfolio ($) "
+                f"| {mc.get('p5_final', 0):,.0f} "
+                f"| {mc.get('p50_final', 0):,.0f} "
+                f"| {mc.get('p95_final', 0):,.0f} |",
+                f"| Sharpe Ratio "
+                f"| {mc.get('p5_sharpe', 0):.3f} "
+                f"| {mc.get('p50_sharpe', 0):.3f} "
+                f"| {mc.get('p95_sharpe', 0):.3f} |",
+                f"| Win Rate "
+                f"| {mc.get('p5_win_rate', 0):.1%} "
+                f"| {mc.get('p50_win_rate', 0):.1%} "
+                f"| {mc.get('p95_win_rate', 0):.1%} |",
+                "",
+                "#### Risk Metrics",
+                "",
+                "| Metric | Value |",
+                "|--------|-------|",
+                f"| P(Ruin) — equity falls >40% | {mc.get('p_ruin', 0):.2%} |",
+                f"| P95 Max Drawdown | {mc.get('p95_max_drawdown', 0):.2%} |",
+                f"| Median CAGR | {mc.get('median_cagr', 0):.2%} |",
+                f"| P95 Max Consecutive Losses | {mc.get('p95_max_consec_losses', 0)} |",
+                f"| Optimal Kelly Fraction | {mc.get('kelly_fraction', 0):.3f} |",
+                "",
+                "#### Ruin Analysis",
+                "",
+                "| Metric | Value |",
+                "|--------|-------|",
+                f"| Median Trade at First Ruin | {mc.get('median_time_to_ruin') or 'N/A'} |",
+                f"| Mean Portfolio at Ruin | "
+                f"{'${:,.0f}'.format(mc['ruin_severity']) if mc.get('ruin_severity') is not None else 'N/A'} |",
+                "",
+                "#### Equity Confidence Band",
+                "",
+                "| Trade # | P5 ($) | Median ($) | P95 ($) |",
+                "|---------|--------|------------|---------|",
+            ]
+            for entry in mc.get("equity_band", []):
+                blocks.append(
+                    f"| {entry['step']} "
+                    f"| {entry['p5']:,.0f} "
+                    f"| {entry['p50']:,.0f} "
+                    f"| {entry['p95']:,.0f} |"
+                )
+            blocks.append("")
+
+        return "\n".join(blocks)
+
+
+# ── strategy mechanics renderer ───────────────────────────────────────────────
+
+def _render_mechanics(strategy: str, params: dict) -> list[str]:
+    """Return plain-English lines describing entry/exit/sizing rules with params filled in."""
+    lines = []
+    if strategy == "Momentum":
+        el  = params.get("entry_lookback", "N")
+        vm  = params.get("volume_multiplier", "N")
+        sl  = params.get("stop_loss_atr", "N")
+        ts  = params.get("trailing_stop_atr", "N")
+        ma  = params.get("ma_exit_period", "N")
+        mh  = params.get("max_holding_days", "N")
+        lines += [
+            "**Order type:** Market order at next session open.",
+            "",
+            "**Entry (both conditions required):**",
+            f"- Price breakout: Close > {el}-day rolling high (prior session close)",
+            f"- Volume confirmation: Volume > {vm}× 20-day average volume",
+            "",
+            f"**Position sizing:** 1% portfolio risk ÷ ({sl} × ATR₁₄) = shares to buy",
+            "",
+            "**Exit rules (checked in priority order each day):**",
+            f"1. **Hard stop loss** — Close < entry price − {sl} × ATR₁₄",
+            f"2. **Trailing stop** — Close < highest close since entry − {ts} × ATR₁₄",
+            f"3. **MA exit** — Close < {ma}-day simple moving average",
+            f"4. **Max holding** — Force exit after {mh} trading days",
+        ]
+    elif strategy == "Mean-Reversion":
+        re_ = params.get("rsi_entry_threshold", "N")
+        rx  = params.get("rsi_exit_threshold", "N")
+        bp  = params.get("bb_period", "N")
+        bs  = params.get("bb_std", "N")
+        sl  = params.get("stop_loss_atr", "N")
+        mh  = params.get("max_holding_days", "N")
+        lines += [
+            "**Order type:** Market order at next session open.",
+            "",
+            "**Entry (both conditions required):**",
+            f"- RSI(14) < {re_} (oversold)",
+            f"- Close ≤ lower Bollinger Band ({bp}-day MA − {bs}σ)",
+            "",
+            f"**Position sizing:** 1% portfolio risk ÷ ({sl} × ATR₁₄) = shares to buy",
+            "",
+            "**Exit rules (checked in priority order each day):**",
+            f"1. **Hard stop loss** — Close < entry price − {sl} × ATR₁₄",
+            f"2. **RSI exit** — RSI(14) > {rx} (overbought)",
+            f"3. **MA exit** — Close ≥ {bp}-day SMA (middle Bollinger Band = mean-reversion target)",
+            f"4. **Max holding** — Force exit after {mh} trading days",
+        ]
+    else:
+        lines.append(f"_Mechanics not defined for strategy type: {strategy}_")
+    return lines
 
 
 # ── math helpers ──────────────────────────────────────────────────────────────

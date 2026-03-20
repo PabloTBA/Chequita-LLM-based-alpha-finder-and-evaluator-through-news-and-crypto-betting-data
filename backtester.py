@@ -227,6 +227,155 @@ class Backtester:
 
         return trades
 
+    # ── current signal ────────────────────────────────────────────────────────
+
+    def signal_status(
+        self,
+        strategy_type:     str,
+        ohlcv:             pd.DataFrame,
+        params:            dict,
+        initial_portfolio: float = 100_000.0,
+    ) -> dict:
+        """
+        Check whether the entry signal is active on the most recent bar and,
+        if so, compute the full trade setup (entry, stop, size, risk).
+
+        Returns
+        -------
+        dict with keys: signal_active (bool), details (str), setup (dict or None)
+        """
+        try:
+            if strategy_type == "Momentum":
+                return self._momentum_signal(ohlcv, params, initial_portfolio)
+            return self._mean_rev_signal(ohlcv, params, initial_portfolio)
+        except Exception as e:
+            return {"signal_active": None, "details": f"Signal check failed: {e}", "setup": None}
+
+    def _momentum_signal(
+        self, ohlcv: pd.DataFrame, params: dict, portfolio: float
+    ) -> dict:
+        close  = ohlcv["Close"].astype(float)
+        high   = ohlcv["High"].astype(float)
+        low    = ohlcv["Low"].astype(float)
+        volume = ohlcv["Volume"].astype(float)
+
+        entry_lookback = params["entry_lookback"]
+        vol_multiplier = params["volume_multiplier"]
+        stop_loss_atr  = params["stop_loss_atr"]
+        ma_period      = params["ma_exit_period"]
+
+        atr          = self._atr(high, low, close)
+        rolling_high = close.rolling(entry_lookback).max().shift(1)
+        vol_ma       = volume.rolling(20).mean().shift(1)
+        ma           = close.rolling(ma_period).mean()
+
+        c   = float(close.iloc[-1])
+        a   = float(atr.iloc[-1])   if not pd.isna(atr.iloc[-1])          else 0.0
+        rh  = float(rolling_high.iloc[-1]) if not pd.isna(rolling_high.iloc[-1]) else float("inf")
+        v   = float(volume.iloc[-1])
+        vm  = float(vol_ma.iloc[-1]) if not pd.isna(vol_ma.iloc[-1])       else 0.0
+        m   = float(ma.iloc[-1])     if not pd.isna(ma.iloc[-1])           else 0.0
+
+        breakout  = c > rh
+        vol_ok    = v > vol_multiplier * vm
+        active    = breakout and vol_ok
+
+        setup = None
+        if active and a > 0:
+            stop_dist   = stop_loss_atr * a
+            pos_size    = int((portfolio * RISK_PER_TRADE) / stop_dist)
+            stop_price  = c - stop_dist
+            dollar_risk = portfolio * RISK_PER_TRADE
+            setup = {
+                "entry_price":  c,
+                "stop_price":   stop_price,
+                "stop_dist":    stop_dist,
+                "position_size": pos_size,
+                "dollar_risk":  dollar_risk,
+                "current_atr":  a,
+                "current_ma":   m,
+                "target":       None,   # momentum has no fixed target
+            }
+
+        return {
+            "signal_active":    active,
+            "close":            c,
+            "rolling_high":     rh,
+            "volume":           v,
+            "vol_threshold":    vol_multiplier * vm,
+            "breakout":         breakout,
+            "volume_confirmed": vol_ok,
+            "setup":            setup,
+            "details": (
+                f"Close {c:.2f} {'>' if breakout else '<='} {entry_lookback}d high {rh:.2f}"
+                f" | Volume {v:,.0f} {'>' if vol_ok else '<='} "
+                f"{vol_multiplier}× avg {vol_multiplier * vm:,.0f}"
+            ),
+        }
+
+    def _mean_rev_signal(
+        self, ohlcv: pd.DataFrame, params: dict, portfolio: float
+    ) -> dict:
+        close = ohlcv["Close"].astype(float)
+        high  = ohlcv["High"].astype(float)
+        low   = ohlcv["Low"].astype(float)
+
+        rsi_entry   = params["rsi_entry_threshold"]
+        bb_period   = params["bb_period"]
+        bb_std_mult = params["bb_std"]
+        stop_atr    = params["stop_loss_atr"]
+
+        atr      = self._atr(high, low, close)
+        rsi_ser  = self._rsi(close)
+        bb_ma    = close.rolling(bb_period).mean()
+        bb_std   = close.rolling(bb_period).std(ddof=1)
+        lower_bb = bb_ma - bb_std_mult * bb_std
+
+        c   = float(close.iloc[-1])
+        a   = float(atr.iloc[-1])     if not pd.isna(atr.iloc[-1])     else 0.0
+        r   = float(rsi_ser.iloc[-1]) if not pd.isna(rsi_ser.iloc[-1]) else 50.0
+        lb  = float(lower_bb.iloc[-1]) if not pd.isna(lower_bb.iloc[-1]) else -float("inf")
+        mid = float(bb_ma.iloc[-1])    if not pd.isna(bb_ma.iloc[-1])    else float("inf")
+
+        oversold = r < rsi_entry
+        below_bb = c <= lb
+        active   = oversold and below_bb
+
+        setup = None
+        if active and a > 0:
+            stop_dist   = stop_atr * a
+            pos_size    = int((portfolio * RISK_PER_TRADE) / stop_dist)
+            stop_price  = c - stop_dist
+            dollar_risk = portfolio * RISK_PER_TRADE
+            pot_gain    = (mid - c) * pos_size if mid > c else 0.0
+            setup = {
+                "entry_price":   c,
+                "stop_price":    stop_price,
+                "stop_dist":     stop_dist,
+                "position_size": pos_size,
+                "dollar_risk":   dollar_risk,
+                "current_atr":   a,
+                "current_ma":    mid,
+                "target":        mid,        # middle BB = mean-reversion target
+                "potential_gain": pot_gain,
+            }
+
+        return {
+            "signal_active": active,
+            "close":         c,
+            "rsi":           r,
+            "rsi_threshold": rsi_entry,
+            "lower_bb":      lb,
+            "middle_bb":     mid,
+            "oversold":      oversold,
+            "below_bb":      below_bb,
+            "setup":         setup,
+            "details": (
+                f"RSI {r:.1f} {'<' if oversold else '>='} {rsi_entry}"
+                f" | Close {c:.2f} {'<=' if below_bb else '>'} Lower BB {lb:.2f}"
+            ),
+        }
+
     # ── equity curve & summary ────────────────────────────────────────────────
 
     def _build_equity_curve(self, ohlcv: pd.DataFrame, trade_log: list[dict]) -> pd.Series:

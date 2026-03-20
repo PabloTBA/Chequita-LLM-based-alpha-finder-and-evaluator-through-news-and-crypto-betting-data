@@ -125,6 +125,8 @@ class PipelineOrchestrator:
             tickers,
         )
         shortlisted = shortlisted or tickers
+        max_tickers = self._cfg.get("max_tickers", 15)
+        shortlisted = shortlisted[:max_tickers]
 
         # ── Stage 8: verdicts ─────────────────────────────────────────────────
         ticker_verdicts = self._safe(
@@ -141,10 +143,11 @@ class PipelineOrchestrator:
             [],
         )
 
-        # ── Stage 10: per-ticker strategy / backtest / diagnostics ────────────
-        strategies:  list[dict] = []
-        backtests:   list[dict] = []
-        diagnostics: list[dict] = []
+        # ── Stage 10: per-ticker strategy / backtest / diagnostics / MC ─────
+        strategies:    list[dict] = []
+        backtests:     list[dict] = []
+        diagnostics:   list[dict] = []
+        monte_carlos:  list[dict] = []
 
         for regime in (regimes or []):
             ticker  = regime["ticker"]
@@ -156,6 +159,19 @@ class PipelineOrchestrator:
                 lambda _t=ticker, _r=regime, _f=feats: m["selector"].select(_t, _r, _f, macro),
                 None,
             )
+
+            # Attach current signal status so the report can show live entry conditions
+            if strategy and ohlcv is not None:
+                _portfolio = self._cfg.get("initial_portfolio", 100_000.0)
+                sig = self._safe(
+                    f"backtester.signal_status({ticker})",
+                    lambda _s=strategy, _o=ohlcv, _p=_portfolio: m["backtester"].signal_status(
+                        _s["strategy"], _o, _s["adjusted_params"], _p
+                    ),
+                    {"signal_active": None, "details": "N/A", "setup": None},
+                )
+                strategy = {**strategy, "current_signal": sig}
+
             if strategy:
                 strategies.append(strategy)
 
@@ -169,11 +185,29 @@ class PipelineOrchestrator:
 
             diagnostic = self._safe(
                 f"diagnostics.run({ticker})",
-                lambda _bt=backtest: m["diagnostics"].run(_bt),
+                lambda _t=ticker, _s=strategy, _bt=backtest: m["diagnostics"].run(
+                    _t,
+                    _s["strategy"] if isinstance(_s, dict) else _s,
+                    _bt["trade_log"],
+                    _bt["returns"],
+                ) if _bt else None,
                 None,
             )
             if diagnostic:
                 diagnostics.append(diagnostic)
+
+            # Monte Carlo — only for strategies that passed diagnostics
+            if diagnostic and diagnostic.get("passed") and backtest:
+                portfolio = self._cfg.get("initial_portfolio", 100_000.0)
+                mc_result = self._safe(
+                    f"monte_carlo.run({ticker})",
+                    lambda _bt=backtest, _p=portfolio: m["monte_carlo"].run(
+                        _bt["trade_log"], _p
+                    ),
+                    None,
+                )
+                if mc_result:
+                    monte_carlos.append({"ticker": ticker, **mc_result})
 
         return self._finish(
             m, run_date, summary, macro,
@@ -182,6 +216,7 @@ class PipelineOrchestrator:
             strategies=strategies,
             diagnostics=diagnostics,
             backtests=backtests,
+            monte_carlos=monte_carlos,
         )
 
     # ── internal helpers ──────────────────────────────────────────────────────
@@ -224,6 +259,7 @@ class PipelineOrchestrator:
         from strategy_selector    import StrategySelector
         from backtester           import Backtester
         from diagnostics_engine   import DiagnosticsEngine
+        from monte_carlo_engine   import MonteCarloEngine
         from report_generator     import ReportGenerator
 
         return {
@@ -244,6 +280,10 @@ class PipelineOrchestrator:
                                 initial_portfolio=cfg.get("initial_portfolio", 100_000.0)
                              ),
             "diagnostics":   DiagnosticsEngine(llm_client=llm),
+            "monte_carlo":   MonteCarloEngine(
+                                n_simulations=cfg.get("mc_simulations", 10_000),
+                                ruin_threshold=cfg.get("mc_ruin_threshold", 0.40),
+                             ),
             "reporter":      ReportGenerator(
                                 output_dir=cfg.get("output_dir", "reports")
                              ),
@@ -254,11 +294,18 @@ class PipelineOrchestrator:
 
 if __name__ == "__main__":
     import sys
+    import argparse
     import ollama
     import os
     from dotenv import load_dotenv
 
     load_dotenv()
+
+    parser = argparse.ArgumentParser(description="MFT Alpha Finder pipeline")
+    parser.add_argument("date",          nargs="?",  default=None,  help="Run date YYYY-MM-DD (default: yesterday UTC+8)")
+    parser.add_argument("--days",        type=int,   default=7,     help="News summary window in days (default: 7, max: 14)")
+    parser.add_argument("--max-tickers", type=int,   default=15,    help="Max tickers to fully analyse (default: 15)")
+    args = parser.parse_args()
 
     def llm(prompt: str) -> str:
         resp = ollama.chat(model="qwen3:8b", messages=[{"role": "user", "content": prompt}])
@@ -270,10 +317,11 @@ if __name__ == "__main__":
         "output_dir":        "reports",
         "cache_dir":         "data/cache",
         "initial_portfolio": 100_000.0,
-        "window_days":       7,
+        "window_days":       min(args.days, 14),
+        "max_tickers":       args.max_tickers,
     }
 
-    date = sys.argv[1] if len(sys.argv) > 1 else None   # optional: python pipeline_orchestrator.py 2026-03-19
+    date = args.date
 
     result = PipelineOrchestrator(config).run(date)
 
@@ -282,4 +330,5 @@ if __name__ == "__main__":
     print(f"Bias   : {result['summary'].get('market_bias', 'n/a')}")
     print(f"Tickers: {len(result['ticker_verdicts'])} verdicts | "
           f"{len(result['backtests'])} backtests | "
-          f"{len(result['diagnostics'])} diagnostics")
+          f"{len(result['diagnostics'])} diagnostics | "
+          f"{len(result['monte_carlos'])} MC sims")

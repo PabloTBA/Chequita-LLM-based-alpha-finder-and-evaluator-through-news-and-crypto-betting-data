@@ -110,6 +110,32 @@ PIPELINE_OUTPUT = {
             },
         },
     ],
+    "monte_carlos": [
+        {
+            "ticker":               "AAPL",
+            "p5_final":             88_000.0,
+            "p50_final":            107_000.0,
+            "p95_final":            131_000.0,
+            "p_ruin":               0.03,
+            "p95_max_drawdown":     0.22,
+            "median_cagr":          0.07,
+            "p5_sharpe":            0.38,
+            "p50_sharpe":           1.15,
+            "p95_sharpe":           2.41,
+            "p5_win_rate":          0.44,
+            "p50_win_rate":         0.58,
+            "p95_win_rate":         0.73,
+            "p95_max_consec_losses": 5,
+            "kelly_fraction":       0.14,
+            "median_time_to_ruin":  None,
+            "ruin_severity":        None,
+            "equity_band": [
+                {"step": i * 2, "p5": 88_000.0 + i * 500,
+                 "p50": 100_000.0 + i * 700, "p95": 115_000.0 + i * 900}
+                for i in range(20)
+            ],
+        }
+    ],
 }
 
 REQUIRED_SECTIONS = [
@@ -120,6 +146,7 @@ REQUIRED_SECTIONS = [
     "## Strategy Parameters",
     "## Diagnostic Results",
     "## Backtest Results",
+    "## Monte Carlo Stress Test",
 ]
 
 
@@ -315,3 +342,37 @@ class TestGraphReadyTables:
 
     def test_return_distribution_present(self, report_text):
         assert "Distribution" in report_text or "distribution" in report_text
+
+
+# ── Cycle 12: Monte Carlo section ─────────────────────────────────────────────
+
+class TestMonteCarloSection:
+    def test_section_heading_present(self, report_text):
+        assert "## Monte Carlo Stress Test" in report_text
+
+    def test_ticker_heading_present(self, report_text):
+        assert "### AAPL" in report_text
+
+    def test_p_ruin_present(self, report_text):
+        assert "P(Ruin)" in report_text or "Ruin" in report_text
+
+    def test_p50_final_equity_present(self, report_text):
+        assert "107,000" in report_text  # p50_final = 107_000
+
+    def test_kelly_fraction_present(self, report_text):
+        assert "Kelly" in report_text
+
+    def test_p50_sharpe_present(self, report_text):
+        assert "1.15" in report_text  # p50_sharpe
+
+    def test_equity_band_table_present(self, report_text):
+        assert "Equity Confidence Band" in report_text
+
+    def test_median_cagr_present(self, report_text):
+        assert "7.00%" in report_text or "7%" in report_text or "CAGR" in report_text
+
+    def test_p95_max_consec_losses_present(self, report_text):
+        assert "5" in report_text  # p95_max_consec_losses
+
+    def test_time_to_ruin_na_when_none(self, report_text):
+        assert "N/A" in report_text  # median_time_to_ruin is None

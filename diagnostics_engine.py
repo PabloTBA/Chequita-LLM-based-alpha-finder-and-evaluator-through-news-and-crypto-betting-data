@@ -31,6 +31,7 @@ SHARPE_FLOOR          = 0.50
 MAX_DD_FLOOR          = 0.30
 WIN_RATE_FLOOR        = 0.35
 WALKFWD_DEGRAD_FLOOR  = 0.50
+MIN_TRADE_COUNT       = 10
 TRADING_DAYS          = 252
 
 
@@ -110,6 +111,10 @@ class DiagnosticsEngine:
         wf = metrics["walk_forward_degradation"]
         if wf > WALKFWD_DEGRAD_FLOOR:
             return False, f"Walk-forward degradation {wf:.1%} exceeds floor {WALKFWD_DEGRAD_FLOOR:.0%}"
+
+        tc = metrics["trade_count"]
+        if tc < MIN_TRADE_COUNT:
+            return False, f"Trade count {tc} below minimum {MIN_TRADE_COUNT} for statistical significance"
 
         return True, None
 

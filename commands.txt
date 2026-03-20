@@ -1,5 +1,1 @@
-python -m pytest test_stage1_data_collector.py -v
-
-python Stage1DataCollector.py -no_csv
-
-python -m pytest test_ohlcv_fetcher.py -v
+python pipeline_orchestrator.py 2026-03-19 --days 7 --max-tickers 5

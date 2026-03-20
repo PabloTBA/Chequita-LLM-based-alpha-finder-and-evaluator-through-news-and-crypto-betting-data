@@ -43,7 +43,17 @@
       "Bash(python -m pytest test/test_report_generator.py -v --tb=short)",
       "Bash(python -m pytest test/test_pipeline_orchestrator.py -v)",
       "Bash(python -m pytest test/ -q)",
-      "Bash(python -m pytest test/test_pipeline_orchestrator.py -q)"
+      "Bash(python -m pytest test/test_pipeline_orchestrator.py -q)",
+      "Bash(python -c \"import matplotlib, numpy; print\\(''deps ok''\\)\")",
+      "Bash(python -m pytest test/test_monte_carlo_engine.py -q --tb=no)",
+      "Bash(python -m pytest test/test_monte_carlo_engine.py -v --tb=short)",
+      "Bash(python -m pytest test/test_monte_carlo_engine.py -q --tb=short)",
+      "Bash(python -m pytest test/test_pipeline_orchestrator.py -q --tb=short)",
+      "Bash(python -m pytest test/test_report_generator.py test/test_pipeline_orchestrator.py -q --tb=short)",
+      "Bash(python -m pytest test/test_diagnostics_engine.py::TestTradeCountFloor -q)",
+      "Bash(python -m pytest test/test_diagnostics_engine.py -q)",
+      "Bash(python -m pytest test/ -q --tb=short)",
+      "Read(//c/Users/panal/Downloads/**)"
     ]
   }
 }

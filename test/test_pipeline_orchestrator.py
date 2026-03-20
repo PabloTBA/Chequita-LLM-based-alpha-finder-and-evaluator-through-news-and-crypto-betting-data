@@ -71,6 +71,16 @@ MOCK_DIAGNOSTIC = {
     "llm_commentary": None,
 }
 
+MOCK_MC = {
+    "p5_final": 95_000.0, "p50_final": 105_000.0, "p95_final": 115_000.0,
+    "p_ruin": 0.02, "p95_max_drawdown": 0.18, "median_cagr": 0.06,
+    "equity_band": [{"step": i, "p5": 95_000.0, "p50": 100_000.0, "p95": 115_000.0} for i in range(20)],
+    "p5_sharpe": 0.4, "p50_sharpe": 1.1, "p95_sharpe": 2.3,
+    "p5_win_rate": 0.45, "p50_win_rate": 0.60, "p95_win_rate": 0.75,
+    "p95_max_consec_losses": 4, "kelly_fraction": 0.12,
+    "median_time_to_ruin": None, "ruin_severity": None,
+}
+
 MOCK_REPORT_PATH = "/tmp/report_2026-03-19_083000.md"
 
 CONFIG = {
@@ -85,13 +95,15 @@ CONFIG = {
 RESULT_REQUIRED_KEYS = {
     "report_path", "run_date", "summary", "macro",
     "ticker_verdicts", "regimes", "strategies", "diagnostics", "backtests",
+    "monte_carlos",
 }
 
 
 def make_mock_modules(report_path: str = MOCK_REPORT_PATH) -> dict:
     mods = {k: MagicMock() for k in (
         "collector", "summarizer", "macro_screener", "screener",
-        "fetcher", "classifier", "selector", "diagnostics", "backtester", "reporter",
+        "fetcher", "classifier", "selector", "diagnostics", "backtester",
+        "monte_carlo", "reporter",
     )}
     mods["collector"].collect_range.return_value      = MOCK_ARTICLES
     mods["summarizer"].summarize.return_value         = MOCK_SUMMARY
@@ -105,6 +117,7 @@ def make_mock_modules(report_path: str = MOCK_REPORT_PATH) -> dict:
     mods["selector"].select.return_value              = MOCK_STRATEGY
     mods["backtester"].run.return_value               = MOCK_BACKTEST
     mods["diagnostics"].run.return_value              = MOCK_DIAGNOSTIC
+    mods["monte_carlo"].run.return_value              = MOCK_MC
     mods["reporter"].generate.return_value            = report_path
     return mods
 
@@ -265,3 +278,34 @@ class TestStageFailure:
         mods["classifier"].classify_all.side_effect = Exception("Classify failed")
         PipelineOrchestrator(CONFIG, _modules=mods).run("2026-03-19")
         mods["reporter"].generate.assert_called_once()
+
+
+# ── Cycle 6: Monte Carlo wiring ───────────────────────────────────────────────
+
+class TestMonteCarlo:
+    def test_monte_carlos_is_list(self):
+        mods = make_mock_modules()
+        r = PipelineOrchestrator(CONFIG, _modules=mods).run("2026-03-19")
+        assert isinstance(r["monte_carlos"], list)
+
+    def test_monte_carlo_called_for_passed_diagnostic(self):
+        mods = make_mock_modules()
+        PipelineOrchestrator(CONFIG, _modules=mods).run("2026-03-19")
+        mods["monte_carlo"].run.assert_called_once()
+
+    def test_monte_carlo_not_called_for_failed_diagnostic(self):
+        mods = make_mock_modules()
+        mods["diagnostics"].run.return_value = {**MOCK_DIAGNOSTIC, "passed": False}
+        PipelineOrchestrator(CONFIG, _modules=mods).run("2026-03-19")
+        mods["monte_carlo"].run.assert_not_called()
+
+    def test_monte_carlo_result_contains_ticker(self):
+        mods = make_mock_modules()
+        r = PipelineOrchestrator(CONFIG, _modules=mods).run("2026-03-19")
+        assert r["monte_carlos"][0]["ticker"] == "AAPL"
+
+    def test_reporter_receives_monte_carlos(self):
+        mods = make_mock_modules()
+        PipelineOrchestrator(CONFIG, _modules=mods).run("2026-03-19")
+        po = mods["reporter"].generate.call_args[0][0]
+        assert "monte_carlos" in po

@@ -45,8 +45,9 @@ HEALTHY_RETURNS = pd.Series(
 )
 
 # Trade logs
-HEALTHY_TRADE_LOG  = [{"pnl": (2.0 if i % 2 == 0 else -1.0)} for i in range(40)]  # 50%
-LOW_WIN_RATE_LOG   = [{"pnl": (10.0 if i % 5 == 0 else -1.0)} for i in range(40)]  # 20%
+HEALTHY_TRADE_LOG  = [{"pnl": (2.0 if i % 2 == 0 else -1.0)} for i in range(40)]  # 50%, 40 trades
+LOW_WIN_RATE_LOG   = [{"pnl": (10.0 if i % 5 == 0 else -1.0)} for i in range(40)]  # 20%, 40 trades
+FEW_TRADES_LOG     = [{"pnl": (1.0 if i % 2 == 0 else -0.5)} for i in range(5)]   # 60% WR, only 5 trades
 
 REQUIRED_KEYS    = {"ticker", "strategy", "passed", "reject_reason", "metrics", "llm_commentary"}
 REQUIRED_METRICS = {"sharpe", "max_drawdown", "win_rate", "walk_forward_degradation", "trade_count"}
@@ -158,7 +159,27 @@ class TestWalkForwardFloor:
         assert r["metrics"]["walk_forward_degradation"] > 0.50
 
 
-# ── Cycle 6: pass case ────────────────────────────────────────────────────────
+# ── Cycle 6: trade count floor ────────────────────────────────────────────────
+
+class TestTradeCountFloor:
+    def test_few_trades_auto_rejects(self):
+        """5 trades passes all other floors but should fail trade count floor."""
+        eng = DiagnosticsEngine()
+        r = eng.run("AAPL", "Momentum", FEW_TRADES_LOG, HEALTHY_RETURNS)
+        assert r["passed"] is False
+
+    def test_few_trades_reject_reason_mentions_trade(self):
+        eng = DiagnosticsEngine()
+        r = eng.run("AAPL", "Momentum", FEW_TRADES_LOG, HEALTHY_RETURNS)
+        assert "trade" in r["reject_reason"].lower()
+
+    def test_trade_count_metric_reflects_low_value(self):
+        eng = DiagnosticsEngine()
+        r = eng.run("AAPL", "Momentum", FEW_TRADES_LOG, HEALTHY_RETURNS)
+        assert r["metrics"]["trade_count"] < 10
+
+
+# ── Cycle 7: pass case ─────────────────────────────────────────────────────────
 
 class TestPassCase:
     def test_healthy_strategy_passes(self):
@@ -172,7 +193,7 @@ class TestPassCase:
         assert r["reject_reason"] is None
 
 
-# ── Cycle 7: LLM behavior ─────────────────────────────────────────────────────
+# ── Cycle 8: LLM behavior ─────────────────────────────────────────────────────
 
 class TestLLMBehavior:
     def test_llm_not_called_on_auto_reject(self):
@@ -204,7 +225,7 @@ class TestLLMBehavior:
         assert r["llm_commentary"] is None
 
 
-# ── Cycle 8: metrics accuracy ─────────────────────────────────────────────────
+# ── Cycle 9: metrics accuracy ─────────────────────────────────────────────────
 
 class TestMetricsAccuracy:
     def test_sharpe_near_zero_for_zero_mean_returns(self):
