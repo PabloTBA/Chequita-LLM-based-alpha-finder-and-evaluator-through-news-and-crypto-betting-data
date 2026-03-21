@@ -33,6 +33,7 @@ _BASE_URL        = "https://gamma-api.polymarket.com/markets"
 _REQUEST_DELAY   = 0.2   # seconds between paginated requests
 _PAGE_SIZE       = 100
 _RESOLVE_WINDOW  = 90    # days — match the news corpus rolling window
+_DEFAULT_MAX_MARKETS = 50  # cap total markets stored to RAG to avoid embedding lag
 
 
 class PredictionMarketClient:
@@ -43,12 +44,14 @@ class PredictionMarketClient:
         categories:            list[str]   = None,
         rag_store:             Any         = None,
         top_n_for_summarizer:  int         = 20,
+        max_markets:           int         = _DEFAULT_MAX_MARKETS,
     ):
         self._cache_dir   = cache_dir
         self._min_volume  = min_volume
         self._categories  = set(categories or ["Economics", "Politics", "Crypto"])
         self._rag_store   = rag_store
         self._top_n       = top_n_for_summarizer
+        self._max_markets = max_markets
         os.makedirs(cache_dir, exist_ok=True)
 
     # ── public ────────────────────────────────────────────────────────────────
@@ -76,6 +79,7 @@ class PredictionMarketClient:
             return []
 
         markets = [self._format(m) for m in raw if self._keep(m)]
+        markets = sorted(markets, key=lambda m: m["volume"], reverse=True)[:self._max_markets]
 
         if not markets:
             print(f"  [API]   {as_of_date} prediction_markets: 0 markets after filtering")

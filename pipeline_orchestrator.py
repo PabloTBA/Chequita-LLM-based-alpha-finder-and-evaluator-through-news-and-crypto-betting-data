@@ -89,7 +89,7 @@ class PipelineOrchestrator:
         print("[Stage 1c] Fetching prediction markets ...")
         markets = self._safe(
             "market_client.fetch",
-            lambda: m["market_client"].fetch(run_date),
+            lambda: m["market_client"].fetch(collect_end),
             [],
         ) or []
 
@@ -421,6 +421,7 @@ class PipelineOrchestrator:
             "market_client": PredictionMarketClient(
                                 cache_dir=cfg.get("cache_dir", "data/cache"),
                                 min_volume=cfg.get("market_min_volume", 100_000.0),
+                                max_markets=cfg.get("market_max_markets", 50),
                                 categories=cfg.get("market_categories",
                                                    ["Economics", "Politics", "Crypto"]),
                                 rag_store=rag,
@@ -442,7 +443,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MFT Alpha Finder pipeline")
     parser.add_argument("date",          nargs="?",  default=None,  help="Run date YYYY-MM-DD (default: yesterday UTC+8)")
     parser.add_argument("--days",        type=int,   default=7,     help="News summary window in days (default: 7, max: 14)")
-    parser.add_argument("--max-tickers", type=int,   default=15,    help="Max tickers to fully analyse (default: 15)")
+    parser.add_argument("--max-tickers", type=int,   default=15,       help="Max tickers to fully analyse (default: 15)")
+    parser.add_argument("--min-volume",  type=float, default=10_000.0, help="Min prediction market volume in USD (default: 10000)")
+    parser.add_argument("--max-markets", type=int,   default=50,       help="Max prediction markets to store and embed (default: 50)")
     args = parser.parse_args()
 
     def llm(prompt: str) -> str:
@@ -457,6 +460,8 @@ if __name__ == "__main__":
         "initial_portfolio": 100_000.0,
         "window_days":       min(args.days, 14),
         "max_tickers":       args.max_tickers,
+        "market_min_volume":  args.min_volume,
+        "market_max_markets": args.max_markets,
     }
 
     date = args.date
