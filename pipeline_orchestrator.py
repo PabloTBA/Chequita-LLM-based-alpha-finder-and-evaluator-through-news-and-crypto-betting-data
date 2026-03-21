@@ -509,12 +509,15 @@ class PipelineOrchestrator:
             "macro":           macro,
             **kwargs,
         }
+        from datetime import datetime as _dt
+        timestamp = _dt.now().strftime("%H%M%S")
         print("[Stage 12] Generating full report ...")
-        report_path = m["reporter"].generate(pipeline_output)
+        report_path   = m["reporter"].generate(pipeline_output, timestamp=timestamp)
         print("[Stage 12] Generating trader summary report ...")
-        m["reporter"].generate_summary(pipeline_output)
+        summary_path  = m["reporter"].generate_summary(pipeline_output, timestamp=timestamp)
         return {
-            "report_path": report_path,
+            "report_path":  report_path,
+            "summary_path": summary_path,
             "run_date":    run_date,
             "summary":     summary,
             "macro":       macro,
@@ -621,8 +624,9 @@ if __name__ == "__main__":
 
     result = PipelineOrchestrator(config).run(date)
 
-    print(f"\nReport : {result['report_path']}")
-    print(f"Date   : {result['run_date']}")
+    print(f"\nReport  : {result['report_path']}")
+    print(f"Summary : {result.get('summary_path', 'n/a')}")
+    print(f"Date    : {result['run_date']}")
     print(f"Bias   : {result['summary'].get('market_bias', 'n/a')}")
     print(f"Tickers: {len(result['ticker_verdicts'])} verdicts | "
           f"{len(result['backtests'])} backtests | "

@@ -29,7 +29,7 @@ class ReportGenerator:
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
 
-    def generate(self, pipeline_output: dict) -> str:
+    def generate(self, pipeline_output: dict, timestamp: str | None = None) -> str:
         """
         Build and write the Markdown report.
 
@@ -44,7 +44,7 @@ class ReportGenerator:
         str — absolute path of the written .md file
         """
         run_date  = pipeline_output.get("run_date", datetime.today().strftime("%Y-%m-%d"))
-        timestamp = datetime.now().strftime("%H%M%S")
+        timestamp = timestamp or datetime.now().strftime("%H%M%S")
         filename  = f"report_{run_date}_{timestamp}.md"
         filepath  = os.path.join(self.output_dir, filename)
 
@@ -66,14 +66,14 @@ class ReportGenerator:
 
         return filepath
 
-    def generate_summary(self, pipeline_output: dict) -> str:
+    def generate_summary(self, pipeline_output: dict, timestamp: str | None = None) -> str:
         """
         Generate a trader-focused summary report containing only tickers
         that passed all 3 stages (backtest → diagnostics → Monte Carlo).
         Ordered by importance to the trader. Numbers preserved for graphing.
         """
         run_date  = pipeline_output.get("run_date", datetime.today().strftime("%Y-%m-%d"))
-        timestamp = datetime.now().strftime("%H%M%S")
+        timestamp = timestamp or datetime.now().strftime("%H%M%S")
         filename  = f"summary_{run_date}_{timestamp}.md"
         filepath  = os.path.join(self.output_dir, filename)
 
