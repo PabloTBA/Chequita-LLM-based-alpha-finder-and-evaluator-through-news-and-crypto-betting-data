@@ -340,9 +340,13 @@ class PipelineOrchestrator:
                 )
                 strategy = {**strategy, "current_signal": sig}
 
+            # Use base_params for backtest to avoid circular LLM tuning —
+            # LLM-adjusted params are only used for the live signal check above.
             backtest = self._safe(
                 f"backtester.run({ticker})",
-                lambda _t=ticker, _s=strategy, _o=ohlcv: m["backtester"].run(_t, _s, _o),
+                lambda _t=ticker, _s=strategy, _o=ohlcv: m["backtester"].run(
+                    _t, {**_s, "adjusted_params": _s.get("base_params", _s["adjusted_params"])}, _o
+                ),
                 None,
             )
 
@@ -605,7 +609,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     def llm(prompt: str) -> str:
-        resp = ollama.chat(model="qwen3:8b", messages=[{"role": "user", "content": prompt}])
+        resp = ollama.chat(model="qwen3:8b", messages=[{"role": "user", "content": prompt}],
+                           options={"temperature": 0.0})
         return resp.message.content if hasattr(resp, "message") else resp["message"]["content"]
 
     config = {

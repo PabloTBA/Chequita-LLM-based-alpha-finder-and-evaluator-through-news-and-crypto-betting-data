@@ -182,9 +182,15 @@ class DiagnosticsEngine:
         is_sharpe  = sharpe(in_sample)
         oos_sharpe = sharpe(oos)
 
-        if is_sharpe <= 0:
-            return 1.0   # already bad in-sample → treat as fully degraded
+        # OOS better than or equal to IS → no degradation (improvement)
+        if oos_sharpe >= is_sharpe:
+            return 0.0
 
+        # IS bad but OOS also bad → fully degraded
+        if is_sharpe <= 0:
+            return 1.0
+
+        # IS positive, OOS worse → graded degradation
         degrad = (is_sharpe - oos_sharpe) / is_sharpe
         return float(np.clip(degrad, 0.0, 1.0))
 

@@ -27,8 +27,8 @@ import json
 # ── PRD base templates ────────────────────────────────────────────────────────
 
 MOMENTUM_BASE: dict = {
-    "entry_lookback":    20,   # days: entry on close > N-day high
-    "volume_multiplier": 1.5,  # volume must be > N × 20-day avg
+    "entry_lookback":    10,   # days: entry on close > N-day high (relaxed from 20 → more entries)
+    "volume_multiplier": 1.2,  # volume must be > N × 20-day avg (relaxed from 1.5 → more entries)
     "trailing_stop_atr": 2.0,  # trailing stop at N × ATR below peak
     "ma_exit_period":    10,   # exit if close < N-day MA
     "stop_loss_atr":     1.5,  # hard stop at N × ATR below entry

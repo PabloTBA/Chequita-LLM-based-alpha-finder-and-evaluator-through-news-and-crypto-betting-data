@@ -1081,10 +1081,11 @@ def _advanced_metrics(returns: pd.Series, trade_log: list[dict], metrics: dict) 
         cagr     = float((1 + returns).prod() ** (TRADING_DAYS / max(len(returns), 1)) - 1)
         max_dd   = metrics.get("max_drawdown", 0.0)
 
-        # Sortino (downside deviation)
+        # Sortino (downside deviation) — capped at 10.0 to prevent artifacts from near-zero downside std
         downside = returns[returns < 0]
-        down_std = float(downside.std(ddof=1)) if len(downside) > 1 else 1e-9
-        sortino  = float(mean_ret / down_std * math.sqrt(TRADING_DAYS)) if down_std > 0 else 0.0
+        down_std = float(downside.std(ddof=1)) if len(downside) > 1 else 0.0
+        sortino  = float(mean_ret / down_std * math.sqrt(TRADING_DAYS)) if down_std > 1e-4 else 0.0
+        sortino  = min(sortino, 10.0)
 
         # Calmar
         calmar = float(cagr / max_dd) if max_dd > 0 else 0.0
