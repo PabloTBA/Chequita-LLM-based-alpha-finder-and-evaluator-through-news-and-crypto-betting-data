@@ -266,6 +266,22 @@ class PipelineOrchestrator:
             {},
         )
 
+        # ── Stage 5b: data integrity check ───────────────────────────────────
+        if ohlcv_raw:
+            close_map = {
+                t: df["Close"].astype(float).round(2)
+                for t, df in ohlcv_raw.items()
+                if df is not None and "Close" in df.columns
+            }
+            ticker_list_check = list(close_map.keys())
+            for i in range(len(ticker_list_check)):
+                for j in range(i + 1, len(ticker_list_check)):
+                    ta, tb = ticker_list_check[i], ticker_list_check[j]
+                    sa, sb = close_map[ta].align(close_map[tb], join="inner")
+                    if len(sa) > 10 and sa.equals(sb):
+                        print(f"  [WARN] Data integrity: {ta} and {tb} have identical Close series — possible yfinance cache collision. {tb} will be dropped.")
+                        ohlcv_raw[tb] = None
+
         # ── Stage 6: compute features ─────────────────────────────────────────
         print(f"[Stage 6] Computing features ...")
         features: dict[str, Any] = {}

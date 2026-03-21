@@ -39,6 +39,8 @@ RISK_PER_TRADE    = 0.01   # 1% of portfolio per trade
 ATR_PERIOD        = 14
 RSI_PERIOD        = 14
 DEFAULT_SLIP_BPS  = 10     # 10 basis points (0.10%) per side — conservative retail estimate
+ANNUAL_RF         = 0.045  # risk-free rate — must match diagnostics_engine.py
+DAILY_RF          = ANNUAL_RF / 252  # T-bill daily return earned on idle (flat) days
 
 
 class Backtester:
@@ -72,7 +74,7 @@ class Backtester:
             trade_log = self._run_mean_reversion(ohlcv, params)
 
         equity_curve = self._build_equity_curve(ohlcv, trade_log)
-        returns      = equity_curve.pct_change().fillna(0.0)
+        returns      = self._build_returns(ohlcv, trade_log, equity_curve)
         summary      = self._summarize(trade_log, equity_curve)
 
         return {
@@ -408,6 +410,35 @@ class Backtester:
             running += trade["pnl"]
             curve.loc[trade["exit_date"]:] = running
         return curve
+
+    def _build_returns(
+        self, ohlcv: pd.DataFrame, trade_log: list[dict], equity_curve: pd.Series
+    ) -> pd.Series:
+        """
+        Daily returns where flat (no-position) days earn DAILY_RF instead of 0.
+
+        Without this, the Sharpe calculation subtracts daily RF from every flat
+        day (return 0 - RF = negative), making a modestly positive strategy look
+        terrible.  When not in position, idle capital earns T-bill rate — so the
+        excess return on those days is exactly zero, not negative.
+        """
+        returns = equity_curve.pct_change().fillna(0.0)
+
+        # Mark every day that falls within an open trade window as "in position"
+        in_position = pd.Series(False, index=ohlcv.index)
+        for trade in trade_log:
+            entry = trade.get("entry_date")
+            exit_ = trade.get("exit_date")
+            if entry is not None and exit_ is not None:
+                try:
+                    in_position.loc[entry:exit_] = True
+                except Exception:
+                    pass
+
+        # Flat days earn daily_rf so Sharpe numerator uses excess over RF only
+        # on invested days — idle cash days contribute zero excess, not negative
+        returns[~in_position] = DAILY_RF
+        return returns
 
     @staticmethod
     def _summarize(trade_log: list[dict], equity_curve: pd.Series) -> dict:
