@@ -336,6 +336,7 @@ class PipelineOrchestrator:
             execution_brief=execution_brief,
             spy_ohlcv=spy_ohlcv,
             correlation_warnings=correlation_warnings,
+            features=features,
         )
 
     # ── internal helpers ──────────────────────────────────────────────────────
@@ -355,8 +356,10 @@ class PipelineOrchestrator:
             "macro":           macro,
             **kwargs,
         }
-        print("[Stage 12] Generating report ...")
+        print("[Stage 12] Generating full report ...")
         report_path = m["reporter"].generate(pipeline_output)
+        print("[Stage 12] Generating trader summary report ...")
+        m["reporter"].generate_summary(pipeline_output)
         return {
             "report_path": report_path,
             "run_date":    run_date,

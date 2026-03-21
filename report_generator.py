@@ -66,6 +66,347 @@ class ReportGenerator:
 
         return filepath
 
+    def generate_summary(self, pipeline_output: dict) -> str:
+        """
+        Generate a trader-focused summary report containing only tickers
+        that passed all 3 stages (backtest → diagnostics → Monte Carlo).
+        Ordered by importance to the trader. Numbers preserved for graphing.
+        """
+        run_date  = pipeline_output.get("run_date", datetime.today().strftime("%Y-%m-%d"))
+        timestamp = datetime.now().strftime("%H%M%S")
+        filename  = f"summary_{run_date}_{timestamp}.md"
+        filepath  = os.path.join(self.output_dir, filename)
+
+        # Build lookup maps
+        mc_map   = {mc["ticker"]: mc for mc in pipeline_output.get("monte_carlos", [])
+                    if not mc.get("insufficient_sample")}
+        diag_map = {d["ticker"]: d  for d in pipeline_output.get("diagnostics", [])}
+        bt_map   = {b["ticker"]: b  for b in pipeline_output.get("backtests", [])}
+        strat_map= {s["ticker"]: s  for s in pipeline_output.get("strategies", [])}
+        verdict_map = {v["ticker"]: v for v in pipeline_output.get("ticker_verdicts", [])}
+        regime_map  = {r["ticker"]: r for r in pipeline_output.get("regimes", [])}
+        features    = pipeline_output.get("features", {})
+        spy_ohlcv   = pipeline_output.get("spy_ohlcv")
+        macro       = pipeline_output.get("macro", {})
+        summary     = pipeline_output.get("summary", {})
+
+        # Only tickers that passed all 3 stages
+        qualified = [t for t in mc_map]
+
+        # SPY benchmark return
+        spy_return: float | None = None
+        if spy_ohlcv is not None and not spy_ohlcv.empty:
+            try:
+                spy_close  = spy_ohlcv["Close"].astype(float)
+                spy_return = float((spy_close.iloc[-1] - spy_close.iloc[0]) / spy_close.iloc[0])
+            except Exception:
+                pass
+
+        sections = [self._summary_header(run_date, qualified, summary, macro, spy_return)]
+
+        # ── Today's action ────────────────────────────────────────────────────
+        sections.append(self._summary_action(qualified, strat_map, run_date))
+
+        # ── Per-ticker deep dives ─────────────────────────────────────────────
+        for ticker in qualified:
+            sections.append(self._summary_ticker(
+                ticker, strat_map, bt_map, diag_map, mc_map,
+                verdict_map, regime_map, features, spy_return,
+            ))
+
+        # ── Macro context (brief, at the end) ────────────────────────────────
+        sections.append(self._summary_macro(macro, summary))
+
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write("\n\n".join(sections))
+
+        print(f"  [Report] Trader summary → {filepath}")
+        return filepath
+
+    # ── summary sub-sections ──────────────────────────────────────────────────
+
+    @staticmethod
+    def _summary_header(run_date, qualified, summary, macro, spy_return) -> str:
+        spy_str = f" | SPY benchmark: {spy_return:.2%}" if spy_return is not None else ""
+        lines = [
+            f"# Trader Summary — {run_date}",
+            "",
+            f"**{len(qualified)} ticker(s) passed all 3 stages** (backtest → diagnostics → Monte Carlo){spy_str}  ",
+            f"**Market bias:** {macro.get('market_bias', 'neutral').upper()}  ",
+            f"**Favoured sectors:** {', '.join(macro.get('favored_sectors', []))}  ",
+            f"**Avoid sectors:** {', '.join(macro.get('avoid_sectors', []))}  ",
+            f"**Key risks:** {', '.join(summary.get('key_risks', []))}  ",
+            "",
+            "_This report shows only tickers that cleared backtest, diagnostic floors, "
+            "and Monte Carlo stress testing. All return figures are net of 10bps slippage per side._",
+        ]
+        if not qualified:
+            lines += ["", "**No tickers passed all 3 stages today. No action required.**"]
+        return "\n".join(lines)
+
+    @staticmethod
+    def _summary_action(qualified, strat_map, run_date) -> str:
+        lines = ["## ⚡ Today's Action", ""]
+        active_any = False
+        for ticker in qualified:
+            s   = strat_map.get(ticker, {})
+            sig = s.get("current_signal", {})
+            if sig.get("signal_active"):
+                active_any = True
+                setup = sig.get("setup", {})
+                lines += [
+                    f"### ✅ {ticker} — ENTER NOW ({s.get('strategy', '')})",
+                    "",
+                    f"- **Order:** Market order at next session open (~${setup.get('entry_price', 0):,.2f})",
+                    f"- **Stop loss:** ${setup.get('stop_price', 0):,.2f} "
+                    f"(risk ${setup.get('dollar_risk', 0):,.0f} = 1% of portfolio)",
+                    f"- **Position size:** {setup.get('position_size', 0):,} shares",
+                    f"- **Current ATR₁₄:** ${setup.get('current_atr', 0):,.2f}",
+                    "",
+                ]
+        if not active_any:
+            lines += [
+                "_No entry signals are active today across all qualified tickers._  ",
+                "_Monitor the conditions below — enter on the next session where ALL conditions are met._",
+            ]
+        return "\n".join(lines)
+
+    @staticmethod
+    def _summary_ticker(ticker, strat_map, bt_map, diag_map, mc_map,
+                        verdict_map, regime_map, features, spy_return) -> str:
+        s       = strat_map.get(ticker, {})
+        bt      = bt_map.get(ticker, {})
+        diag    = diag_map.get(ticker, {})
+        mc      = mc_map.get(ticker, {})
+        verdict = verdict_map.get(ticker, {})
+        regime  = regime_map.get(ticker, {})
+        feats   = features.get(ticker, {})
+        params  = s.get("adjusted_params", {})
+        sig     = s.get("current_signal", {})
+        summary = bt.get("summary", {})
+        metrics = diag.get("metrics", {})
+        trade_log = bt.get("trade_log", [])
+        equity    = bt.get("equity_curve", pd.Series(dtype=float))
+        returns   = bt.get("returns", pd.Series(dtype=float))
+
+        net_ret   = summary.get("total_return", 0)
+        spy_str   = ""
+        if spy_return is not None:
+            diff    = net_ret - spy_return
+            spy_str = f" vs SPY {diff:+.2%} ({'alpha ✅' if diff >= 0 else 'underperform ❌'})"
+
+        lines = [
+            f"---",
+            f"## {ticker} — {s.get('strategy', 'N/A')} | {regime.get('regime', 'N/A')}",
+            "",
+        ]
+
+        # ── 1. Signal status ──────────────────────────────────────────────────
+        lines += ["### 1. Entry Signal (as of run date)", ""]
+        if sig.get("signal_active") is True:
+            setup = sig.get("setup", {})
+            lines += [
+                "**Status: ✅ ACTIVE — enter at next session open**",
+                "",
+                "| Field | Value |",
+                "|-------|-------|",
+                f"| Entry price | ${setup.get('entry_price', 0):,.2f} |",
+                f"| Stop loss | ${setup.get('stop_price', 0):,.2f} |",
+                f"| Stop distance | ${setup.get('stop_dist', 0):,.2f} |",
+                f"| Position size | {setup.get('position_size', 0):,} shares |",
+                f"| Dollar risk | ${setup.get('dollar_risk', 0):,.0f} (1% of portfolio) |",
+                f"| Current ATR₁₄ | ${setup.get('current_atr', 0):,.2f} |",
+            ]
+            if setup.get("target"):
+                lines.append(f"| Target (mean-reversion) | ${setup['target']:,.2f} |")
+        else:
+            failed = []
+            if sig.get("breakout") is False:     failed.append("price breakout")
+            if sig.get("volume_confirmed") is False: failed.append("volume confirmation")
+            if sig.get("oversold") is False:     failed.append("RSI oversold")
+            if sig.get("below_bb") is False:     failed.append("below lower BB")
+            reason = " + ".join(failed) if failed else "conditions"
+            lines += [
+                f"**Status: ⏸ INACTIVE — {reason} not met**",
+                "",
+                f"```",
+                sig.get("details", "N/A"),
+                "```",
+                "",
+                "_Monitor daily. Enter at next session open when ALL conditions are met._",
+            ]
+
+        # ── 2. Why this ticker was selected ───────────────────────────────────
+        lines += ["", "### 2. Why This Ticker Was Selected", ""]
+        if feats:
+            lines += [
+                "**Screening data (OHLCV features):**",
+                "",
+                "| Metric | Value |",
+                "|--------|-------|",
+                f"| 20-day return | {feats.get('return_20d', 0):.2%} |",
+                f"| RSI(14) | {feats.get('rsi_14', 0):.1f} |",
+                f"| ATR(14) | {feats.get('atr_14', 0):.2f} |",
+                f"| ATR % of price | {feats.get('atr_pct', 0):.2%} |",
+                f"| 52-week high proximity | {feats.get('52w_high_prox', 0):.3f} |",
+                f"| 52-week low proximity | {feats.get('52w_low_prox', 0):.3f} |",
+                f"| Volume ratio (30d) | {feats.get('volume_ratio_30d', 0):.2f}× |",
+                f"| Hurst exponent | {regime.get('hurst', 0):.3f} |",
+                f"| Regime | {regime.get('regime', 'N/A')} |",
+            ]
+        lines += [
+            "",
+            f"**Screener verdict:** {verdict.get('verdict', 'N/A').upper()}",
+            "",
+            f"> {verdict.get('reasoning', 'N/A')}",
+        ]
+
+        # ── 3. Strategy rules ─────────────────────────────────────────────────
+        lines += ["", "### 3. Strategy Rules", ""]
+        lines += _render_mechanics(s.get("strategy", ""), params)
+        if s.get("llm_adjustments"):
+            lines += ["", "**Parameter adjustments made by LLM:**", ""]
+            for adj in s["llm_adjustments"]:
+                lines.append(f"- {adj}")
+
+        # ── 4. Monte Carlo risk profile ───────────────────────────────────────
+        lines += ["", "### 4. Monte Carlo Risk Profile (10,000 simulations)", ""]
+        lines += [
+            "| Metric | P5 (worst 5%) | Median | P95 (best 5%) |",
+            "|--------|--------------|--------|---------------|",
+            f"| Final portfolio ($) | {mc.get('p5_final', 0):,.0f} | {mc.get('p50_final', 0):,.0f} | {mc.get('p95_final', 0):,.0f} |",
+            f"| CAGR | — | {mc.get('median_cagr', 0):.2%} | — |",
+            f"| Sharpe ratio | {mc.get('p5_sharpe', 0):.2f} | {mc.get('p50_sharpe', 0):.2f} | {mc.get('p95_sharpe', 0):.2f} |",
+            f"| Win rate | {mc.get('p5_win_rate', 0):.1%} | {mc.get('p50_win_rate', 0):.1%} | {mc.get('p95_win_rate', 0):.1%} |",
+            "",
+            "| Risk metric | Value |",
+            "|-------------|-------|",
+            f"| P(Ruin) >40% drawdown | {mc.get('p_ruin', 0):.2%} |",
+            f"| P95 max drawdown | {mc.get('p95_max_drawdown', 0):.2%} |",
+            f"| P95 max consecutive losses | {mc.get('p95_max_consec_losses', 0)} |",
+            f"| Optimal Kelly fraction | {mc.get('kelly_fraction', 0):.3f} |",
+            f"| Suggested position size (½ Kelly) | {mc.get('kelly_fraction', 0) / 2:.3f} of capital |",
+            "",
+            "**Equity confidence band** _(for graphing: trade# vs portfolio value)_",
+            "",
+            "| Trade # | P5 ($) | Median ($) | P95 ($) |",
+            "|---------|--------|------------|---------|",
+        ]
+        for entry in mc.get("equity_band", []):
+            lines.append(
+                f"| {entry['step']} | {entry['p5']:,.0f} | {entry['p50']:,.0f} | {entry['p95']:,.0f} |"
+            )
+
+        # ── 5. Diagnostic scorecard ────────────────────────────────────────────
+        lines += ["", "### 5. Diagnostic Scorecard", ""]
+        floors = [
+            ("Sharpe (RF-adjusted)", f"{metrics.get('sharpe', 0):.3f}", "≥ 0.50"),
+            ("Max drawdown",         f"{metrics.get('max_drawdown', 0):.2%}", "≤ 20%"),
+            ("Win rate",             f"{metrics.get('win_rate', 0):.1%}", "≥ 35%"),
+            ("Walk-fwd degradation", f"{metrics.get('walk_forward_degradation', 0):.1%}", "≤ 50%"),
+            ("Trade count",          f"{metrics.get('trade_count', 0)}", "≥ 30"),
+        ]
+        lines += ["| Metric | Value | Floor | Pass |", "|--------|-------|-------|------|"]
+        for name, val, floor in floors:
+            lines.append(f"| {name} | {val} | {floor} | ✅ |")
+
+        wf_split = int(len(returns) * 0.70)
+        if not returns.empty and wf_split > 0:
+            is_ret  = returns.iloc[:wf_split]
+            oos_ret = returns.iloc[wf_split:]
+            is_cum  = float((1 + is_ret).prod() - 1)
+            oos_cum = float((1 + oos_ret).prod() - 1)
+            is_start  = str(returns.index[0])[:10]
+            is_end    = str(returns.index[wf_split - 1])[:10]
+            oos_start = str(returns.index[wf_split])[:10]
+            oos_end   = str(returns.index[-1])[:10]
+            lines += [
+                "",
+                "**Walk-forward (70% IS / 30% OOS):**",
+                "",
+                "| Period | Start | End | Cumulative Return |",
+                "|--------|-------|-----|-------------------|",
+                f"| In-sample (70%) | {is_start} | {is_end} | {is_cum:.2%} |",
+                f"| Out-of-sample (30%) | {oos_start} | {oos_end} | {oos_cum:.2%} |",
+            ]
+
+        # ── 6. Backtest performance ────────────────────────────────────────────
+        lines += ["", "### 6. Backtest Performance (5 years)", ""]
+        lines += [
+            "| Metric | Value |",
+            "|--------|-------|",
+            f"| Net return (after slippage) | {net_ret:.2%}{spy_str} |",
+            f"| Gross return (pre-cost) | {summary.get('gross_return', 0):.2%} |",
+            f"| Total slippage cost | ${summary.get('total_slippage_cost', 0):,.2f} |",
+            f"| Trade count | {summary.get('trade_count', 0)} |",
+            f"| Win rate | {summary.get('win_rate', 0):.1%} |",
+            "",
+        ]
+
+        # Trade log
+        if trade_log:
+            lines += [
+                "**Trade log** _(entry date, entry $, exit date, exit $, days held, P&L net)_",
+                "",
+                "| Entry | Entry $ | Exit | Exit $ | Days | P&L ($) | Reason |",
+                "|-------|---------|------|--------|------|---------|--------|",
+            ]
+            for t in trade_log:
+                ed = str(t["entry_date"])[:10]
+                xd = str(t["exit_date"])[:10]
+                lines.append(
+                    f"| {ed} | {t['entry_price']:.2f} | {xd} | {t['exit_price']:.2f}"
+                    f" | {t['holding_days']} | {t['pnl']:+.2f} | {t['exit_reason']} |"
+                )
+
+        # Equity curve (sampled, for graphing)
+        if not equity.empty:
+            lines += [
+                "",
+                "**Equity curve** _(for graphing: date vs portfolio value)_",
+                "",
+                "| Date | Portfolio ($) |",
+                "|------|--------------|",
+            ]
+            step = max(1, len(equity) // 30)
+            for date, val in equity.iloc[::step].items():
+                lines.append(f"| {str(date)[:10]} | {val:,.2f} |")
+
+        # Drawdown curve (sampled, for graphing)
+        if not equity.empty:
+            dd_series = _drawdown_series(equity)
+            lines += [
+                "",
+                "**Drawdown curve** _(for graphing: date vs drawdown %)_",
+                "",
+                "| Date | Drawdown |",
+                "|------|----------|",
+            ]
+            step = max(1, len(dd_series) // 30)
+            for date, val in dd_series.iloc[::step].items():
+                lines.append(f"| {str(date)[:10]} | {val:.4f} |")
+
+        lines.append("")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _summary_macro(macro, summary) -> str:
+        lines = [
+            "## Macro Context",
+            "",
+            f"**Bias:** {macro.get('market_bias', 'neutral').upper()}  ",
+            f"**Favoured:** {', '.join(macro.get('favored_sectors', []))}  ",
+            f"**Avoid:** {', '.join(macro.get('avoid_sectors', []))}  ",
+            f"**Risks:** {', '.join(macro.get('active_macro_risks', []))}  ",
+            "",
+            f"> {macro.get('reasoning', '')}",
+            "",
+            f"**Top news themes:** {', '.join(summary.get('top_themes', []))}  ",
+            f"**Articles analysed:** {summary.get('article_count', 0)}  ",
+            f"**Window:** {summary.get('window_start', 'N/A')} → {summary.get('window_end', 'N/A')}  ",
+        ]
+        return "\n".join(lines)
+
     # ── sections ──────────────────────────────────────────────────────────────
 
     @staticmethod
