@@ -133,10 +133,15 @@ class Backtester:
                     pos_size     = (equity * RISK_PER_TRADE) / (stop_loss_atr * a)
                     peak         = c
                     holding_days = 0
+                    target_1r    = entry_price + stop_loss_atr * a  # 1R above entry
+                    reached_1r   = False
             else:
                 holding_days += 1
                 peak             = max(peak, c)
                 trailing_stop    = peak - trailing_stop_atr * a
+                h_bar            = float(high.iloc[i])
+                if h_bar >= target_1r:
+                    reached_1r = True
 
                 exit_reason: str | None = None
                 if c < stop_price:
@@ -159,15 +164,16 @@ class Backtester:
                         holding_days, pos_size, pnl, exit_reason,
                         gross_pnl=gross_pnl,
                         slippage_cost=abs(gross_pnl - pnl),
+                        reached_1r=reached_1r,
                     ))
                     in_position = False
 
         return trades
 
     def _run_mean_reversion(self, ohlcv: pd.DataFrame, params: dict) -> list[dict]:
-        close = ohlcv["Close"].astype(float)
-        high  = ohlcv["High"].astype(float)
-        low   = ohlcv["Low"].astype(float)
+        close  = ohlcv["Close"].astype(float)
+        high   = ohlcv["High"].astype(float)
+        low    = ohlcv["Low"].astype(float)
 
         rsi_entry   = params["rsi_entry_threshold"]
         rsi_exit_th = params["rsi_exit_threshold"]
@@ -210,8 +216,13 @@ class Backtester:
                     stop_price   = entry_price - stop_atr * a
                     pos_size     = (equity * RISK_PER_TRADE) / (stop_atr * a)
                     holding_days = 0
+                    target_1r    = entry_price + stop_atr * a  # 1R above entry
+                    reached_1r   = False
             else:
                 holding_days += 1
+                h_bar = float(high.iloc[i])
+                if h_bar >= target_1r:
+                    reached_1r = True
 
                 exit_reason: str | None = None
                 if c < stop_price:
@@ -233,6 +244,7 @@ class Backtester:
                         holding_days, pos_size, pnl, exit_reason,
                         gross_pnl=gross_pnl,
                         slippage_cost=abs(gross_pnl - pnl),
+                        reached_1r=reached_1r,
                     ))
                     in_position = False
 
@@ -401,7 +413,7 @@ class Backtester:
     def _summarize(trade_log: list[dict], equity_curve: pd.Series) -> dict:
         if not trade_log:
             return {"total_return": 0.0, "trade_count": 0, "win_rate": 0.0,
-                    "total_slippage_cost": 0.0, "gross_return": 0.0}
+                    "total_slippage_cost": 0.0, "gross_return": 0.0, "entry_efficiency": 0.0}
         initial           = equity_curve.iloc[0]
         final             = equity_curve.iloc[-1]
         total_return      = (final - initial) / initial if initial != 0 else 0.0
@@ -409,12 +421,15 @@ class Backtester:
         total_slip        = sum(t.get("slippage_cost", 0.0) for t in trade_log)
         gross_pnl_total   = sum(t.get("gross_pnl", t["pnl"]) for t in trade_log)
         gross_return      = gross_pnl_total / initial if initial != 0 else 0.0
+        reached_count     = sum(1 for t in trade_log if t.get("reached_1r", False))
+        entry_efficiency  = reached_count / len(trade_log)
         return {
             "total_return":        float(total_return),
             "gross_return":        float(gross_return),
             "total_slippage_cost": float(total_slip),
             "trade_count":         len(trade_log),
             "win_rate":            wins / len(trade_log),
+            "entry_efficiency":    float(entry_efficiency),
         }
 
     # ── indicators ────────────────────────────────────────────────────────────
@@ -448,6 +463,7 @@ def _make_trade(
     entry_date, entry_price, exit_date, exit_price,
     holding_days, position_size, pnl, exit_reason,
     gross_pnl: float = 0.0, slippage_cost: float = 0.0,
+    reached_1r: bool = False,
 ) -> dict:
     return {
         "entry_date":    entry_date,
@@ -460,6 +476,7 @@ def _make_trade(
         "gross_pnl":     float(gross_pnl),
         "slippage_cost": float(slippage_cost),
         "exit_reason":   exit_reason,
+        "reached_1r":    bool(reached_1r),
     }
 
 

@@ -677,6 +677,7 @@ class ReportGenerator:
                 "|--------|-------|",
                 f"| Trade Count | {metrics.get('trade_count', 0)} |",
                 f"| Win Rate | {metrics.get('win_rate', 0):.1%} |",
+                f"| Entry Efficiency (% reaching +1R) | {bt.get('summary', {}).get('entry_efficiency', 0):.1%} |",
                 f"| Avg Win | {adv['avg_win']:.2f} |",
                 f"| Avg Loss | {adv['avg_loss']:.2f} |",
                 f"| Profit Factor | {adv['profit_factor']:.3f} |",

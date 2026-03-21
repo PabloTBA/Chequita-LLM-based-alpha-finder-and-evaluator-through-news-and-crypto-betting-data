@@ -34,7 +34,131 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
+import numpy as np
 import pandas as pd
+
+
+# ── sector map for diversity enforcement ──────────────────────────────────────
+
+_SECTOR_MAP: dict[str, str] = {
+    # Technology
+    "AAPL": "Technology", "MSFT": "Technology", "NVDA": "Technology",
+    "AVGO": "Technology", "ORCL": "Technology", "AMD": "Technology",
+    "QCOM": "Technology", "AMAT": "Technology", "LRCX": "Technology",
+    "KLAC": "Technology", "ADI": "Technology", "MU": "Technology",
+    "CSCO": "Technology", "IBM": "Technology", "TXN": "Technology",
+    "INTU": "Technology", "ADBE": "Technology", "CRM": "Technology",
+    "NOW": "Technology", "PANW": "Technology", "CRWD": "Technology",
+    "SNOW": "Technology", "PLTR": "Technology", "ACN": "Technology",
+    # Communication
+    "GOOGL": "Communication", "GOOG": "Communication", "META": "Communication",
+    "NFLX": "Communication", "T": "Communication", "DIS": "Communication",
+    "BIDU": "Communication",
+    # Consumer Discretionary
+    "AMZN": "Consumer Discretionary", "TSLA": "Consumer Discretionary",
+    "HD": "Consumer Discretionary", "MCD": "Consumer Discretionary",
+    "BKNG": "Consumer Discretionary", "MAR": "Consumer Discretionary",
+    "TGT": "Consumer Discretionary", "SBUX": "Consumer Discretionary",
+    "NKE": "Consumer Discretionary", "ABNB": "Consumer Discretionary",
+    "GM": "Consumer Discretionary", "F": "Consumer Discretionary",
+    "UBER": "Consumer Discretionary", "RBLX": "Consumer Discretionary",
+    "RIVN": "Consumer Discretionary", "LCID": "Consumer Discretionary",
+    "SHOP": "Consumer Discretionary", "LOW": "Consumer Discretionary",
+    "TJX": "Consumer Discretionary",
+    # Consumer Staples
+    "WMT": "Consumer Staples", "COST": "Consumer Staples",
+    "PG": "Consumer Staples", "KO": "Consumer Staples",
+    "PEP": "Consumer Staples", "MDLZ": "Consumer Staples",
+    "MO": "Consumer Staples", "PM": "Consumer Staples", "CL": "Consumer Staples",
+    # Healthcare
+    "LLY": "Healthcare", "UNH": "Healthcare", "ABBV": "Healthcare",
+    "MRK": "Healthcare", "TMO": "Healthcare", "ABT": "Healthcare",
+    "DHR": "Healthcare", "AMGN": "Healthcare", "ISRG": "Healthcare",
+    "SYK": "Healthcare", "GILD": "Healthcare", "VRTX": "Healthcare",
+    "BSX": "Healthcare", "REGN": "Healthcare", "MDT": "Healthcare",
+    "EW": "Healthcare", "ZTS": "Healthcare", "BDX": "Healthcare",
+    "HUM": "Healthcare", "HCA": "Healthcare", "JNJ": "Healthcare",
+    # Financials
+    "JPM": "Financials", "BRK.B": "Financials", "V": "Financials",
+    "MA": "Financials", "BAC": "Financials", "WFC": "Financials",
+    "GS": "Financials", "MS": "Financials", "SPGI": "Financials",
+    "AXP": "Financials", "C": "Financials", "SCHW": "Financials",
+    "CB": "Financials", "MMC": "Financials", "AON": "Financials",
+    "MCO": "Financials", "ICE": "Financials", "CME": "Financials",
+    "USB": "Financials", "AIG": "Financials", "FI": "Financials",
+    "PYPL": "Financials", "SQ": "Financials", "SOFI": "Financials",
+    "COIN": "Financials",
+    # Energy
+    "XOM": "Energy", "CVX": "Energy", "COP": "Energy",
+    "EOG": "Energy", "FCX": "Energy",
+    # Industrials
+    "GE": "Industrials", "HON": "Industrials", "CAT": "Industrials",
+    "ETN": "Industrials", "RTX": "Industrials", "NOC": "Industrials",
+    "DE": "Industrials", "ITW": "Industrials", "EMR": "Industrials",
+    "NSC": "Industrials", "GD": "Industrials", "BA": "Industrials",
+    "MMM": "Industrials", "PH": "Industrials", "ROP": "Industrials",
+    # Materials
+    "LIN": "Materials", "SHW": "Materials",
+    # Real Estate
+    "PLD": "Real Estate", "PSA": "Real Estate",
+    # Utilities
+    "NEE": "Utilities", "SO": "Utilities", "DUK": "Utilities",
+    # Speculative / Other
+    "NIO": "Speculative",
+}
+
+_MAX_PER_SECTOR = 2  # hard cap on tickers per sector in the shortlist
+
+
+def _enforce_sector_diversity(tickers: list[str], max_per_sector: int = _MAX_PER_SECTOR) -> list[str]:
+    """
+    Cap tickers per GICS sector to avoid concentrated bets.
+    Unknown tickers (not in _SECTOR_MAP) are treated as their own sector
+    so they always pass through.
+    """
+    sector_count: dict[str, int] = {}
+    result: list[str] = []
+    for ticker in tickers:
+        sector = _SECTOR_MAP.get(ticker)
+        if sector is None:
+            result.append(ticker)   # unknown — let it through
+            continue
+        if sector_count.get(sector, 0) < max_per_sector:
+            result.append(ticker)
+            sector_count[sector] = sector_count.get(sector, 0) + 1
+        else:
+            print(f"  [Diversity] {ticker} dropped — {sector} sector already has {max_per_sector} tickers")
+    return result
+
+
+# ── parameter validation alternatives (tried if LLM params yield Sharpe < 0) ──
+
+_PARAM_ALTERNATIVES: dict[str, list[dict]] = {
+    "Momentum": [
+        # Conservative: wider stops, longer lookback, lower volume bar
+        {"entry_lookback": 30, "volume_multiplier": 1.3, "trailing_stop_atr": 2.5,
+         "ma_exit_period": 20, "stop_loss_atr": 2.0, "max_holding_days": 30},
+        # Aggressive entry filter: higher volume confirmation, tighter MA exit
+        {"entry_lookback": 15, "volume_multiplier": 2.0, "trailing_stop_atr": 1.5,
+         "ma_exit_period": 15, "stop_loss_atr": 1.0, "max_holding_days": 15},
+    ],
+    "Mean-Reversion": [
+        # Deeper oversold, wider BB — enters on more extreme dislocations only
+        {"rsi_entry_threshold": 25, "rsi_exit_threshold": 60, "bb_period": 20,
+         "bb_std": 2.5, "stop_loss_atr": 2.0, "max_holding_days": 15},
+        # Quicker cycle: tighter BB, earlier RSI exit
+        {"rsi_entry_threshold": 30, "rsi_exit_threshold": 50, "bb_period": 15,
+         "bb_std": 1.8, "stop_loss_atr": 1.5, "max_holding_days": 8},
+    ],
+}
+
+
+def _quick_sharpe(returns: pd.Series) -> float:
+    """Fast annualised Sharpe estimate (no risk-free rate) for param comparison."""
+    std = returns.std(ddof=1)
+    if std == 0 or np.isnan(std):
+        return 0.0
+    return float(returns.mean() / std * (252 ** 0.5))
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -162,6 +286,7 @@ class PipelineOrchestrator:
             tickers,
         )
         shortlisted = shortlisted or tickers
+        shortlisted = _enforce_sector_diversity(shortlisted)
         max_tickers = self._cfg.get("max_tickers", 15)
         shortlisted = shortlisted[:max_tickers]
 
@@ -220,6 +345,34 @@ class PipelineOrchestrator:
                 lambda _t=ticker, _s=strategy, _o=ohlcv: m["backtester"].run(_t, _s, _o),
                 None,
             )
+
+            # ── Parameter validation loop ──────────────────────────────────────
+            # If LLM params yield negative Sharpe, try predefined alternatives
+            # and keep whichever produces the best Sharpe.
+            if backtest and strategy:
+                current_sharpe = _quick_sharpe(backtest["returns"])
+                if current_sharpe < 0.0:
+                    strat_type = strategy["strategy"]
+                    for alt_params in _PARAM_ALTERNATIVES.get(strat_type, []):
+                        alt_strategy = {
+                            **strategy,
+                            "adjusted_params": alt_params,
+                            "llm_adjustments": strategy.get("llm_adjustments", []) + [
+                                f"[Auto] alternative params tried — LLM params yielded Sharpe {current_sharpe:.3f}"
+                            ],
+                        }
+                        alt_backtest = self._safe(
+                            f"backtester.run({ticker})[alt]",
+                            lambda _t=ticker, _s=alt_strategy, _o=ohlcv: m["backtester"].run(_t, _s, _o),
+                            None,
+                        )
+                        if alt_backtest:
+                            alt_sharpe = _quick_sharpe(alt_backtest["returns"])
+                            if alt_sharpe > current_sharpe:
+                                print(f"  [Stage 10] {ticker} — alt params improved Sharpe {current_sharpe:.3f} → {alt_sharpe:.3f}")
+                                strategy       = alt_strategy
+                                backtest       = alt_backtest
+                                current_sharpe = alt_sharpe
 
             diagnostic = self._safe(
                 f"diagnostics.run({ticker})",
