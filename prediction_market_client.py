@@ -113,7 +113,16 @@ class PredictionMarketClient:
         offset  = 0
         while True:
             params = {"limit": _PAGE_SIZE, "offset": offset, **extra_params}
-            resp   = requests.get(_BASE_URL, params=params, timeout=15)
+            resp = None
+            for attempt in range(1, 4):
+                try:
+                    resp = requests.get(_BASE_URL, params=params, timeout=45)
+                    break
+                except requests.exceptions.Timeout:
+                    print(f"  [WARN]  Polymarket timeout (attempt {attempt}/3), retrying...")
+            if resp is None:
+                print(f"  [WARN]  Polymarket: all retries failed, skipping page")
+                break
             if resp.status_code != 200:
                 print(f"  [WARN]  Polymarket HTTP {resp.status_code}")
                 break

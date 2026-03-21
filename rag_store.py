@@ -26,11 +26,22 @@ _NEWS_COLLECTION = "news"
 _MARKETS_COLLECTION = "prediction_markets"
 
 
+def _device() -> str:
+    try:
+        import torch
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    except ImportError:
+        return "cpu"
+
+
 class RAGStore:
     def __init__(self, persist_dir: str = "data/chroma"):
         self._client = chromadb.PersistentClient(path=persist_dir)
+        device = _device()
+        print(f"  [RAG] embedding device: {device}")
         ef = embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name=_EMBEDDING_MODEL
+            model_name=_EMBEDDING_MODEL,
+            device=device,
         )
         self._news = self._client.get_or_create_collection(
             name=_NEWS_COLLECTION,
@@ -44,7 +55,17 @@ class RAGStore:
     # ── public ────────────────────────────────────────────────────────────────
 
     def insert_news(self, articles: dict[str, pd.DataFrame]) -> None:
-        """Insert articles from all sources into the news collection."""
+        """Insert articles from all sources into the news collection.
+
+        Skips articles whose URL is already stored — avoids re-embedding on
+        every run for the full cached history.
+        """
+        # Fetch already-stored IDs once (cheap metadata-only query)
+        existing: set[str] = set()
+        stored_count = self._news.count()
+        if stored_count > 0:
+            existing = set(self._news.get(include=[])["ids"])
+
         ids, docs, metas = [], [], []
 
         for source, df in articles.items():
@@ -54,7 +75,10 @@ class RAGStore:
                 url = row.get("url")
                 if not url:
                     continue
-                ids.append(str(url))
+                uid = str(url)
+                if uid in existing:
+                    continue
+                ids.append(uid)
                 docs.append(str(row.get("title", "")))
                 metas.append({
                     "date":            str(row.get("date", "")),
@@ -63,9 +87,21 @@ class RAGStore:
                     "composite_score": float(row.get("composite_score", 0.0)),
                 })
 
-        if ids:
-            self._news.upsert(ids=ids, documents=docs, metadatas=metas)
-            print(f"  [RAG] news: upserted {len(ids)} articles")
+        if not ids:
+            print(f"  [RAG] news: {stored_count} already stored, 0 new — skipping embedding")
+            return
+
+        batch_size = 100
+        total = len(ids)
+        print(f"  [RAG] news: {stored_count} already stored, embedding {total} new articles...")
+        for i in range(0, total, batch_size):
+            self._news.upsert(
+                ids=ids[i:i+batch_size],
+                documents=docs[i:i+batch_size],
+                metadatas=metas[i:i+batch_size],
+            )
+            print(f"  [RAG] news: {min(i+batch_size, total)}/{total} embedded", flush=True)
+        print(f"  [RAG] news: done")
 
     def insert_markets(self, markets: list[dict]) -> None:
         """Insert prediction market events into the prediction_markets collection."""

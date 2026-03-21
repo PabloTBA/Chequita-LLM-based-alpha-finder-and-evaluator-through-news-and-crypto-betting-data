@@ -242,7 +242,18 @@ class ReportGenerator:
             if sig.get("signal_active") is True:
                 blocks.append("**Status: ✅ ACTIVE — entry condition met on latest bar**")
             elif sig.get("signal_active") is False:
-                blocks.append("**Status: ⏸ INACTIVE — entry condition not met**")
+                # Show exactly which condition(s) failed
+                failed = []
+                if sig.get("breakout") is False:
+                    failed.append("price breakout")
+                if sig.get("volume_confirmed") is False:
+                    failed.append("volume confirmation")
+                if sig.get("oversold") is False:
+                    failed.append("RSI oversold")
+                if sig.get("below_bb") is False:
+                    failed.append("below lower BB")
+                reason = " + ".join(failed) if failed else "entry condition"
+                blocks.append(f"**Status: ⏸ INACTIVE — {reason} not met**")
             else:
                 blocks.append("**Status: N/A**")
             if sig.get("details"):
@@ -354,8 +365,33 @@ class ReportGenerator:
         return "\n".join(blocks)
 
     def _backtest_section(self, po: dict) -> str:
-        backtests = po.get("backtests", [])
-        blocks = ["## Backtest Results", ""]
+        backtests  = po.get("backtests", [])
+        spy_ohlcv  = po.get("spy_ohlcv")
+        corr_warns = po.get("correlation_warnings", [])
+        blocks     = ["## Backtest Results", ""]
+
+        # Correlation warnings
+        if corr_warns:
+            blocks += ["### ⚠️ Concentration Risk Warnings", ""]
+            for w in corr_warns:
+                blocks.append(f"- {w}")
+            blocks.append("")
+
+        # Compute SPY buy-and-hold return over the same window for benchmark
+        spy_return: float | None = None
+        if spy_ohlcv is not None and not spy_ohlcv.empty:
+            try:
+                spy_close  = spy_ohlcv["Close"].astype(float)
+                spy_return = float((spy_close.iloc[-1] - spy_close.iloc[0]) / spy_close.iloc[0])
+            except Exception:
+                spy_return = None
+
+        if spy_return is not None:
+            blocks += [
+                f"**SPY Buy-and-Hold (same window):** {spy_return:.2%}  ",
+                "_Use this as the benchmark — any strategy below this is underperforming the market._",
+                "",
+            ]
 
         for bt in backtests:
             ticker    = bt["ticker"]
@@ -364,10 +400,20 @@ class ReportGenerator:
             equity    = bt.get("equity_curve", pd.Series(dtype=float))
             returns   = bt.get("returns", pd.Series(dtype=float))
 
+            net_ret   = summary.get("total_return", 0)
+            gross_ret = summary.get("gross_return", 0)
+            slip_cost = summary.get("total_slippage_cost", 0)
+            vs_spy    = ""
+            if spy_return is not None:
+                diff = net_ret - spy_return
+                vs_spy = f"  **vs SPY: {diff:+.2%}** ({'alpha' if diff >= 0 else 'underperform'})"
+
             blocks += [
                 f"### {ticker} — {bt['strategy']}",
                 "",
-                f"**Total Return:** {summary.get('total_return', 0):.2%}  ",
+                f"**Net Return (after slippage):** {net_ret:.2%}{vs_spy}  ",
+                f"**Gross Return (pre-cost):** {gross_ret:.2%}  ",
+                f"**Total Slippage Cost:** ${slip_cost:,.2f}  ",
                 f"**Trade Count:** {summary.get('trade_count', 0)}  ",
                 f"**Win Rate:** {summary.get('win_rate', 0):.1%}  ",
                 "",
@@ -523,6 +569,25 @@ class ReportGenerator:
 
         for mc in monte_carlos:
             ticker = mc.get("ticker", "Unknown")
+
+            # Insufficient sample gate
+            if mc.get("insufficient_sample"):
+                blocks += [
+                    f"### {ticker}",
+                    "",
+                    f"⚠️ **Monte Carlo skipped** — only {mc.get('trade_count', '?')} trades in backtest "
+                    f"(minimum 30 required). Results would be statistically meaningless with this few observations.",
+                    "",
+                ]
+                continue
+
+            trade_count = mc.get("trade_count", 0)
+            disclaimer  = (
+                f"\n> ⚠️ **Statistical disclaimer:** This simulation is based on only "
+                f"**{trade_count} historical trades**. Bootstrap resampling with fewer than 30 trades "
+                f"produces wide, unreliable confidence bands. Treat these figures as directional only."
+            ) if trade_count and trade_count < 50 else ""
+
             blocks += [
                 f"### {ticker}",
                 "",
@@ -573,6 +638,8 @@ class ReportGenerator:
                     f"| {entry['p50']:,.0f} "
                     f"| {entry['p95']:,.0f} |"
                 )
+            if disclaimer:
+                blocks.append(disclaimer)
             blocks.append("")
 
         return "\n".join(blocks)

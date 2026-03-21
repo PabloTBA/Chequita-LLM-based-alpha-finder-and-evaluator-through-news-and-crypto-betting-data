@@ -119,6 +119,7 @@ class StrategySelector:
         strategy     = _REGIME_TO_STRATEGY.get(regime_label, "Momentum")
         base_params  = copy.deepcopy(_STRATEGY_TO_BASE[strategy])
 
+        print(f"  [LLM] StrategySelector: {ticker} ({regime_label} → {strategy})...")
         self._log(f"[StrategySelector] {ticker}: {regime_label} → {strategy}")
 
         prompt = _PROMPT_TEMPLATE.format(
@@ -135,6 +136,7 @@ class StrategySelector:
         )
 
         raw = self.llm_client(prompt)
+        print(f"  [LLM] StrategySelector: {ticker} done")
         self._log(f"[StrategySelector] LLM response: {raw[:300]}")
 
         adjusted_params, llm_adjustments, reasoning = self._parse(raw, base_params)

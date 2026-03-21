@@ -1,2 +1,3 @@
-python pipeline_orchestrator.py 2026-03-19 --days 7 --max-tickers 5
-python pipeline_orchestrator.py --days 7 --max-tickers 5
+python pipeline_orchestrator.py 2026-03-21
+
+

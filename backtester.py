@@ -35,14 +35,16 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-RISK_PER_TRADE = 0.01   # 1% of portfolio per trade
-ATR_PERIOD     = 14
-RSI_PERIOD     = 14
+RISK_PER_TRADE    = 0.01   # 1% of portfolio per trade
+ATR_PERIOD        = 14
+RSI_PERIOD        = 14
+DEFAULT_SLIP_BPS  = 10     # 10 basis points (0.10%) per side — conservative retail estimate
 
 
 class Backtester:
-    def __init__(self, initial_portfolio: float = 100_000.0):
+    def __init__(self, initial_portfolio: float = 100_000.0, slippage_bps: float = DEFAULT_SLIP_BPS):
         self.initial_portfolio = initial_portfolio
+        self._slip = slippage_bps / 10_000  # convert to fraction
 
     # ── public ────────────────────────────────────────────────────────────────
 
@@ -125,7 +127,7 @@ class Backtester:
             if not in_position:
                 if c > rh and v > vol_multiplier * vm:
                     in_position  = True
-                    entry_price  = c
+                    entry_price  = c * (1 + self._slip)   # pay spread on entry
                     entry_date   = close.index[i]
                     stop_price   = entry_price - stop_loss_atr * a
                     pos_size     = (equity * RISK_PER_TRADE) / (stop_loss_atr * a)
@@ -147,11 +149,16 @@ class Backtester:
                     exit_reason = "max_holding"
 
                 if exit_reason:
-                    pnl    = (c - entry_price) * pos_size
-                    equity += pnl
+                    exit_price      = c * (1 - self._slip)   # lose spread on exit
+                    slip_cost       = (entry_price - c * (1 - self._slip + self._slip)) * pos_size
+                    gross_pnl       = (c - (entry_price / (1 + self._slip))) * pos_size
+                    pnl             = (exit_price - entry_price) * pos_size
+                    equity         += pnl
                     trades.append(_make_trade(
-                        entry_date, entry_price, close.index[i], c,
+                        entry_date, entry_price, close.index[i], exit_price,
                         holding_days, pos_size, pnl, exit_reason,
+                        gross_pnl=gross_pnl,
+                        slippage_cost=abs(gross_pnl - pnl),
                     ))
                     in_position = False
 
@@ -198,7 +205,7 @@ class Backtester:
             if not in_position:
                 if r < rsi_entry and c <= lb:
                     in_position  = True
-                    entry_price  = c
+                    entry_price  = c * (1 + self._slip)   # pay spread on entry
                     entry_date   = close.index[i]
                     stop_price   = entry_price - stop_atr * a
                     pos_size     = (equity * RISK_PER_TRADE) / (stop_atr * a)
@@ -217,11 +224,15 @@ class Backtester:
                     exit_reason = "max_holding"
 
                 if exit_reason:
-                    pnl    = (c - entry_price) * pos_size
-                    equity += pnl
+                    exit_price    = c * (1 - self._slip)   # lose spread on exit
+                    gross_pnl     = (c - (entry_price / (1 + self._slip))) * pos_size
+                    pnl           = (exit_price - entry_price) * pos_size
+                    equity       += pnl
                     trades.append(_make_trade(
-                        entry_date, entry_price, close.index[i], c,
+                        entry_date, entry_price, close.index[i], exit_price,
                         holding_days, pos_size, pnl, exit_reason,
+                        gross_pnl=gross_pnl,
+                        slippage_cost=abs(gross_pnl - pnl),
                     ))
                     in_position = False
 
@@ -389,15 +400,21 @@ class Backtester:
     @staticmethod
     def _summarize(trade_log: list[dict], equity_curve: pd.Series) -> dict:
         if not trade_log:
-            return {"total_return": 0.0, "trade_count": 0, "win_rate": 0.0}
-        initial      = equity_curve.iloc[0]
-        final        = equity_curve.iloc[-1]
-        total_return = (final - initial) / initial if initial != 0 else 0.0
-        wins         = sum(1 for t in trade_log if t["pnl"] > 0)
+            return {"total_return": 0.0, "trade_count": 0, "win_rate": 0.0,
+                    "total_slippage_cost": 0.0, "gross_return": 0.0}
+        initial           = equity_curve.iloc[0]
+        final             = equity_curve.iloc[-1]
+        total_return      = (final - initial) / initial if initial != 0 else 0.0
+        wins              = sum(1 for t in trade_log if t["pnl"] > 0)
+        total_slip        = sum(t.get("slippage_cost", 0.0) for t in trade_log)
+        gross_pnl_total   = sum(t.get("gross_pnl", t["pnl"]) for t in trade_log)
+        gross_return      = gross_pnl_total / initial if initial != 0 else 0.0
         return {
-            "total_return": float(total_return),
-            "trade_count":  len(trade_log),
-            "win_rate":     wins / len(trade_log),
+            "total_return":        float(total_return),
+            "gross_return":        float(gross_return),
+            "total_slippage_cost": float(total_slip),
+            "trade_count":         len(trade_log),
+            "win_rate":            wins / len(trade_log),
         }
 
     # ── indicators ────────────────────────────────────────────────────────────
@@ -430,6 +447,7 @@ class Backtester:
 def _make_trade(
     entry_date, entry_price, exit_date, exit_price,
     holding_days, position_size, pnl, exit_reason,
+    gross_pnl: float = 0.0, slippage_cost: float = 0.0,
 ) -> dict:
     return {
         "entry_date":    entry_date,
@@ -439,6 +457,8 @@ def _make_trade(
         "holding_days":  int(holding_days),
         "position_size": float(position_size),
         "pnl":           float(pnl),
+        "gross_pnl":     float(gross_pnl),
+        "slippage_cost": float(slippage_cost),
         "exit_reason":   exit_reason,
     }
 

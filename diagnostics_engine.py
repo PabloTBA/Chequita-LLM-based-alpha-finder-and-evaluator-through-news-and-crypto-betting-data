@@ -119,6 +119,7 @@ class DiagnosticsEngine:
         return True, None
 
     def _get_llm_commentary(self, ticker: str, strategy: str, metrics: dict) -> str:
+        print(f"  [LLM] DiagnosticsEngine: commentary for {ticker} ({strategy})...")
         prompt = (
             f"You are a quantitative strategist reviewing a strategy that passed all diagnostic floors.\n"
             f"Ticker: {ticker}\n"
@@ -128,7 +129,9 @@ class DiagnosticsEngine:
             f"WalkFwdDegradation={metrics['walk_forward_degradation']:.1%}\n\n"
             f"Provide 2-3 sentences of qualitative commentary on strengths and weaknesses."
         )
-        return self.llm_client(prompt)
+        result = self.llm_client(prompt)
+        print(f"  [LLM] DiagnosticsEngine: {ticker} done")
+        return result
 
     # ── math ──────────────────────────────────────────────────────────────────
 

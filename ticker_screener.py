@@ -144,8 +144,10 @@ class TickerScreener:
             ohlcv_block = ohlcv_block,
         )
 
+        print(f"  [LLM] TickerScreener: shortlisting top-{SHORTLIST_LIMIT} from {len(top50)} candidates...")
         self._log(f"[TickerScreener] shortlist: sending prompt ({len(prompt)} chars) to LLM...")
         raw = self.llm_client(prompt)
+        print(f"  [LLM] TickerScreener: shortlist done")
 
         try:
             data    = json.loads(raw)
@@ -170,10 +172,12 @@ class TickerScreener:
         ohlcv:     dict,
         rag_store: object = None,
     ) -> list[dict]:
-        """One LLM call per ticker. Returns list of verdict dicts."""
-        results = []
-        for ticker in tickers:
-            self._log(f"[TickerScreener] screening {ticker}...")
+        """One LLM call per ticker, executed in parallel. Returns list of verdict dicts."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        total = len(tickers)
+
+        def _screen_one(ticker: str) -> dict:
             prompt = _VERDICT_PROMPT.format(
                 ticker      = ticker,
                 favored     = ", ".join(macro.get("favored_sectors", [])),
@@ -188,8 +192,20 @@ class TickerScreener:
                     news_block = "\n".join(f"- {c}" for c in chunks)
                     prompt += f"\n\nRelevant news:\n{news_block}"
             raw = self.llm_client(prompt)
-            results.append({"ticker": ticker, **self._parse_verdict(raw)})
-        return results
+            verdict = self._parse_verdict(raw)
+            print(f"  [LLM] TickerScreener: {ticker} → {verdict.get('verdict', '?')}")
+            return {"ticker": ticker, **verdict}
+
+        print(f"  [LLM] TickerScreener: screening {total} tickers in parallel...")
+        results_map: dict[str, dict] = {}
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = {pool.submit(_screen_one, t): t for t in tickers}
+            for future in as_completed(futures):
+                result = future.result()
+                results_map[result["ticker"]] = result
+
+        # preserve original order
+        return [results_map[t] for t in tickers if t in results_map]
 
     # ── private helpers ───────────────────────────────────────────────────────
 

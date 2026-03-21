@@ -26,6 +26,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import yfinance as yf
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Minimum rows needed to compute all features (252 trading days ≈ 1 year)
 _MIN_ROWS = 30
@@ -44,19 +45,23 @@ class OHLCVFetcher:
         DataFrame for a ticker (unknown symbol, delisted, etc.) the value is
         None.  Other tickers are unaffected.
         """
-        data: dict[str, pd.DataFrame | None] = {}
-        for ticker in tickers:
+        def _fetch_one(ticker: str) -> tuple[str, pd.DataFrame | None]:
             try:
-                df = yf.download(ticker, period=period, auto_adjust=True)
+                df = yf.download(ticker, period=period, auto_adjust=True, progress=False)
                 if df.empty:
-                    data[ticker] = None
-                    continue
-                # Newer yfinance returns MultiIndex columns ("Close", "AAPL") — flatten
+                    return ticker, None
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.get_level_values(0)
-                data[ticker] = df
+                return ticker, df
             except Exception:
-                data[ticker] = None
+                return ticker, None
+
+        data: dict[str, pd.DataFrame | None] = {}
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(_fetch_one, t): t for t in tickers}
+            for future in as_completed(futures):
+                ticker, df = future.result()
+                data[ticker] = df
         return data
 
     def compute_features(self, df: pd.DataFrame) -> dict[str, float]:

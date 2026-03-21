@@ -70,9 +70,11 @@ class MacroScreener:
             return dict(_NEUTRAL_DEFAULT)
 
         prompt = self._build_prompt(summary)
+        print(f"  [LLM] MacroScreener: analysing macro environment...")
         self._log(f"[MacroScreener] sending prompt ({len(prompt)} chars) to LLM...")
 
         raw    = self.llm_client(prompt)
+        print(f"  [LLM] MacroScreener: done")
         self._log(f"[MacroScreener] raw response ({len(raw)} chars):\n{raw[:400]}")
 
         return self._parse(raw)

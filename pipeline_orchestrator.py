@@ -30,6 +30,7 @@ Public interface
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
@@ -69,6 +70,7 @@ class PipelineOrchestrator:
         m = self._modules
 
         # ── Stage 1: collect ──────────────────────────────────────────────────
+        print(f"\n[Stage 1] Collecting news {start} → {collect_end} ...")
         articles = self._safe(
             "collector",
             lambda: m["collector"].collect_range(start, collect_end),
@@ -76,6 +78,7 @@ class PipelineOrchestrator:
         )
 
         # ── Stage 1b: RAG insert news ─────────────────────────────────────────
+        print("[Stage 1b] Inserting news into RAG store ...")
         self._safe(
             "rag_store.insert_news",
             lambda: m["rag_store"].insert_news(articles),
@@ -83,6 +86,7 @@ class PipelineOrchestrator:
         )
 
         # ── Stage 1c: fetch + embed prediction markets ────────────────────────
+        print("[Stage 1c] Fetching prediction markets ...")
         markets = self._safe(
             "market_client.fetch",
             lambda: m["market_client"].fetch(run_date),
@@ -90,6 +94,7 @@ class PipelineOrchestrator:
         ) or []
 
         # ── Stage 2: summarize ────────────────────────────────────────────────
+        print("[Stage 2] Summarizing news ...")
         summary = self._safe(
             "summarizer",
             lambda: m["summarizer"].summarize(articles, as_of_date=run_date, markets=markets),
@@ -97,6 +102,7 @@ class PipelineOrchestrator:
         )
 
         # ── Stage 3: macro screen ─────────────────────────────────────────────
+        print("[Stage 3] Running macro screen ...")
         macro = self._safe(
             "macro_screener",
             lambda: m["macro_screener"].screen(summary),
@@ -104,6 +110,7 @@ class PipelineOrchestrator:
         )
 
         # ── Stage 4: prefilter ────────────────────────────────────────────────
+        print("[Stage 4] Prefiltering tickers ...")
         top50 = self._safe(
             "screener.prefilter",
             lambda: m["screener"].prefilter(articles),
@@ -120,18 +127,23 @@ class PipelineOrchestrator:
                 execution_brief={"active_signals": [], "inactive_count": 0,
                                  "portfolio_risk": {"active_count": 0, "total_dollar_risk": 0.0, "pct_of_portfolio": 0.0},
                                  "warnings": []},
+                spy_ohlcv=None,
+                correlation_warnings=[],
             )
 
         tickers = top50["ticker"].tolist()
 
-        # ── Stage 5: fetch OHLCV ──────────────────────────────────────────────
+        # ── Stage 5: fetch OHLCV (tickers + SPY benchmark) ───────────────────
+        print(f"[Stage 5] Fetching OHLCV for {len(tickers)} tickers + SPY benchmark ...")
+        all_tickers = list(dict.fromkeys(tickers + ["SPY"]))  # deduplicate, preserve order
         ohlcv_raw = self._safe(
             "fetcher.fetch",
-            lambda: m["fetcher"].fetch(tickers),
+            lambda: m["fetcher"].fetch(all_tickers),
             {},
         )
 
         # ── Stage 6: compute features ─────────────────────────────────────────
+        print(f"[Stage 6] Computing features ...")
         features: dict[str, Any] = {}
         for ticker in tickers:
             df = (ohlcv_raw or {}).get(ticker)
@@ -143,6 +155,7 @@ class PipelineOrchestrator:
                 )
 
         # ── Stage 7: shortlist ────────────────────────────────────────────────
+        print("[Stage 7] Shortlisting tickers ...")
         shortlisted = self._safe(
             "screener.shortlist",
             lambda: m["screener"].shortlist(top50, macro, features),
@@ -153,6 +166,7 @@ class PipelineOrchestrator:
         shortlisted = shortlisted[:max_tickers]
 
         # ── Stage 8: verdicts ─────────────────────────────────────────────────
+        print(f"[Stage 8] Screening {len(shortlisted)} tickers ...")
         ticker_verdicts = self._safe(
             "screener.screen_tickers",
             lambda: m["screener"].screen_tickers(
@@ -162,6 +176,7 @@ class PipelineOrchestrator:
         )
 
         # ── Stage 9: regime classification ───────────────────────────────────
+        print("[Stage 9] Classifying market regimes ...")
         ohlcv_shortlisted = {t: (ohlcv_raw or {}).get(t) for t in shortlisted}
         regimes = self._safe(
             "classifier.classify_all",
@@ -170,15 +185,19 @@ class PipelineOrchestrator:
         )
 
         # ── Stage 10: per-ticker strategy / backtest / diagnostics / MC ─────
+        print(f"[Stage 10] Running per-ticker analysis for {len(regimes or [])} tickers in parallel ...")
         strategies:    list[dict] = []
         backtests:     list[dict] = []
         diagnostics:   list[dict] = []
         monte_carlos:  list[dict] = []
 
-        for regime in (regimes or []):
-            ticker  = regime["ticker"]
-            ohlcv   = (ohlcv_raw or {}).get(ticker)
-            feats   = features.get(ticker, {})
+        portfolio = self._cfg.get("initial_portfolio", 100_000.0)
+
+        def _analyse_ticker(regime: dict) -> dict:
+            ticker = regime["ticker"]
+            ohlcv  = (ohlcv_raw or {}).get(ticker)
+            feats  = features.get(ticker, {})
+            print(f"  [Stage 10] {ticker} — strategy select / backtest / diagnostics ...")
 
             strategy = self._safe(
                 f"selector.select({ticker})",
@@ -186,28 +205,21 @@ class PipelineOrchestrator:
                 None,
             )
 
-            # Attach current signal status so the report can show live entry conditions
             if strategy and ohlcv is not None:
-                _portfolio = self._cfg.get("initial_portfolio", 100_000.0)
                 sig = self._safe(
                     f"backtester.signal_status({ticker})",
-                    lambda _s=strategy, _o=ohlcv, _p=_portfolio: m["backtester"].signal_status(
+                    lambda _s=strategy, _o=ohlcv, _p=portfolio: m["backtester"].signal_status(
                         _s["strategy"], _o, _s["adjusted_params"], _p
                     ),
                     {"signal_active": None, "details": "N/A", "setup": None},
                 )
                 strategy = {**strategy, "current_signal": sig}
 
-            if strategy:
-                strategies.append(strategy)
-
             backtest = self._safe(
                 f"backtester.run({ticker})",
                 lambda _t=ticker, _s=strategy, _o=ohlcv: m["backtester"].run(_t, _s, _o),
                 None,
             )
-            if backtest:
-                backtests.append(backtest)
 
             diagnostic = self._safe(
                 f"diagnostics.run({ticker})",
@@ -219,23 +231,89 @@ class PipelineOrchestrator:
                 ) if _bt else None,
                 None,
             )
-            if diagnostic:
-                diagnostics.append(diagnostic)
 
-            # Monte Carlo — only for strategies that passed diagnostics
+            mc_result = None
             if diagnostic and diagnostic.get("passed") and backtest:
-                portfolio = self._cfg.get("initial_portfolio", 100_000.0)
-                mc_result = self._safe(
-                    f"monte_carlo.run({ticker})",
-                    lambda _bt=backtest, _p=portfolio: m["monte_carlo"].run(
-                        _bt["trade_log"], _p
-                    ),
-                    None,
-                )
-                if mc_result:
-                    monte_carlos.append({"ticker": ticker, **mc_result})
+                trade_count = len(backtest.get("trade_log", []))
+                if trade_count < 30:
+                    print(f"  [Stage 10] {ticker} — MC skipped (only {trade_count} trades, need 30+)")
+                    mc_result = {"insufficient_sample": True, "trade_count": trade_count}
+                else:
+                    print(f"  [Stage 10] {ticker} — running Monte Carlo ({trade_count} trades) ...")
+                    _mc = self._safe(
+                        f"monte_carlo.run({ticker})",
+                        lambda _bt=backtest, _p=portfolio: m["monte_carlo"].run(_bt["trade_log"], _p),
+                        None,
+                    )
+                    if _mc:
+                        mc_result = {**_mc, "trade_count": trade_count}
+
+            return {
+                "ticker":     ticker,
+                "strategy":   strategy,
+                "backtest":   backtest,
+                "diagnostic": diagnostic,
+                "mc_result":  mc_result,
+            }
+
+        ticker_order = [r["ticker"] for r in (regimes or [])]
+        results_map: dict[str, dict] = {}
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = {pool.submit(_analyse_ticker, r): r["ticker"] for r in (regimes or [])}
+            for future in as_completed(futures):
+                res = future.result()
+                results_map[res["ticker"]] = res
+
+        for ticker in ticker_order:
+            res = results_map.get(ticker, {})
+            if res.get("strategy"):
+                strategies.append(res["strategy"])
+            if res.get("backtest"):
+                backtests.append(res["backtest"])
+            if res.get("diagnostic"):
+                diagnostics.append(res["diagnostic"])
+            if res.get("mc_result"):
+                monte_carlos.append({"ticker": ticker, **res["mc_result"]})
+
+        # ── Correlation warnings ──────────────────────────────────────────────
+        # Flag pairs of shortlisted tickers with >0.95 return correlation (e.g. GOOG/GOOGL)
+        correlation_warnings: list[str] = []
+        try:
+            close_data = {
+                t: (ohlcv_raw or {}).get(t)["Close"].astype(float)
+                for t in shortlisted
+                if (ohlcv_raw or {}).get(t) is not None
+            }
+            if len(close_data) >= 2:
+                ret_df = pd.DataFrame(close_data).pct_change().dropna()
+                corr   = ret_df.corr()
+                tlist  = list(corr.columns)
+                for i in range(len(tlist)):
+                    for j in range(i + 1, len(tlist)):
+                        c = corr.iloc[i, j]
+                        if c > 0.95:
+                            correlation_warnings.append(
+                                f"{tlist[i]} / {tlist[j]} — correlation {c:.2f} "
+                                f"(near-identical exposure, running both doubles concentration risk)"
+                            )
+        except Exception:
+            pass
+
+        # ── Reconcile verdicts against diagnostics ────────────────────────────
+        # A BUY verdict that has a failed (or missing) diagnostic is contradictory.
+        # Downgrade such tickers to WATCH so the report is self-consistent.
+        passed_tickers = {d["ticker"] for d in diagnostics if d.get("passed")}
+        reconciled_verdicts = []
+        for v in (ticker_verdicts or []):
+            if v.get("verdict", "").lower() == "buy" and v["ticker"] not in passed_tickers:
+                reconciled_verdicts.append({**v, "verdict": "watch",
+                    "reasoning": f"[Downgraded from BUY — backtest diagnostic did not pass] {v.get('reasoning', '')}"})
+            else:
+                reconciled_verdicts.append(v)
+        ticker_verdicts = reconciled_verdicts
 
         # ── Stage 11: execution brief ─────────────────────────────────────────
+        print("[Stage 11] Building execution brief ...")
         execution_brief = self._safe(
             "execution_advisor.advise",
             lambda: m["execution_advisor"].advise(strategies),
@@ -243,6 +321,8 @@ class PipelineOrchestrator:
              "portfolio_risk": {"active_count": 0, "total_dollar_risk": 0.0, "pct_of_portfolio": 0.0},
              "warnings": []},
         )
+
+        spy_ohlcv = (ohlcv_raw or {}).get("SPY")
 
         return self._finish(
             m, run_date, summary, macro,
@@ -254,6 +334,8 @@ class PipelineOrchestrator:
             backtests=backtests,
             monte_carlos=monte_carlos,
             execution_brief=execution_brief,
+            spy_ohlcv=spy_ohlcv,
+            correlation_warnings=correlation_warnings,
         )
 
     # ── internal helpers ──────────────────────────────────────────────────────
@@ -273,6 +355,7 @@ class PipelineOrchestrator:
             "macro":           macro,
             **kwargs,
         }
+        print("[Stage 12] Generating report ...")
         report_path = m["reporter"].generate(pipeline_output)
         return {
             "report_path": report_path,

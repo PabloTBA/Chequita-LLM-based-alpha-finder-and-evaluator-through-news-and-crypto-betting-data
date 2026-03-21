@@ -223,9 +223,11 @@ class NewsSummarizer:
             return {**base, **NO_DATA_RESULT}
 
         prompt = self._build_prompt(stock_df, global_df, industry_df, as_of_date, markets)
+        print(f"  [LLM] NewsSummarizer: summarising {total_count} articles...")
         self._log(f"[NewsSummarizer] prompt built — {len(prompt)} chars, sending to LLM...")
 
         raw    = self.llm_client(prompt)
+        print(f"  [LLM] NewsSummarizer: done")
         self._log(f"[NewsSummarizer] LLM response received — {len(raw)} chars")
         self._log(f"[NewsSummarizer] raw response:\n{raw[:500]}")
 
