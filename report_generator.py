@@ -466,22 +466,22 @@ class ReportGenerator:
                     dstr = date.strftime("%Y-%m-%d") if hasattr(date, "strftime") else str(date)
                     blocks.append(f"| {dstr} | {val:.2%} |")
 
-            # Walk-Forward table
+            # Walk-Forward table (70/30 IS/OOS split — industry standard)
             if not returns.empty:
-                mid     = len(returns) // 2
-                is_ret  = returns.iloc[:mid]
-                oos_ret = returns.iloc[mid:]
-                blocks += ["", "#### Walk-Forward Returns", "",
+                split   = int(len(returns) * 0.70)
+                is_ret  = returns.iloc[:split]
+                oos_ret = returns.iloc[split:]
+                blocks += ["", "#### Walk-Forward Returns (70% IS / 30% OOS)", "",
                            "| Period | Start | End | Cumulative Return |",
                            "|--------|-------|-----|-------------------|"]
                 is_cum  = float((1 + is_ret).prod() - 1)
                 oos_cum = float((1 + oos_ret).prod() - 1)
-                is_start  = returns.index[0].strftime("%Y-%m-%d")  if hasattr(returns.index[0],  "strftime") else str(returns.index[0])
-                is_end    = returns.index[mid-1].strftime("%Y-%m-%d") if hasattr(returns.index[mid-1], "strftime") else str(returns.index[mid-1])
-                oos_start = returns.index[mid].strftime("%Y-%m-%d")   if hasattr(returns.index[mid],   "strftime") else str(returns.index[mid])
-                oos_end   = returns.index[-1].strftime("%Y-%m-%d")    if hasattr(returns.index[-1],    "strftime") else str(returns.index[-1])
-                blocks.append(f"| In-Sample    | {is_start}  | {is_end}  | {is_cum:.2%} |")
-                blocks.append(f"| Out-of-Sample| {oos_start} | {oos_end} | {oos_cum:.2%} |")
+                is_start  = returns.index[0].strftime("%Y-%m-%d")      if hasattr(returns.index[0],      "strftime") else str(returns.index[0])
+                is_end    = returns.index[split-1].strftime("%Y-%m-%d") if hasattr(returns.index[split-1],"strftime") else str(returns.index[split-1])
+                oos_start = returns.index[split].strftime("%Y-%m-%d")   if hasattr(returns.index[split],  "strftime") else str(returns.index[split])
+                oos_end   = returns.index[-1].strftime("%Y-%m-%d")      if hasattr(returns.index[-1],     "strftime") else str(returns.index[-1])
+                blocks.append(f"| In-Sample (70%)     | {is_start}  | {is_end}  | {is_cum:.2%} |")
+                blocks.append(f"| Out-of-Sample (30%) | {oos_start} | {oos_end} | {oos_cum:.2%} |")
 
             # Return distribution (histogram bins)
             if not returns.empty:

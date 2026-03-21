@@ -33,7 +33,7 @@ HURST_MEAN_REVERTING = 0.45
 ATR_HIGH_VOL         = 0.03    # 3%
 ATR_LOW_VOL          = 0.015   # 1.5%
 MIN_ROWS             = 30
-HURST_WINDOW         = 30      # trading days used for Hurst
+HURST_WINDOW         = 100     # trading days used for Hurst (30 is too noisy; 100 is industry minimum)
 ATR_PERIOD           = 14
 
 

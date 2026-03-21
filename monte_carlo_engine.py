@@ -72,6 +72,15 @@ class MonteCarloEngine:
         n_trades  = len(pnls)
         ruin_floor = initial_portfolio * (1.0 - self.ruin_threshold)
 
+        # Compute actual backtest duration in years from trade dates
+        # (not n_trades/252 which conflates trade frequency with time)
+        try:
+            first_entry = min(t["entry_date"] for t in trade_log)
+            last_exit   = max(t["exit_date"]  for t in trade_log)
+            backtest_years = max((last_exit - first_entry).days / 365.25, 1 / 12)
+        except Exception:
+            backtest_years = n_trades / TRADING_DAYS  # fallback if dates missing
+
         # Draw all simulations at once: shape (n_simulations, n_trades)
         indices = self._rng.integers(0, n_trades, size=(self.n_simulations, n_trades))
         sampled = pnls[indices]                          # (n_sims, n_trades)
@@ -90,12 +99,11 @@ class MonteCarloEngine:
         drawdowns    = (rolling_max - equity) / np.where(rolling_max > 0, rolling_max, 1)
         max_dd       = drawdowns.max(axis=1)
 
-        # CAGR per sim (treat n_trades as n_trades trading days for scaling)
-        years        = n_trades / TRADING_DAYS
+        # CAGR per sim — annualised over actual backtest calendar duration
         with np.errstate(invalid="ignore", divide="ignore"):
             cagr = np.where(
                 (initial_portfolio > 0) & (final_equity > 0),
-                (final_equity / initial_portfolio) ** (1.0 / years) - 1.0,
+                (final_equity / initial_portfolio) ** (1.0 / backtest_years) - 1.0,
                 -1.0,
             )
 

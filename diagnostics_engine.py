@@ -28,11 +28,12 @@ import pandas as pd
 # ── Hard floor constants (PRD defaults) ───────────────────────────────────────
 
 SHARPE_FLOOR          = 0.50
-MAX_DD_FLOOR          = 0.30
+MAX_DD_FLOOR          = 0.20   # tightened from 30% → 20% (institutional standard)
 WIN_RATE_FLOOR        = 0.35
 WALKFWD_DEGRAD_FLOOR  = 0.50
-MIN_TRADE_COUNT       = 10
+MIN_TRADE_COUNT       = 30     # raised from 10 → 30 (minimum for statistical significance)
 TRADING_DAYS          = 252
+RISK_FREE_RATE        = 0.045  # annualised risk-free rate (~current Fed funds); subtract from Sharpe
 
 
 class DiagnosticsEngine:
@@ -137,11 +138,12 @@ class DiagnosticsEngine:
 
     @staticmethod
     def _sharpe(returns: pd.Series) -> float:
-        """Annualized Sharpe ratio (risk-free rate = 0)."""
+        """Annualized Sharpe ratio net of risk-free rate."""
         std = returns.std(ddof=1)
         if std == 0 or np.isnan(std):
             return 0.0
-        return float(returns.mean() / std * np.sqrt(TRADING_DAYS))
+        daily_rf = RISK_FREE_RATE / TRADING_DAYS
+        return float((returns.mean() - daily_rf) / std * np.sqrt(TRADING_DAYS))
 
     @staticmethod
     def _max_drawdown(returns: pd.Series) -> float:
@@ -162,19 +164,20 @@ class DiagnosticsEngine:
     @staticmethod
     def _walk_forward_degradation(returns: pd.Series) -> float:
         """
-        Split returns 50/50 in-sample / out-of-sample.
+        Split returns 70/30 in-sample / out-of-sample (industry standard).
         Degradation = (IS_Sharpe - OOS_Sharpe) / IS_Sharpe, clamped to [0, 1].
         Returns 1.0 when IS_Sharpe ≤ 0 (degenerate / already bad in-sample).
         """
-        mid       = len(returns) // 2
-        in_sample = returns.iloc[:mid]
-        oos       = returns.iloc[mid:]
+        split     = int(len(returns) * 0.70)
+        in_sample = returns.iloc[:split]
+        oos       = returns.iloc[split:]
 
         def sharpe(r: pd.Series) -> float:
             std = r.std(ddof=1)
             if std == 0 or np.isnan(std):
                 return 0.0
-            return float(r.mean() / std * np.sqrt(TRADING_DAYS))
+            daily_rf = RISK_FREE_RATE / TRADING_DAYS
+            return float((r.mean() - daily_rf) / std * np.sqrt(TRADING_DAYS))
 
         is_sharpe  = sharpe(in_sample)
         oos_sharpe = sharpe(oos)
