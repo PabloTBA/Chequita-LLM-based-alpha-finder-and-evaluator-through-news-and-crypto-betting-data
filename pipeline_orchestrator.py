@@ -326,9 +326,13 @@ class PipelineOrchestrator:
             [],
         )
 
-        # ── Stage 9: regime classification ───────────────────────────────────
-        print("[Stage 9] Classifying market regimes ...")
-        ohlcv_shortlisted = {t: (ohlcv_raw or {}).get(t) for t in shortlisted}
+        # ── Stage 9: regime classification (skip AVOID tickers) ──────────────
+        avoid_set = {v["ticker"] for v in (ticker_verdicts or []) if v.get("verdict", "").lower() == "avoid"}
+        actionable = [t for t in shortlisted if t not in avoid_set]
+        if avoid_set:
+            print(f"[Stage 9] Skipping {len(avoid_set)} AVOID ticker(s): {', '.join(sorted(avoid_set))}")
+        print(f"[Stage 9] Classifying market regimes for {len(actionable)} ticker(s) ...")
+        ohlcv_shortlisted = {t: (ohlcv_raw or {}).get(t) for t in actionable}
         regimes = self._safe(
             "classifier.classify_all",
             lambda: m["classifier"].classify_all(ohlcv_shortlisted),
