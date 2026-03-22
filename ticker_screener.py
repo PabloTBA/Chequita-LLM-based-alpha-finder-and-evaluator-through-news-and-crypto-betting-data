@@ -178,6 +178,12 @@ class TickerScreener:
         total = len(tickers)
 
         def _screen_one(ticker: str) -> dict:
+            # Data quality gate: no OHLCV → skip LLM, return avoid immediately
+            if ohlcv.get(ticker) is None:
+                print(f"  [Skip] TickerScreener: {ticker} → avoid (no OHLCV data)")
+                return {"ticker": ticker, "verdict": "avoid",
+                        "reasoning": "DATA_UNAVAILABLE — no OHLCV price data. Cannot evaluate price action."}
+
             prompt = _VERDICT_PROMPT.format(
                 ticker      = ticker,
                 favored     = ", ".join(macro.get("favored_sectors", [])),

@@ -64,6 +64,7 @@ class ReportGenerator:
         with open(filepath, "w", encoding="utf-8") as f:
             f.write("\n\n".join(sections))
 
+        print(f"  [Report] Full report    → {filepath}")
         return filepath
 
     def generate_summary(self, pipeline_output: dict, timestamp: str | None = None) -> str:
@@ -719,19 +720,20 @@ class ReportGenerator:
                 blocks.append(f"- {w}")
             blocks.append("")
 
-        # Compute SPY buy-and-hold return over the same window for benchmark
-        spy_return: float | None = None
+        # SPY full buy-and-hold return (context only)
+        spy_bnh: float | None = None
+        spy_close_full: "pd.Series | None" = None
         if spy_ohlcv is not None and not spy_ohlcv.empty:
             try:
-                spy_close  = spy_ohlcv["Close"].astype(float)
-                spy_return = float((spy_close.iloc[-1] - spy_close.iloc[0]) / spy_close.iloc[0])
+                spy_close_full = spy_ohlcv["Close"].astype(float)
+                spy_bnh = float((spy_close_full.iloc[-1] - spy_close_full.iloc[0]) / spy_close_full.iloc[0])
             except Exception:
-                spy_return = None
+                spy_bnh = None
 
-        if spy_return is not None:
+        if spy_bnh is not None:
             blocks += [
-                f"**SPY Buy-and-Hold (same window):** {spy_return:.2%}  ",
-                "_Use this as the benchmark — any strategy below this is underperforming the market._",
+                f"**SPY Buy-and-Hold (full window):** {spy_bnh:.2%}  ",
+                "_Note: each ticker also shows an exposure-adjusted SPY return — SPY compounded only on days the strategy was invested. This is the fair apples-to-apples comparison._",
                 "",
             ]
 
@@ -741,14 +743,34 @@ class ReportGenerator:
             trade_log = bt.get("trade_log", [])
             equity    = bt.get("equity_curve", pd.Series(dtype=float))
             returns   = bt.get("returns", pd.Series(dtype=float))
+            in_pos    = bt.get("in_position", pd.Series(dtype=bool))
 
             net_ret   = summary.get("total_return", 0)
             gross_ret = summary.get("gross_return", 0)
             slip_cost = summary.get("total_slippage_cost", 0)
-            vs_spy    = ""
-            if spy_return is not None:
-                diff = net_ret - spy_return
-                vs_spy = f"  **vs SPY: {diff:+.2%}** ({'alpha' if diff >= 0 else 'underperform'})"
+
+            # Exposure-adjusted SPY: compound SPY only on days strategy was invested
+            spy_exp_adj: float | None = None
+            if spy_close_full is not None and len(in_pos) > 0:
+                try:
+                    spy_dr      = spy_close_full.pct_change().fillna(0.0)
+                    common      = in_pos.index.intersection(spy_dr.index)
+                    in_pos_c    = in_pos.reindex(common, fill_value=False)
+                    spy_dr_c    = spy_dr.reindex(common, fill_value=0.0)
+                    invested_r  = spy_dr_c[in_pos_c]
+                    pct_invested = float(in_pos_c.sum()) / max(len(in_pos_c), 1)
+                    if len(invested_r) > 0:
+                        spy_exp_adj = float((1 + invested_r).prod() - 1)
+                except Exception:
+                    spy_exp_adj = None
+
+            vs_spy = ""
+            if spy_exp_adj is not None:
+                diff   = net_ret - spy_exp_adj
+                vs_spy = f"  **vs SPY (exposure-adj): {diff:+.2%}** ({'alpha ✅' if diff >= 0 else 'underperform ❌'})"
+            elif spy_bnh is not None:
+                diff   = net_ret - spy_bnh
+                vs_spy = f"  **vs SPY B&H: {diff:+.2%}**"
 
             blocks += [
                 f"### {ticker} — {bt['strategy']}",

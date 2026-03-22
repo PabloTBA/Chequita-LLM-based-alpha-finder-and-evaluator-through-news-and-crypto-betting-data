@@ -64,6 +64,31 @@ class OHLCVFetcher:
                 data[ticker] = df
         return data
 
+    def add_earnings_blackout(self, ticker: str, df: pd.DataFrame, window: int = 3) -> pd.DataFrame:
+        """
+        Add an 'earnings_blackout' boolean column to the OHLCV dataframe.
+        True on days within ±window trading days of any historical earnings release.
+        """
+        df = df.copy()
+        df["earnings_blackout"] = False
+        try:
+            ed = yf.Ticker(ticker).earnings_dates
+            if ed is None or ed.empty:
+                return df
+            for edate in ed.index:
+                edate_ts = pd.Timestamp(edate).normalize().tz_localize(None)
+                # find nearest index position
+                pos = df.index.searchsorted(edate_ts)
+                lo  = max(0, pos - window)
+                hi  = min(len(df), pos + window + 1)
+                df.iloc[lo:hi, df.columns.get_loc("earnings_blackout")] = True
+            count = int(df["earnings_blackout"].sum())
+            if count > 0:
+                print(f"  [Earnings] {ticker}: {count} blackout days (±{window} trading days around earnings)")
+        except Exception:
+            pass
+        return df
+
     def compute_features(self, df: pd.DataFrame) -> dict[str, float]:
         """
         Compute summary features from a raw OHLCV DataFrame.

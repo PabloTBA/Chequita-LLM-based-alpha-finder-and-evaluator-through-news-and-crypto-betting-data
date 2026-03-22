@@ -70,6 +70,10 @@ class DiagnosticsEngine:
         self._log(f"[DiagnosticsEngine] {ticker}: {metrics}")
 
         passed, reject_reason = self._check_floors(metrics)
+        status = "PASS ✓" if passed else f"FAIL — {reject_reason}"
+        print(f"  [Diag] {ticker}: Sharpe={metrics['sharpe']:.3f}  MaxDD={metrics['max_drawdown']:.1%}  "
+              f"WinRate={metrics['win_rate']:.1%}  WFDegrad={metrics['walk_forward_degradation']:.1%}  "
+              f"Trades={metrics['trade_count']}  → {status}")
 
         llm_commentary: Optional[str] = None
         if passed and self.llm_client is not None:

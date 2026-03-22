@@ -66,11 +66,13 @@ class MonteCarloEngine:
 
     def run(self, trade_log: list[dict], initial_portfolio: float = 100_000.0) -> dict:
         if not trade_log:
+            print("  [MC]  No trades — returning empty result")
             return self._empty_result(initial_portfolio)
 
         pnls      = np.array([t["pnl"] for t in trade_log], dtype=float)
         n_trades  = len(pnls)
         ruin_floor = initial_portfolio * (1.0 - self.ruin_threshold)
+        print(f"  [MC]  Running {self.n_simulations:,} simulations ({n_trades} trades, portfolio ${initial_portfolio:,.0f}) ...")
 
         # Compute actual backtest duration in years from trade dates
         # (not n_trades/252 which conflates trade frequency with time)
@@ -157,6 +159,9 @@ class MonteCarloEngine:
             for s in band_indices
         ]
 
+        print(f"  [MC]  Done — p_ruin={p_ruin:.1%}  median_CAGR={float(np.median(cagr)):.1%}  "
+              f"p50_equity=${float(np.percentile(final_equity, 50)):,.0f}  "
+              f"p95_maxDD={float(np.percentile(max_dd, 95)):.1%}")
         return {
             # equity distribution
             "p5_final":            float(np.percentile(final_equity, 5)),

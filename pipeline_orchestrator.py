@@ -282,6 +282,16 @@ class PipelineOrchestrator:
                         print(f"  [WARN] Data integrity: {ta} and {tb} have identical Close series — possible yfinance cache collision. {tb} will be dropped.")
                         ohlcv_raw[tb] = None
 
+        # ── Stage 5c: earnings blackout dates ────────────────────────────────
+        print(f"[Stage 5c] Fetching earnings blackout dates ...")
+        for _t in tickers:
+            if (ohlcv_raw or {}).get(_t) is not None:
+                ohlcv_raw[_t] = self._safe(
+                    f"fetcher.add_earnings_blackout({_t})",
+                    lambda _ticker=_t, _df=ohlcv_raw[_t]: m["fetcher"].add_earnings_blackout(_ticker, _df),
+                    ohlcv_raw[_t],
+                )
+
         # ── Stage 6: compute features ─────────────────────────────────────────
         print(f"[Stage 6] Computing features ...")
         features: dict[str, Any] = {}
@@ -338,6 +348,14 @@ class PipelineOrchestrator:
             ticker = regime["ticker"]
             ohlcv  = (ohlcv_raw or {}).get(ticker)
             feats  = features.get(ticker, {})
+
+            # AVOID gate: skip full analysis if LLM rated this ticker AVOID
+            tv = next((v for v in (ticker_verdicts or []) if v["ticker"] == ticker), None)
+            if tv and tv.get("verdict", "").lower() == "avoid":
+                print(f"  [Stage 10] {ticker} — skipping strategy/backtest (AVOID verdict)")
+                return {"ticker": ticker, "strategy": None, "backtest": None,
+                        "diagnostic": None, "mc_result": None}
+
             print(f"  [Stage 10] {ticker} — strategy select / backtest / diagnostics ...")
 
             strategy = self._safe(
@@ -406,20 +424,30 @@ class PipelineOrchestrator:
             )
 
             mc_result = None
-            if diagnostic and diagnostic.get("passed") and backtest:
-                trade_count = len(backtest.get("trade_log", []))
-                if trade_count < 30:
-                    print(f"  [Stage 10] {ticker} — MC skipped (only {trade_count} trades, need 30+)")
-                    mc_result = {"insufficient_sample": True, "trade_count": trade_count}
-                else:
-                    print(f"  [Stage 10] {ticker} — running Monte Carlo ({trade_count} trades) ...")
-                    _mc = self._safe(
-                        f"monte_carlo.run({ticker})",
-                        lambda _bt=backtest, _p=portfolio: m["monte_carlo"].run(_bt["trade_log"], _p),
-                        None,
-                    )
-                    if _mc:
-                        mc_result = {**_mc, "trade_count": trade_count}
+            if backtest and diagnostic:
+                diag_passed    = diagnostic.get("passed", False)
+                diag_sharpe    = diagnostic.get("metrics", {}).get("sharpe", -999)
+                near_threshold = (not diag_passed) and (0.0 < diag_sharpe < 0.5)
+                should_run_mc  = diag_passed or near_threshold
+                trade_count    = len(backtest.get("trade_log", []))
+
+                if should_run_mc:
+                    if trade_count < 30:
+                        label = "PASS" if diag_passed else "STRESS"
+                        print(f"  [Stage 10] {ticker} — MC skipped ({label}, only {trade_count} trades, need 30+)")
+                        mc_result = {"insufficient_sample": True, "trade_count": trade_count,
+                                     "stress_test": not diag_passed}
+                    else:
+                        label = "passed" if diag_passed else f"near-threshold Sharpe={diag_sharpe:.3f}"
+                        print(f"  [Stage 10] {ticker} — running Monte Carlo ({label}, {trade_count} trades) ...")
+                        _mc = self._safe(
+                            f"monte_carlo.run({ticker})",
+                            lambda _bt=backtest, _p=portfolio: m["monte_carlo"].run(_bt["trade_log"], _p),
+                            None,
+                        )
+                        if _mc:
+                            mc_result = {**_mc, "trade_count": trade_count,
+                                         "stress_test": not diag_passed}
 
             return {
                 "ticker":     ticker,

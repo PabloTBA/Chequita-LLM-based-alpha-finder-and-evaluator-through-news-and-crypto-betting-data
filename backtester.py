@@ -77,12 +77,21 @@ class Backtester:
         returns      = self._build_returns(ohlcv, trade_log, equity_curve)
         summary      = self._summarize(trade_log, equity_curve)
 
+        # in_position series — used for exposure-adjusted benchmark
+        in_pos = pd.Series(False, index=ohlcv.index)
+        for trade in trade_log:
+            try:
+                in_pos.loc[trade["entry_date"]:trade["exit_date"]] = True
+            except Exception:
+                pass
+
         return {
             "ticker":       ticker,
             "strategy":     strategy_type,
             "trade_log":    trade_log,
             "equity_curve": equity_curve,
             "returns":      returns,
+            "in_position":  in_pos,
             "summary":      summary,
         }
 
@@ -105,6 +114,7 @@ class Backtester:
         ma            = close.rolling(ma_period).mean()
         vol_ma        = volume.rolling(20).mean().shift(1)
         rolling_high  = close.rolling(entry_lookback).max().shift(1)
+        blackout      = ohlcv["earnings_blackout"] if "earnings_blackout" in ohlcv.columns else pd.Series(False, index=ohlcv.index)
 
         start = max(entry_lookback, 20, ma_period, ATR_PERIOD)
 
@@ -127,7 +137,7 @@ class Backtester:
                 continue
 
             if not in_position:
-                if c > rh and v > vol_multiplier * vm:
+                if c > rh and v > vol_multiplier * vm and not bool(blackout.iloc[i]):
                     in_position  = True
                     entry_price  = c * (1 + self._slip)   # pay spread on entry
                     entry_date   = close.index[i]
@@ -139,17 +149,19 @@ class Backtester:
                     reached_1r   = False
             else:
                 holding_days += 1
-                peak             = max(peak, c)
-                trailing_stop    = peak - trailing_stop_atr * a
-                h_bar            = float(high.iloc[i])
+                peak          = max(peak, c)
+                # Trailing stop ratchets up with peak but never below the hard stop floor.
+                # At entry peak==entry so trailing_stop starts at stop_price level.
+                # Once price rises, trailing_stop lifts above stop_price and locks in profit.
+                trailing_stop = max(peak - trailing_stop_atr * a, stop_price)
+                h_bar         = float(high.iloc[i])
                 if h_bar >= target_1r:
                     reached_1r = True
 
                 exit_reason: str | None = None
-                if c < stop_price:
-                    exit_reason = "stop_loss"
-                elif c < trailing_stop:
-                    exit_reason = "trailing_stop"
+                if c < trailing_stop:
+                    # If trailing_stop == stop_price → hard stop fired; otherwise profit trailing stop
+                    exit_reason = "stop_loss" if trailing_stop <= stop_price + 1e-6 else "trailing_stop"
                 elif c < m:
                     exit_reason = "ma_exit"
                 elif holding_days >= max_holding:
@@ -190,6 +202,7 @@ class Backtester:
         bb_std   = close.rolling(bb_period).std(ddof=1)
         lower_bb = bb_ma - bb_std_mult * bb_std
         middle_bb = bb_ma
+        blackout  = ohlcv["earnings_blackout"] if "earnings_blackout" in ohlcv.columns else pd.Series(False, index=ohlcv.index)
 
         start = max(bb_period, RSI_PERIOD, ATR_PERIOD)
 
@@ -211,7 +224,7 @@ class Backtester:
                 continue
 
             if not in_position:
-                if r < rsi_entry and c <= lb:
+                if r < rsi_entry and c <= lb and not bool(blackout.iloc[i]):
                     in_position  = True
                     entry_price  = c * (1 + self._slip)   # pay spread on entry
                     entry_date   = close.index[i]

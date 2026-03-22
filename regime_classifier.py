@@ -85,7 +85,9 @@ class RegimeClassifier:
             if df is None or df.empty:
                 continue
             try:
-                results.append(self.classify(ticker, df))
+                r = self.classify(ticker, df)
+                print(f"  [Regime] {ticker}: {r['regime']}  Hurst={r['hurst']:.3f}  ATR%={r['atr_pct']:.2%}")
+                results.append(r)
             except ValueError:
                 continue
         return results
