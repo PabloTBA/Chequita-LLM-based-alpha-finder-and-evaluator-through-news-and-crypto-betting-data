@@ -56,8 +56,9 @@ class OHLCVFetcher:
             except Exception:
                 return ticker, None
 
+        # max_workers=1 avoids yfinance internal cache collisions under threading
         data: dict[str, pd.DataFrame | None] = {}
-        with ThreadPoolExecutor(max_workers=8) as pool:
+        with ThreadPoolExecutor(max_workers=1) as pool:
             futures = {pool.submit(_fetch_one, t): t for t in tickers}
             for future in as_completed(futures):
                 ticker, df = future.result()

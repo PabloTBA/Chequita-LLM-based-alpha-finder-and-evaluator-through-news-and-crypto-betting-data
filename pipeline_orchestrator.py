@@ -277,7 +277,7 @@ class PipelineOrchestrator:
             for i in range(len(ticker_list_check)):
                 for j in range(i + 1, len(ticker_list_check)):
                     ta, tb = ticker_list_check[i], ticker_list_check[j]
-                    sa, sb = close_map[ta].align(close_map[tb], join="inner")
+                    sa, sb = close_map[ta].align(close_map[tb], join="inner", axis=0)
                     if len(sa) > 10 and sa.equals(sb):
                         print(f"  [WARN] Data integrity: {ta} and {tb} have identical Close series — possible yfinance cache collision. {tb} will be dropped.")
                         ohlcv_raw[tb] = None
