@@ -66,7 +66,9 @@
       "Bash(python -m pytest test/test_rag_store.py -q --timeout=120)",
       "Bash(python -m pytest test/test_prediction_market_client.py -x -q)",
       "Bash(python -m pytest test/test_prediction_market_client.py -q)",
-      "Bash(python -m pytest test/ -x -q)"
+      "Bash(python -m pytest test/ -x -q)",
+      "Bash(find /c/Users/panal/Downloads/Chequita-LLM-based-alpha-finder-and-evaluator-through-news-and-crypto-betting-data -maxdepth 2 -type f \\\\\\(-name *.py -o -name server* -o -name app.js -o -name main.py \\\\\\))",
+      "Bash(grep -E \"\\\\.\\(py|js|ts\\)$\")"
     ]
   }
 }

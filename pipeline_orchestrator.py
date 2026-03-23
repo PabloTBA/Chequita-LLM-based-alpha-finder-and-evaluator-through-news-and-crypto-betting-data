@@ -5,17 +5,17 @@ Runs the full alpha-finder pipeline end-to-end.
 
 Stage order
 -----------
-1.  collect_range(start, end)       → articles dict
-2.  summarize(articles, as_of_date) → market summary
-3.  screen(summary)                 → macro analysis
-4.  prefilter(articles)             → top-50 DataFrame
-5.  fetch(tickers)                  → OHLCV dict
-6.  compute_features(df)            → feature dict (per ticker)
-7.  shortlist(tickers, features, macro) → shortlisted tickers
-8.  screen_tickers(tickers, …)      → verdicts list
-9.  classify_all(tickers, ohlcv)    → regime list
+1.  collect_range(start, end)       -> articles dict
+2.  summarize(articles, as_of_date) -> market summary
+3.  screen(summary)                 -> macro analysis
+4.  prefilter(articles)             -> top-50 DataFrame
+5.  fetch(tickers)                  -> OHLCV dict
+6.  compute_features(df)            -> feature dict (per ticker)
+7.  shortlist(tickers, features, macro) -> shortlisted tickers
+8.  screen_tickers(tickers, …)      -> verdicts list
+9.  classify_all(tickers, ohlcv)    -> regime list
 10. (per regime) select + backtest + diagnostics
-11. generate(pipeline_output)       → report path
+11. generate(pipeline_output)       -> report path
 
 Dependency injection
 --------------------
@@ -194,7 +194,7 @@ class PipelineOrchestrator:
         m = self._modules
 
         # ── Stage 1: collect ──────────────────────────────────────────────────
-        print(f"\n[Stage 1] Collecting news {start} → {collect_end} ...")
+        print(f"\n[Stage 1] Collecting news {start} -> {collect_end} ...")
         articles = self._safe(
             "collector",
             lambda: m["collector"].collect_range(start, collect_end),
@@ -411,7 +411,7 @@ class PipelineOrchestrator:
                         if alt_backtest:
                             alt_sharpe = _quick_sharpe(alt_backtest["returns"])
                             if alt_sharpe > current_sharpe:
-                                print(f"  [Stage 10] {ticker} — alt params improved Sharpe {current_sharpe:.3f} → {alt_sharpe:.3f}")
+                                print(f"  [Stage 10] {ticker} — alt params improved Sharpe {current_sharpe:.3f} -> {alt_sharpe:.3f}")
                                 strategy       = alt_strategy
                                 backtest       = alt_backtest
                                 current_sharpe = alt_sharpe

@@ -1,0 +1,58 @@
+[
+  {
+    "date": "2026-03-23",
+    "title": "'EU Digital Rules Should Apply To Big Tech's Smart TVs, Broadcasters Tell Antitrust Chief' - Reuters Exclusive",
+    "url": "https://www.benzinga.com/news/26/03/51399420/eu-digital-rules-should-apply-to-big-techs-smart-tvs-broadcasters-tell-antitrust-chief-reuters-exclu",
+    "publisher": "Benzinga Newsdesk",
+    "tickers": "AAPL, AMZN, GOOG, GOOGL, SSNLF, VGK",
+    "keywords_matched": "",
+    "catalyst_type": "General",
+    "keyword_score": 0,
+    "ticker_score": 6,
+    "publisher_score": 0,
+    "recency_score": 0,
+    "composite_score": 12
+  },
+  {
+    "date": "2026-03-23",
+    "title": "'OpenAI Bets On Altman-Backed Fusion Startup' - Axios",
+    "url": "https://www.benzinga.com/news/26/03/51399429/openai-bets-on-altman-backed-fusion-startup-axios",
+    "publisher": "Benzinga Newsdesk",
+    "tickers": "MSFT",
+    "keywords_matched": "",
+    "catalyst_type": "General",
+    "keyword_score": 0,
+    "ticker_score": 1,
+    "publisher_score": 0,
+    "recency_score": 0,
+    "composite_score": 2
+  },
+  {
+    "date": "2026-03-23",
+    "title": "Insights Into Apple's Performance Versus Peers In Technology Hardware, Storage &amp; Peripherals Sector",
+    "url": "https://www.benzinga.com/insights/news/26/03/51399644/insights-into-apples-performance-versus-peers-in-technology-hardware-storage-amp-peripherals-sector",
+    "publisher": "Benzinga Insights",
+    "tickers": "AAPL",
+    "keywords_matched": "sec, war",
+    "catalyst_type": "Mixed",
+    "keyword_score": 2,
+    "ticker_score": 1,
+    "publisher_score": 0,
+    "recency_score": 0,
+    "composite_score": 8
+  },
+  {
+    "date": "2026-03-23",
+    "title": "Ryan Gosling's 'Project Hail Mary' Smashes Records For Amazon Prime Video",
+    "url": "https://www.benzinga.com/markets/large-cap/26/03/51400946/ryan-goslings-project-hail-mary-smashes-records-for-amazon-prime-video",
+    "publisher": "Anusuya Lahiri",
+    "tickers": "AMZN, DIS, DUNK, FDN, NFLX, PSKY, RXI",
+    "keywords_matched": "",
+    "catalyst_type": "General",
+    "keyword_score": 0,
+    "ticker_score": 7,
+    "publisher_score": 0,
+    "recency_score": 0,
+    "composite_score": 14
+  }
+]
