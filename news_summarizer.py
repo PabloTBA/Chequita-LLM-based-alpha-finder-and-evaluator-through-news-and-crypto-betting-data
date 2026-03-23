@@ -16,9 +16,10 @@ Usage:
 
     def llm_client(prompt: str) -> str:
         resp = ollama.chat(
-            model="qwen3:8b",
+            model="qwen3:14b",
             messages=[{"role": "user", "content": prompt}],
             format="json",
+            options={"temperature": 0.0},
         )
         return resp["message"]["content"]
 

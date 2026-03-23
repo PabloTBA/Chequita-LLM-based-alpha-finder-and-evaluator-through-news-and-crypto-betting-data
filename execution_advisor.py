@@ -41,9 +41,53 @@ Output schema
 
 from __future__ import annotations
 
+import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import yfinance as yf
+
+# ── market hours ──────────────────────────────────────────────────────────────
+
+_ET            = ZoneInfo("America/New_York")
+_MARKET_OPEN   = datetime.time(9, 30)
+_MARKET_CLOSE  = datetime.time(16, 0)
+
+
+def _format_td(td: datetime.timedelta) -> str:
+    total = int(td.total_seconds())
+    h, rem = divmod(total, 3600)
+    m = rem // 60
+    return f"{h}h {m}m" if h else f"{m}m"
+
+
+def get_market_status() -> dict:
+    """Return NYSE open/closed status with human-readable time context."""
+    now = datetime.datetime.now(_ET)
+    wd  = now.weekday()   # 0=Mon … 6=Sun
+    t   = now.time()
+
+    if wd >= 5:
+        days = 7 - wd          # days until next Monday
+        nxt  = (now + datetime.timedelta(days=days)).replace(hour=9, minute=30, second=0, microsecond=0)
+        return {"open": False, "label": "CLOSED — weekend",
+                "detail": f"opens Monday 09:30 ET (in {_format_td(nxt - now)})"}
+
+    if t < _MARKET_OPEN:
+        nxt = now.replace(hour=9, minute=30, second=0, microsecond=0)
+        return {"open": False, "label": "CLOSED — pre-market",
+                "detail": f"opens today 09:30 ET (in {_format_td(nxt - now)})"}
+
+    if t >= _MARKET_CLOSE:
+        days = 1 if wd < 4 else (7 - wd)
+        nxt  = (now + datetime.timedelta(days=days)).replace(hour=9, minute=30, second=0, microsecond=0)
+        label = "tomorrow" if wd < 4 else "Monday"
+        return {"open": False, "label": "CLOSED — after-hours",
+                "detail": f"opens {label} 09:30 ET (in {_format_td(nxt - now)})"}
+
+    closes = now.replace(hour=16, minute=0, second=0, microsecond=0)
+    return {"open": True, "label": "OPEN",
+            "detail": f"closes 16:00 ET (in {_format_td(closes - now)})"}
 
 
 # ── market impact thresholds ──────────────────────────────────────────────────
@@ -66,13 +110,21 @@ class ExecutionAdvisor:
         inactive_count = 0
         warnings:       list[str]  = []
 
+        mkt = get_market_status()
+        print(f"  [Execution] NYSE {mkt['label']} — {mkt['detail']}")
+        if not mkt["open"]:
+            warnings.append(
+                f"NYSE {mkt['label']} ({mkt['detail']}) — "
+                "live quotes unavailable; all slippage estimates are ATR-based"
+            )
+
         for strat in strategies:
             sig = strat.get("current_signal", {})
             if not sig.get("signal_active"):
                 inactive_count += 1
                 continue
 
-            brief, strat_warnings = self._build_brief(strat)
+            brief, strat_warnings = self._build_brief(strat, market_open=mkt["open"])
             active_signals.append(brief)
             warnings.extend(strat_warnings)
 
@@ -80,6 +132,7 @@ class ExecutionAdvisor:
         pct        = (total_risk / self._portfolio * 100) if self._portfolio else 0.0
 
         return {
+            "market_status":  mkt,
             "active_signals": active_signals,
             "inactive_count": inactive_count,
             "portfolio_risk": {
@@ -92,7 +145,7 @@ class ExecutionAdvisor:
 
     # ── internal ──────────────────────────────────────────────────────────────
 
-    def _build_brief(self, strat: dict) -> tuple[dict, list[str]]:
+    def _build_brief(self, strat: dict, market_open: bool = True) -> tuple[dict, list[str]]:
         ticker  = strat["ticker"]
         sig     = strat["current_signal"]
         setup   = sig.get("setup") or {}
@@ -104,10 +157,15 @@ class ExecutionAdvisor:
 
         warnings: list[str] = []
 
-        # ── live bid/ask ──────────────────────────────────────────────────────
-        bid, ask, spread, slippage_per_share, live_ok = self._fetch_spread(ticker, current_atr)
+        # ── live bid/ask (skip when market is closed) ─────────────────────────
+        if not market_open:
+            bid, ask, spread = None, None, None
+            slippage_per_share = current_atr * _ATR_SLIPPAGE_FACTOR
+            live_ok = False
+        else:
+            bid, ask, spread, slippage_per_share, live_ok = self._fetch_spread(ticker, current_atr)
 
-        if not live_ok:
+        if not live_ok and market_open:
             warnings.append(
                 f"{ticker}: live bid/ask unavailable — using ATR-based slippage estimate"
             )
@@ -124,7 +182,7 @@ class ExecutionAdvisor:
             )
 
         # ── execution note ────────────────────────────────────────────────────
-        note = self._execution_note(market_impact, live_ok, spread)
+        note = self._execution_note(market_impact, live_ok, spread, market_open=market_open)
 
         return {
             "ticker":              ticker,
@@ -176,9 +234,12 @@ class ExecutionAdvisor:
         return "significant"
 
     @staticmethod
-    def _execution_note(market_impact: str, live_ok: bool, spread: float | None) -> str:
+    def _execution_note(market_impact: str, live_ok: bool, spread: float | None,
+                        market_open: bool = True) -> str:
         parts = []
-        if not live_ok:
+        if not market_open:
+            parts.append("NYSE closed — queue order for next open; slippage is ATR-estimated")
+        elif not live_ok:
             parts.append("ATR-based slippage estimate (no live quote)")
         elif spread is not None:
             parts.append(f"Live spread ${spread:.4f}")

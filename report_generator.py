@@ -869,7 +869,12 @@ class ReportGenerator:
         p_risk   = eb.get("portfolio_risk", {})
         warnings = eb.get("warnings", [])
 
-        blocks = ["## Execution Brief", ""]
+        mkt = eb.get("market_status", {})
+        mkt_label  = mkt.get("label", "UNKNOWN")
+        mkt_detail = mkt.get("detail", "")
+        mkt_line   = f"**NYSE Market Status:** {mkt_label} — {mkt_detail}"
+
+        blocks = ["## Execution Brief", "", mkt_line, ""]
 
         if not active:
             blocks.append(

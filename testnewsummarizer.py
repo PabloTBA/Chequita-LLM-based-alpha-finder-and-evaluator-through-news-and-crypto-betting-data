@@ -22,7 +22,7 @@ print("Step 2: Sending to Ollama (qwen3:8b)...")
 def llm_client(prompt):
     print(f"  Prompt length: {len(prompt)} chars")
     resp = ollama.chat(
-        model="qwen3:8b",
+        model="qwen3:14b",
         messages=[{"role": "user", "content": prompt}],
         format="json",
     )

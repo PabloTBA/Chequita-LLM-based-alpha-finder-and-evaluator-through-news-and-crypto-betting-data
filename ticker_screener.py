@@ -260,7 +260,7 @@ if __name__ == "__main__":
     date = (datetime.today() - timedelta(days=1)).strftime("%Y-%m-%d")
 
     def llm(prompt):
-        resp = ollama.chat(model="qwen3:8b", messages=[{"role": "user", "content": prompt}], format="json")
+        resp = ollama.chat(model="qwen3:14b", messages=[{"role": "user", "content": prompt}], format="json", options={"temperature": 0.0})
         return resp.message.content if hasattr(resp, "message") else resp["message"]["content"]
 
     print("Step 1: Collecting news...")

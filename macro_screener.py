@@ -132,9 +132,10 @@ if __name__ == "__main__":
 
     def llm(prompt):
         resp = ollama.chat(
-            model="qwen3:8b",
+            model="qwen3:14b",
             messages=[{"role": "user", "content": prompt}],
             format="json",
+            options={"temperature": 0.0},
         )
         return resp.message.content if hasattr(resp, "message") else resp["message"]["content"]
 

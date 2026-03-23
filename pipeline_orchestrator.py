@@ -657,7 +657,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     def llm(prompt: str) -> str:
-        resp = ollama.chat(model="qwen3:8b", messages=[{"role": "user", "content": prompt}],
+        resp = ollama.chat(model="qwen3:14b", messages=[{"role": "user", "content": prompt}],
                            options={"temperature": 0.0})
         return resp.message.content if hasattr(resp, "message") else resp["message"]["content"]
 
