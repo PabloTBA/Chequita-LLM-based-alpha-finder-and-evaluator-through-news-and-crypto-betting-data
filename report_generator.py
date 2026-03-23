@@ -94,16 +94,21 @@ class ReportGenerator:
         # Only tickers that passed all 3 stages
         qualified = [t for t in mc_map]
 
-        # SPY benchmark return
-        spy_return: float | None = None
+        # SPY close series — kept as a Series so per-ticker sections can align
+        # their comparison to the exact dates the strategy was backtested on.
+        spy_close_full: "pd.Series | None" = None
+        spy_return_global: float | None = None
         if spy_ohlcv is not None and not spy_ohlcv.empty:
             try:
-                spy_close  = spy_ohlcv["Close"].astype(float)
-                spy_return = float((spy_close.iloc[-1] - spy_close.iloc[0]) / spy_close.iloc[0])
+                spy_close_full     = spy_ohlcv["Close"].astype(float)
+                spy_return_global  = float(
+                    (spy_close_full.iloc[-1] - spy_close_full.iloc[0])
+                    / spy_close_full.iloc[0]
+                )
             except Exception:
                 pass
 
-        sections = [self._summary_header(run_date, qualified, summary, macro, spy_return)]
+        sections = [self._summary_header(run_date, qualified, summary, macro, spy_return_global)]
 
         # ── Today's action ────────────────────────────────────────────────────
         sections.append(self._summary_action(qualified, strat_map, run_date))
@@ -112,7 +117,7 @@ class ReportGenerator:
         for ticker in qualified:
             sections.append(self._summary_ticker(
                 ticker, strat_map, bt_map, diag_map, mc_map,
-                verdict_map, regime_map, features, spy_return,
+                verdict_map, regime_map, features, spy_close_full,
             ))
 
         # ── Macro context (brief, at the end) ────────────────────────────────
@@ -174,7 +179,7 @@ class ReportGenerator:
 
     @staticmethod
     def _summary_ticker(ticker, strat_map, bt_map, diag_map, mc_map,
-                        verdict_map, regime_map, features, spy_return) -> str:
+                        verdict_map, regime_map, features, spy_close_full) -> str:
         s       = strat_map.get(ticker, {})
         bt      = bt_map.get(ticker, {})
         diag    = diag_map.get(ticker, {})
@@ -190,11 +195,32 @@ class ReportGenerator:
         equity    = bt.get("equity_curve", pd.Series(dtype=float))
         returns   = bt.get("returns", pd.Series(dtype=float))
 
-        net_ret   = summary.get("total_return", 0)
-        spy_str   = ""
-        if spy_return is not None:
-            diff    = net_ret - spy_return
-            spy_str = f" vs SPY {diff:+.2%} ({'alpha ✅' if diff >= 0 else 'underperform ❌'})"
+        net_ret = summary.get("total_return", 0)
+
+        # ── Period-aligned SPY comparison ──────────────────────────────────────
+        # Align SPY to the EXACT date range of this ticker's backtest so the
+        # comparison is apples-to-apples and can never show -65% for a period
+        # where SPY was actually positive.
+        spy_str = ""
+        if spy_close_full is not None and not returns.empty:
+            try:
+                lo = returns.index[0]
+                hi = returns.index[-1]
+                spy_window = spy_close_full[
+                    (spy_close_full.index >= lo) & (spy_close_full.index <= hi)
+                ]
+                if len(spy_window) >= 2:
+                    spy_period_ret = float(
+                        (spy_window.iloc[-1] - spy_window.iloc[0]) / spy_window.iloc[0]
+                    )
+                    alpha = net_ret - spy_period_ret
+                    flag  = "alpha ✅" if alpha >= 0 else "underperform ❌"
+                    spy_str = (
+                        f" | SPY (same period): {spy_period_ret:+.2%}"
+                        f" | Alpha: {alpha:+.2%} ({flag})"
+                    )
+            except Exception:
+                pass
 
         lines = [
             f"---",
@@ -312,16 +338,39 @@ class ReportGenerator:
 
         # ── 5. Diagnostic scorecard ────────────────────────────────────────────
         lines += ["", "### 5. Diagnostic Scorecard", ""]
+
+        _sharpe    = metrics.get("sharpe", 0.0)
+        _oos       = metrics.get("oos_sharpe", 0.0)
+        _dd        = metrics.get("max_drawdown", 0.0)
+        _wr        = metrics.get("win_rate", 0.0)
+        _pf        = metrics.get("profit_factor", 0.0)
+        _kelly     = metrics.get("kelly_fraction", 0.0)
+        _wf        = metrics.get("walk_forward_degradation", 0.0)
+        _tc        = metrics.get("trade_count", 0)
+
+        sharpe_ok  = max(_sharpe, _oos) >= 0.50
+        dd_ok      = _dd <= 0.20
+        win_ok     = _wr >= 0.35 or _pf >= 1.50
+        kelly_ok   = _kelly >= 0.0
+        wf_ok      = _wf <= 0.50
+        tc_ok      = _tc >= 30
+
+        # Annotate when the OOS rescue mechanism saved a low full-period Sharpe
+        sharpe_note = ""
+        if _sharpe < 0.50 and _oos >= 0.50:
+            sharpe_note = f" _(OOS rescue: {_oos:.3f})_"
+
         floors = [
-            ("Sharpe (RF-adjusted)", f"{metrics.get('sharpe', 0):.3f}", "≥ 0.50"),
-            ("Max drawdown",         f"{metrics.get('max_drawdown', 0):.2%}", "≤ 20%"),
-            ("Win rate",             f"{metrics.get('win_rate', 0):.1%}", "≥ 35%"),
-            ("Walk-fwd degradation", f"{metrics.get('walk_forward_degradation', 0):.1%}", "≤ 50%"),
-            ("Trade count",          f"{metrics.get('trade_count', 0)}", "≥ 30"),
+            ("Sharpe (RF-adjusted)", f"{_sharpe:.3f}{sharpe_note}", "≥ 0.50", sharpe_ok),
+            ("Max drawdown",         f"{_dd:.2%}",   "≤ 20%",          dd_ok),
+            ("Win rate",             f"{_wr:.1%}",   "≥ 35% (or PF ≥ 1.5)", win_ok),
+            ("Kelly fraction",       f"{_kelly:.4f}", "≥ 0.0",          kelly_ok),
+            ("Walk-fwd degradation", f"{_wf:.1%}",   "≤ 50%",          wf_ok),
+            ("Trade count",          str(_tc),        "≥ 30",           tc_ok),
         ]
         lines += ["| Metric | Value | Floor | Pass |", "|--------|-------|-------|------|"]
-        for name, val, floor in floors:
-            lines.append(f"| {name} | {val} | {floor} | ✅ |")
+        for name, val, floor, ok in floors:
+            lines.append(f"| {name} | {val} | {floor} | {'✅' if ok else '❌'} |")
 
         wf_split = int(len(returns) * 0.70)
         if not returns.empty and wf_split > 0:
@@ -1169,16 +1218,20 @@ def _advanced_metrics(returns: pd.Series, trade_log: list[dict], metrics: dict) 
                 max_streak = max(max_streak, streak)
             recovery_days = int(max_streak)
 
-        # Walk-forward split
-        mid      = len(returns) // 2
-        is_ret   = returns.iloc[:mid]
-        oos_ret  = returns.iloc[mid:]
+        # Walk-forward split — 70/30 IS/OOS matches DiagnosticsEngine so the Sharpe
+        # values shown here are consistent with the walk_forward_degradation metric.
+        split    = int(len(returns) * 0.70)
+        split    = max(split, 1)   # guard against degenerate very-short series
+        is_ret   = returns.iloc[:split]
+        oos_ret  = returns.iloc[split:]
+
+        _DAILY_RF = 0.045 / TRADING_DAYS   # risk-free rate per day (matches DiagnosticsEngine)
 
         def _sharpe(r: pd.Series) -> float:
             s = r.std(ddof=1)
             if s < 1e-10:
                 return 0.0
-            raw = float(r.mean() / s * math.sqrt(TRADING_DAYS))
+            raw = float((r.mean() - _DAILY_RF) / s * math.sqrt(TRADING_DAYS))
             return float(np.clip(raw, -20.0, 20.0))
 
         result.update({

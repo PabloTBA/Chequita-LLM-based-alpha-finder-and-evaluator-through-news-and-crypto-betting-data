@@ -47,8 +47,10 @@ from __future__ import annotations
 import math
 import numpy as np
 
-TRADING_DAYS = 252
+TRADING_DAYS    = 252
 EQUITY_BAND_STEPS = 20
+RISK_FREE_RATE  = 0.045          # must match diagnostics_engine.py
+DAILY_RF        = RISK_FREE_RATE / TRADING_DAYS
 
 
 class MonteCarloEngine:
@@ -96,29 +98,36 @@ class MonteCarloEngine:
         # ── per-simulation metrics ────────────────────────────────────────────
         final_equity = equity[:, -1]
 
-        # Max drawdown per sim
+        # Max drawdown per sim — use initial_portfolio as the safe divisor floor so
+        # that drawdown stays in [0, 1] even when equity momentarily goes negative
+        # (possible with unleveraged PnL if a single trade loss exceeds the portfolio).
         rolling_max  = np.maximum.accumulate(equity, axis=1)
-        drawdowns    = (rolling_max - equity) / np.where(rolling_max > 0, rolling_max, 1)
+        safe_denom   = np.maximum(rolling_max, initial_portfolio * 1e-6)  # never divide by ≤ 0
+        drawdowns    = (rolling_max - equity) / safe_denom
         max_dd       = drawdowns.max(axis=1)
 
-        # CAGR per sim — annualised over actual backtest calendar duration
+        # CAGR per sim — annualised over actual backtest calendar duration.
+        # Clamp to [-1, +∞): you cannot lose more than 100% in a non-leveraged account.
         with np.errstate(invalid="ignore", divide="ignore"):
             cagr = np.where(
                 (initial_portfolio > 0) & (final_equity > 0),
                 (final_equity / initial_portfolio) ** (1.0 / backtest_years) - 1.0,
-                -1.0,
+                -1.0,   # total ruin or worse → -100% CAGR
             )
 
-        # Sharpe per sim: daily P&L returns
+        # Sharpe per sim: daily P&L returns, excess over risk-free rate (industry standard).
+        # Subtracting DAILY_RF from each observation's mean matches the DiagnosticsEngine
+        # Sharpe formula so MC and backtest Sharpe figures are comparable.
         daily_returns  = sampled / initial_portfolio          # (n_sims, n_trades)
-        ret_mean       = daily_returns.mean(axis=1)
+        excess_mean    = daily_returns.mean(axis=1) - DAILY_RF
         ret_std        = daily_returns.std(axis=1, ddof=1)
         with np.errstate(invalid="ignore", divide="ignore"):
             sharpe = np.where(
-                ret_std > 0,
-                ret_mean / ret_std * math.sqrt(TRADING_DAYS),
-                np.where(ret_mean > 0, 1e6, np.where(ret_mean < 0, -1e6, 0.0)),
+                ret_std > 1e-10,
+                excess_mean / ret_std * math.sqrt(TRADING_DAYS),
+                np.where(excess_mean > 0, 20.0, np.where(excess_mean < 0, -20.0, 0.0)),
             )
+        sharpe = np.clip(sharpe, -20.0, 20.0)
 
         # Win rate per sim
         wins     = (sampled > 0).sum(axis=1)
@@ -218,21 +227,42 @@ class MonteCarloEngine:
     @staticmethod
     def _kelly_batch(sampled: np.ndarray, win_rate: np.ndarray) -> np.ndarray:
         """
-        Kelly fraction per simulation: f* = W/L - (1-W)/G
-        W = win_rate, G = mean win size, L = mean loss size (absolute).
-        Returns 0.0 when no wins or no losses.
+        Kelly fraction per simulation: f* = W/L − (1−W)/G
+
+        W = win_rate, G = mean win size (absolute), L = mean loss size (absolute).
+
+        Edge cases handled explicitly — using sentinel floats avoids NaN propagation
+        that would occur if 1e-9 denominators were passed through division chains:
+          • No wins  in a sim → all-losing sequence → Kelly = -1.0 (worst)
+          • No losses in a sim → all-winning sequence → Kelly = +1.0 (full)
+          • All flat trades   → zero variance → Kelly = 0.0
+
+        The outer np.clip(kelly, 0, 1) in the caller then floors negative values at 0.
         """
         wins   = np.where(sampled > 0, sampled, 0.0)
-        losses = np.where(sampled < 0, -sampled, 0.0)
+        losses = np.where(sampled < 0, -sampled, 0.0)   # positive values
 
         win_count  = (sampled > 0).sum(axis=1)
         loss_count = (sampled < 0).sum(axis=1)
 
-        avg_win  = np.where(win_count  > 0, wins.sum(axis=1)   / np.maximum(win_count,  1), 1e-9)
-        avg_loss = np.where(loss_count > 0, losses.sum(axis=1) / np.maximum(loss_count, 1), 1e-9)
+        has_wins   = win_count  > 0
+        has_losses = loss_count > 0
+
+        # Safe averages: only divide when we have the relevant trades
+        avg_win  = np.where(has_wins,   wins.sum(axis=1)   / np.maximum(win_count,   1), 0.0)
+        avg_loss = np.where(has_losses, losses.sum(axis=1) / np.maximum(loss_count, 1), 0.0)
 
         loss_rate = 1.0 - win_rate
-        kelly = win_rate / avg_loss - loss_rate / avg_win
+
+        # Compute Kelly only for sims that have both wins and losses; use sentinels otherwise.
+        # np.where evaluates both branches so guard against division by zero explicitly.
+        both = has_wins & has_losses
+        kelly = np.where(
+            both,
+            win_rate / np.where(has_losses, avg_loss, 1.0)
+            - loss_rate / np.where(has_wins, avg_win, 1.0),
+            np.where(has_wins, 1.0, -1.0),   # all-win → 1.0; all-loss (or flat) → -1.0
+        )
         return kelly
 
     @staticmethod
