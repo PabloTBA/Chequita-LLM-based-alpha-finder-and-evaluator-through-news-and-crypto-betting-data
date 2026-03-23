@@ -1,0 +1,44 @@
+[
+  {
+    "date": "2026-03-14",
+    "title": "Trump Warns Iran: 'One Way or The Other, We Will Soon Get the Hormuz Strait OPEN, SAFE, and FREE'",
+    "url": "https://www.benzinga.com/news/politics/26/03/51258683/trump-warns-iran-one-way-or-the-other-we-will-soon-get-the-hormuz-strait-open-safe-and-free",
+    "publisher": "Bibhu Pattnaik",
+    "tickers": "JPM",
+    "keywords_matched": "war",
+    "catalyst_type": "Macro",
+    "keyword_score": 1,
+    "ticker_score": 1,
+    "publisher_score": 0,
+    "recency_score": 0,
+    "composite_score": 5
+  },
+  {
+    "date": "2026-03-14",
+    "title": "Amazon's Ad-Free Prime Video Plan Will Now Cost $2 More In US— Here's What To Know",
+    "url": "https://www.benzinga.com/markets/tech/26/03/51256801/amazons-ad-free-prime-video-plan-will-now-cost-2-more-in-us-heres-what-to-know",
+    "publisher": "Ananya Gairola",
+    "tickers": "AMZN, DIS, NFLX, PSKY",
+    "keywords_matched": "",
+    "catalyst_type": "General",
+    "keyword_score": 0,
+    "ticker_score": 4,
+    "publisher_score": 0,
+    "recency_score": 0,
+    "composite_score": 8
+  },
+  {
+    "date": "2026-03-14",
+    "title": "Oscars 2026 Prediction Market Preview: Can Sinners Beat One Battle After Another?",
+    "url": "https://www.benzinga.com/markets/prediction-markets/26/03/51257666/oscars-2026-prediction-market-preview-can-sinners-beat-one-battle-after-another",
+    "publisher": "Daragh Thomas",
+    "tickers": "DIS, NFLX, PSKY, WBD",
+    "keywords_matched": "beat",
+    "catalyst_type": "Earnings",
+    "keyword_score": 1,
+    "ticker_score": 4,
+    "publisher_score": 0,
+    "recency_score": 0,
+    "composite_score": 11
+  }
+]
