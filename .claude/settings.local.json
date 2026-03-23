@@ -70,7 +70,9 @@
       "Bash(python -m pytest test/test_diagnostics_engine.py -v)",
       "Bash(python -m pytest test/test_diagnostics_engine.py::TestMetricsAccuracy::test_sharpe_near_zero_for_zero_mean_returns -v)",
       "Bash(python -m pytest test/test_diagnostics_engine.py test/test_report_generator.py -v)",
-      "Bash(python test_algorithms_comprehensive.py)"
+      "Bash(python test_algorithms_comprehensive.py)",
+      "Bash(python -c \"import fastapi, uvicorn, pydantic; print\\(''OK''\\)\")",
+      "Bash(python -c \"import fastapi, uvicorn, pydantic; print\\(''fastapi'', fastapi.__version__, ''| uvicorn'', uvicorn.__version__, ''| pydantic'', pydantic.__version__\\)\")"
     ]
   }
 }
