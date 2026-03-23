@@ -66,7 +66,11 @@
       "Bash(python -m pytest test/test_rag_store.py -q --timeout=120)",
       "Bash(python -m pytest test/test_prediction_market_client.py -x -q)",
       "Bash(python -m pytest test/test_prediction_market_client.py -q)",
-      "Bash(python -m pytest test/ -x -q)"
+      "Bash(python -m pytest test/ -x -q)",
+      "Bash(python -m pytest test/test_diagnostics_engine.py -v)",
+      "Bash(python -m pytest test/test_diagnostics_engine.py::TestMetricsAccuracy::test_sharpe_near_zero_for_zero_mean_returns -v)",
+      "Bash(python -m pytest test/test_diagnostics_engine.py test/test_report_generator.py -v)",
+      "Bash(python test_algorithms_comprehensive.py)"
     ]
   }
 }

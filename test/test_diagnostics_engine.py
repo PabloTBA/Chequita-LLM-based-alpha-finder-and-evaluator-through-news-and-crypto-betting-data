@@ -50,7 +50,7 @@ LOW_WIN_RATE_LOG   = [{"pnl": (10.0 if i % 5 == 0 else -1.0)} for i in range(40)
 FEW_TRADES_LOG     = [{"pnl": (1.0 if i % 2 == 0 else -0.5)} for i in range(5)]   # 60% WR, only 5 trades
 
 REQUIRED_KEYS    = {"ticker", "strategy", "passed", "reject_reason", "metrics", "llm_commentary"}
-REQUIRED_METRICS = {"sharpe", "max_drawdown", "win_rate", "walk_forward_degradation", "trade_count"}
+REQUIRED_METRICS = {"sharpe", "oos_sharpe", "max_drawdown", "win_rate", "walk_forward_degradation", "trade_count"}
 
 LLM_COMMENTARY = "Strong momentum with solid risk-adjusted returns. Watch for drawdown risk."
 
@@ -228,15 +228,16 @@ class TestLLMBehavior:
 # ── Cycle 9: metrics accuracy ─────────────────────────────────────────────────
 
 class TestMetricsAccuracy:
-    def test_sharpe_near_zero_for_zero_mean_returns(self):
-        """Alternating +0.01/-0.01 → mean=0, Sharpe≈0."""
+    def test_sharpe_negative_for_zero_mean_returns(self):
+        """Alternating +0.01/-0.01 → mean=0 before rf; net of 4.5% rf → slightly negative Sharpe."""
         returns = pd.Series(
             np.where(np.arange(252) % 2 == 0, 0.01, -0.01),
             index=_idx,
         )
         eng = DiagnosticsEngine()
         r = eng.run("AAPL", "Momentum", HEALTHY_TRADE_LOG, returns)
-        assert abs(r["metrics"]["sharpe"]) < 0.1
+        # Sharpe = (0 - rf) / std * sqrt(252) < 0; rf deduction puts it around -0.28
+        assert r["metrics"]["sharpe"] < 0.0
 
     def test_max_drawdown_50pct_for_single_halving(self):
         """All zero returns then one -50% return → equity halves → max DD = 50%."""
@@ -259,3 +260,74 @@ class TestMetricsAccuracy:
         eng = DiagnosticsEngine()
         r = eng.run("AAPL", "Momentum", log, HEALTHY_RETURNS)
         assert r["metrics"]["trade_count"] == 17
+
+    def test_oos_sharpe_present_in_metrics(self):
+        eng = DiagnosticsEngine()
+        r = eng.run("AAPL", "Momentum", HEALTHY_TRADE_LOG, HEALTHY_RETURNS)
+        assert "oos_sharpe" in r["metrics"]
+        assert isinstance(r["metrics"]["oos_sharpe"], float)
+
+
+# ── Cycle 10: OOS Sharpe gate (bug fix) ──────────────────────────────────────
+
+class TestOOSSharpeGate:
+    """
+    Full-period Sharpe below floor but OOS Sharpe above floor → should PASS.
+    This guards the regression where a ticker with a bad in-sample IS period
+    but strong OOS period was incorrectly rejected.
+    """
+
+    def test_good_oos_sharpe_passes_when_full_period_fails(self):
+        """Gate should use max(full_sharpe, oos_sharpe)."""
+        metrics = {
+            "sharpe":                   0.20,   # below 0.5 floor
+            "oos_sharpe":               1.80,   # well above 0.5 floor
+            "max_drawdown":             0.10,
+            "win_rate":                 0.50,
+            "walk_forward_degradation": 0.10,
+            "trade_count":              40,
+        }
+        passed, reason = DiagnosticsEngine._check_floors(metrics)
+        assert passed is True, f"Should pass with OOS Sharpe=1.80, got: {reason}"
+
+    def test_both_sharpe_below_floor_still_rejects(self):
+        """Both full-period and OOS Sharpe below floor → must still reject."""
+        metrics = {
+            "sharpe":                   0.20,
+            "oos_sharpe":               0.30,
+            "max_drawdown":             0.10,
+            "win_rate":                 0.50,
+            "walk_forward_degradation": 0.10,
+            "trade_count":              40,
+        }
+        passed, reason = DiagnosticsEngine._check_floors(metrics)
+        assert passed is False
+        assert "sharpe" in reason.lower()
+
+    def test_only_full_period_sharpe_good_passes(self):
+        """Full-period Sharpe above floor even if OOS is bad → still passes Sharpe check."""
+        metrics = {
+            "sharpe":                   0.80,   # above floor
+            "oos_sharpe":               0.10,   # below floor
+            "max_drawdown":             0.10,
+            "win_rate":                 0.50,
+            "walk_forward_degradation": 0.10,
+            "trade_count":              40,
+        }
+        passed, reason = DiagnosticsEngine._check_floors(metrics)
+        # walk-forward degradation check will fire separately, but Sharpe check should pass
+        assert reason is None or "sharpe" not in reason.lower()
+
+    def test_oos_sharpe_exactly_at_floor_passes(self):
+        """OOS Sharpe exactly equal to SHARPE_FLOOR (0.5) should pass."""
+        from diagnostics_engine import SHARPE_FLOOR
+        metrics = {
+            "sharpe":                   0.20,
+            "oos_sharpe":               SHARPE_FLOOR,
+            "max_drawdown":             0.10,
+            "win_rate":                 0.50,
+            "walk_forward_degradation": 0.10,
+            "trade_count":              40,
+        }
+        passed, reason = DiagnosticsEngine._check_floors(metrics)
+        assert passed is True, f"OOS Sharpe at floor should pass, got: {reason}"

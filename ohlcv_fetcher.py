@@ -37,7 +37,7 @@ class OHLCVFetcher:
 
     # ── public ────────────────────────────────────────────────────────────────
 
-    def fetch(self, tickers: list[str], period: str = "5y") -> dict[str, pd.DataFrame | None]:
+    def fetch(self, tickers: list[str], period: str = "10y") -> dict[str, pd.DataFrame | None]:
         """
         Download daily OHLCV for each ticker via yfinance.
 

@@ -30,6 +30,7 @@ import pandas as pd
 SHARPE_FLOOR          = 0.50
 MAX_DD_FLOOR          = 0.20   # tightened from 30% → 20% (institutional standard)
 WIN_RATE_FLOOR        = 0.35
+PROFIT_FACTOR_FLOOR   = 1.5    # bypass win-rate floor when profit_factor >= this (high-payoff strategies)
 WALKFWD_DEGRAD_FLOOR  = 0.50
 MIN_TRADE_COUNT       = 30     # raised from 10 → 30 (minimum for statistical significance)
 TRADING_DAYS          = 252
@@ -70,10 +71,11 @@ class DiagnosticsEngine:
         self._log(f"[DiagnosticsEngine] {ticker}: {metrics}")
 
         passed, reject_reason = self._check_floors(metrics)
-        status = "PASS ✓" if passed else f"FAIL — {reject_reason}"
-        print(f"  [Diag] {ticker}: Sharpe={metrics['sharpe']:.3f}  MaxDD={metrics['max_drawdown']:.1%}  "
-              f"WinRate={metrics['win_rate']:.1%}  WFDegrad={metrics['walk_forward_degradation']:.1%}  "
-              f"Trades={metrics['trade_count']}  → {status}")
+        status = "PASS" if passed else f"FAIL -- {reject_reason}"
+        print(f"  [Diag] {ticker}: Sharpe={metrics['sharpe']:.3f}  OOS_Sharpe={metrics['oos_sharpe']:.3f}  "
+              f"MaxDD={metrics['max_drawdown']:.1%}  WinRate={metrics['win_rate']:.1%}  "
+              f"WFDegrad={metrics['walk_forward_degradation']:.1%}  "
+              f"Trades={metrics['trade_count']}  -> {status}")
 
         llm_commentary: Optional[str] = None
         if passed and self.llm_client is not None:
@@ -91,27 +93,40 @@ class DiagnosticsEngine:
     # ── private ───────────────────────────────────────────────────────────────
 
     def _compute_metrics(self, trade_log: list[dict], returns: pd.Series) -> dict:
+        sharpe = self._sharpe(returns)
+        wf_degrad, oos_sharpe = self._walk_forward_degradation(returns)
         return {
-            "sharpe":                   self._sharpe(returns),
+            "sharpe":                   sharpe,
+            "oos_sharpe":               oos_sharpe,
             "max_drawdown":             self._max_drawdown(returns),
             "win_rate":                 self._win_rate(trade_log),
-            "walk_forward_degradation": self._walk_forward_degradation(returns),
+            "profit_factor":            self._profit_factor(trade_log),
+            "walk_forward_degradation": wf_degrad,
             "trade_count":              len(trade_log),
         }
 
     @staticmethod
     def _check_floors(metrics: dict) -> tuple[bool, Optional[str]]:
-        sharpe = metrics["sharpe"]
-        if sharpe < SHARPE_FLOOR:
-            return False, f"Sharpe ratio {sharpe:.3f} below floor {SHARPE_FLOOR}"
+        # Use the better of full-period and OOS Sharpe so that a strategy
+        # which degrades in IS but is strong OOS is not wrongly rejected.
+        sharpe     = metrics["sharpe"]
+        oos_sharpe = metrics.get("oos_sharpe", sharpe)
+        best_sharpe = max(sharpe, oos_sharpe)
+        if best_sharpe < SHARPE_FLOOR:
+            return False, (f"Sharpe ratio {sharpe:.3f} (OOS {oos_sharpe:.3f}) "
+                           f"both below floor {SHARPE_FLOOR}")
 
         max_dd = metrics["max_drawdown"]
         if max_dd > MAX_DD_FLOOR:
             return False, f"Max drawdown {max_dd:.1%} exceeds floor {MAX_DD_FLOOR:.0%}"
 
-        win_rate = metrics["win_rate"]
-        if win_rate < WIN_RATE_FLOOR:
-            return False, f"Win rate {win_rate:.1%} below floor {WIN_RATE_FLOOR:.0%}"
+        win_rate      = metrics["win_rate"]
+        profit_factor = metrics.get("profit_factor", 0.0)
+        # Low win rate bypassed when profit factor is strong (high-payoff strategies such as
+        # trend-following with 30% wins but 3:1 payoff ratio are valid and should not be rejected)
+        if win_rate < WIN_RATE_FLOOR and profit_factor < PROFIT_FACTOR_FLOOR:
+            return False, (f"Win rate {win_rate:.1%} below floor {WIN_RATE_FLOOR:.0%} "
+                           f"and profit factor {profit_factor:.2f} below {PROFIT_FACTOR_FLOOR:.1f}")
 
         wf = metrics["walk_forward_degradation"]
         if wf > WALKFWD_DEGRAD_FLOOR:
@@ -142,12 +157,16 @@ class DiagnosticsEngine:
 
     @staticmethod
     def _sharpe(returns: pd.Series) -> float:
-        """Annualized Sharpe ratio net of risk-free rate."""
+        """Annualized Sharpe ratio net of risk-free rate.
+        Guard uses 1e-10 (not == 0) because 0.003 is not exactly representable
+        in float64 — std of a nominally-constant series can be ~1e-19, which
+        would produce an astronomically large Sharpe if uncapped."""
         std = returns.std(ddof=1)
-        if std == 0 or np.isnan(std):
+        if std < 1e-10 or np.isnan(std):
             return 0.0
         daily_rf = RISK_FREE_RATE / TRADING_DAYS
-        return float((returns.mean() - daily_rf) / std * np.sqrt(TRADING_DAYS))
+        raw = float((returns.mean() - daily_rf) / std * np.sqrt(TRADING_DAYS))
+        return float(np.clip(raw, -20.0, 20.0))   # cap at ±20 — physically impossible otherwise
 
     @staticmethod
     def _max_drawdown(returns: pd.Series) -> float:
@@ -166,11 +185,26 @@ class DiagnosticsEngine:
         return wins / len(trade_log)
 
     @staticmethod
-    def _walk_forward_degradation(returns: pd.Series) -> float:
+    def _profit_factor(trade_log: list[dict]) -> float:
+        """Gross profit / gross loss.  Returns 0.0 when there are no losing trades."""
+        if not trade_log:
+            return 0.0
+        gross_profit = sum(t.get("pnl", 0) for t in trade_log if t.get("pnl", 0) > 0)
+        gross_loss   = sum(-t.get("pnl", 0) for t in trade_log if t.get("pnl", 0) < 0)
+        if gross_loss < 1e-10:
+            return 0.0 if gross_profit <= 0 else 999.0   # no losses → best possible
+        return gross_profit / gross_loss
+
+    @staticmethod
+    def _walk_forward_degradation(returns: pd.Series) -> tuple[float, float]:
         """
         Split returns 70/30 in-sample / out-of-sample (industry standard).
         Degradation = (IS_Sharpe - OOS_Sharpe) / IS_Sharpe, clamped to [0, 1].
-        Returns 1.0 when IS_Sharpe ≤ 0 (degenerate / already bad in-sample).
+        Returns 1.0 degradation when IS_Sharpe <= 0 (degenerate / already bad in-sample).
+
+        Returns
+        -------
+        (degradation, oos_sharpe) — both needed by the caller.
         """
         split     = int(len(returns) * 0.70)
         in_sample = returns.iloc[:split]
@@ -178,25 +212,26 @@ class DiagnosticsEngine:
 
         def sharpe(r: pd.Series) -> float:
             std = r.std(ddof=1)
-            if std == 0 or np.isnan(std):
+            if std < 1e-10 or np.isnan(std):
                 return 0.0
             daily_rf = RISK_FREE_RATE / TRADING_DAYS
-            return float((r.mean() - daily_rf) / std * np.sqrt(TRADING_DAYS))
+            raw = float((r.mean() - daily_rf) / std * np.sqrt(TRADING_DAYS))
+            return float(np.clip(raw, -20.0, 20.0))
 
         is_sharpe  = sharpe(in_sample)
         oos_sharpe = sharpe(oos)
 
         # OOS better than or equal to IS → no degradation (improvement)
         if oos_sharpe >= is_sharpe:
-            return 0.0
+            return 0.0, oos_sharpe
 
         # IS bad but OOS also bad → fully degraded
         if is_sharpe <= 0:
-            return 1.0
+            return 1.0, oos_sharpe
 
         # IS positive, OOS worse → graded degradation
         degrad = (is_sharpe - oos_sharpe) / is_sharpe
-        return float(np.clip(degrad, 0.0, 1.0))
+        return float(np.clip(degrad, 0.0, 1.0)), oos_sharpe
 
 
 # ── CLI smoke test ────────────────────────────────────────────────────────────

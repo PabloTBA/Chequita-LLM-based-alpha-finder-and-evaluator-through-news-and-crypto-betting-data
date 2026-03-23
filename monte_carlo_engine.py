@@ -128,7 +128,8 @@ class MonteCarloEngine:
         max_consec = self._max_consec_losses_batch(sampled)
 
         # Kelly fraction per sim: f* = W/L - (1-W)/G  where W=win_rate, G=avg_win, L=avg_loss
-        kelly = self._kelly_batch(sampled, win_rate)
+        # Raw Kelly is clipped to [0, 1] — values > 1 imply leverage which is out of scope.
+        kelly = np.clip(self._kelly_batch(sampled, win_rate), 0.0, 1.0)
 
         # Ruin detection: did equity ever fall below ruin_floor?
         ruined      = (equity < ruin_floor).any(axis=1)      # bool (n_sims,)
@@ -159,9 +160,16 @@ class MonteCarloEngine:
             for s in band_indices
         ]
 
+        median_kelly      = float(np.median(kelly))
+        half_kelly        = median_kelly / 2.0
+        if median_kelly > 0.25:
+            print(f"  [MC]  WARNING: full Kelly ({median_kelly:.1%}) > 25% — recommend half-Kelly "
+                  f"({half_kelly:.1%}) to reduce variance.  Never bet full Kelly in live trading.")
+
         print(f"  [MC]  Done — p_ruin={p_ruin:.1%}  median_CAGR={float(np.median(cagr)):.1%}  "
               f"p50_equity=${float(np.percentile(final_equity, 50)):,.0f}  "
-              f"p95_maxDD={float(np.percentile(max_dd, 95)):.1%}")
+              f"p95_maxDD={float(np.percentile(max_dd, 95)):.1%}  "
+              f"Kelly={median_kelly:.1%}  half-Kelly={half_kelly:.1%}")
         return {
             # equity distribution
             "p5_final":            float(np.percentile(final_equity, 5)),
@@ -181,8 +189,9 @@ class MonteCarloEngine:
             "p95_win_rate":        float(np.percentile(win_rate, 95)),
             # tail risk
             "p95_max_consec_losses": int(np.percentile(max_consec, 95)),
-            # position sizing
-            "kelly_fraction":      float(np.median(kelly)),
+            # position sizing — always surface both full and half-Kelly
+            "kelly_fraction":      median_kelly,
+            "half_kelly_fraction": half_kelly,
             # ruin detail
             "median_time_to_ruin": time_to_ruin,
             "ruin_severity":       ruin_severity,
@@ -247,6 +256,7 @@ class MonteCarloEngine:
             "p95_win_rate":          0.0,
             "p95_max_consec_losses": 0,
             "kelly_fraction":        0.0,
+            "half_kelly_fraction":   0.0,
             "median_time_to_ruin":   None,
             "ruin_severity":         None,
         }

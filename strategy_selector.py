@@ -1,17 +1,44 @@
 """
 StrategySelector
 ================
-Maps a regime label to a strategy template (pure mapping), then calls the LLM
-once to adjust parameters within that template.  LLM adjustments are logged
-alongside the hard regime signal so every change is auditable.
+Maps a regime label to a strategy template, then adjusts parameters via a
+deterministic rule-based algorithm (no LLM numeric decisions).  The LLM is
+called once only to produce a plain-English explanation of the final params
+for the report — it has no influence on the numbers.
 
-Regime → Strategy mapping
+Regime -> Strategy mapping
 --------------------------
-    Trending         → Momentum
-    High-Volatility  → Momentum
-    Mean-Reverting   → Mean-Reversion
-    Low-Volatility   → Mean-Reversion
-    Neutral          → Momentum  (default)
+    Trending         -> Momentum
+    High-Volatility  -> Momentum
+    Mean-Reverting   -> Mean-Reversion
+    Low-Volatility   -> Mean-Reversion
+    Neutral          -> Momentum  (default)
+
+Parameter adjustment rules (Momentum)
+--------------------------------------
+    trailing_stop_atr : 2.0 base
+        +0.5  if Hurst > 0.70   (strong trend persistence — give more room)
+    stop_loss_atr     : 1.5 base
+        +0.5  if ATR% > 2.5%    (high volatility — widen hard stop)
+    volume_multiplier : 1.2 base
+        +0.3  if volume_ratio_30d > 1.3  (elevated volume — tighten confirmation)
+    max_holding_days  : 20 base
+        -> 30 if Hurst > 0.75   (very strong trend — allow longer ride)
+    entry_lookback    : 10 (fixed)
+    ma_exit_period    : 10 (fixed)
+
+Parameter adjustment rules (Mean-Reversion)
+--------------------------------------------
+    rsi_entry_threshold : 30 base
+        -> 35  if ATR% > 2.5%   (wider oversold band in volatile market)
+    bb_std              : 2.0 base
+        -> 2.5 if ATR% > 3.0%   (wider Bollinger in very volatile market)
+    stop_loss_atr       : 1.5 base
+        +0.5  if ATR% > 2.5%
+    max_holding_days    : 10 base
+        -> 15  if ATR% < 1.5%   (slow mean reversion in low-vol market)
+    rsi_exit_threshold  : 55 (fixed)
+    bb_period           : 20 (fixed)
 
 Public interface
 ----------------
@@ -27,21 +54,21 @@ import json
 # ── PRD base templates ────────────────────────────────────────────────────────
 
 MOMENTUM_BASE: dict = {
-    "entry_lookback":    10,   # days: entry on close > N-day high (relaxed from 20 → more entries)
-    "volume_multiplier": 1.2,  # volume must be > N × 20-day avg (relaxed from 1.5 → more entries)
-    "trailing_stop_atr": 2.0,  # trailing stop at N × ATR below peak
-    "ma_exit_period":    10,   # exit if close < N-day MA
-    "stop_loss_atr":     1.5,  # hard stop at N × ATR below entry
-    "max_holding_days":  20,   # forced exit after N trading days
+    "entry_lookback":    10,
+    "volume_multiplier": 1.2,
+    "trailing_stop_atr": 2.0,
+    "ma_exit_period":    10,
+    "stop_loss_atr":     1.5,
+    "max_holding_days":  20,
 }
 
 MEAN_REVERSION_BASE: dict = {
-    "rsi_entry_threshold": 30,   # enter when RSI(14) < N
-    "rsi_exit_threshold":  55,   # exit when RSI(14) > N
-    "bb_period":           20,   # Bollinger Band period
-    "bb_std":              2.0,  # Bollinger Band sigma
-    "stop_loss_atr":       1.5,  # hard stop at N × ATR below entry
-    "max_holding_days":    10,   # forced exit after N trading days
+    "rsi_entry_threshold": 30,
+    "rsi_exit_threshold":  55,
+    "bb_period":           20,
+    "bb_std":              2.0,
+    "stop_loss_atr":       1.5,
+    "max_holding_days":    10,
 }
 
 _REGIME_TO_STRATEGY: dict[str, str] = {
@@ -57,36 +84,68 @@ _STRATEGY_TO_BASE: dict[str, dict] = {
     "Mean-Reversion": MEAN_REVERSION_BASE,
 }
 
-_PROMPT_TEMPLATE = """\
-You are a quantitative strategist. Given the regime classification and market \
-context for {ticker}, review the base strategy parameters and suggest any \
-adjustments. Only change parameters that are clearly warranted by the evidence.
+_REASONING_PROMPT = """\
+You are writing a one-sentence explanation for a trading report.
 
-Ticker:   {ticker}
-Regime:   {regime}
-Strategy: {strategy}
-Hurst:    {hurst:.3f}
-ATR/price:{atr_pct:.3%}
+The following strategy parameters were set algorithmically for {ticker} \
+({strategy} strategy, {regime} regime):
 
-OHLCV features:
-{ohlcv_block}
+{params_block}
 
-Macro context:
-  Bias:    {market_bias}
-  Favored: {favored}
-  Risks:   {risks}
+Key inputs used:
+  Hurst exponent : {hurst:.3f}
+  ATR/price      : {atr_pct:.3%}
+  Volume ratio   : {vol_ratio:.2f}
+  Market bias    : {market_bias}
 
-Base parameters (PRD defaults):
-{base_params}
-
-Respond ONLY with valid JSON:
-{{
-  "adjusted_params": {{"param_name": new_value, ...}},
-  "llm_adjustments": ["Changed X from A to B because ...", ...],
-  "reasoning": "one or two sentence summary"
-}}
-Only include params in adjusted_params that you are actually changing.
+Write ONE sentence explaining why these parameters suit this ticker's \
+current regime and volatility profile. Be specific. Do not suggest changes.
 """
+
+
+def _compute_momentum_params(hurst: float, atr_pct: float, vol_ratio: float) -> tuple[dict, list[str]]:
+    """Deterministic momentum parameter rules. Returns (params, rule_log)."""
+    p = copy.deepcopy(MOMENTUM_BASE)
+    rules: list[str] = []
+
+    if hurst > 0.70:
+        p["trailing_stop_atr"] += 0.5
+        rules.append(f"trailing_stop_atr -> {p['trailing_stop_atr']} (Hurst {hurst:.3f} > 0.70 — strong trend persistence)")
+
+    if atr_pct > 0.025:
+        p["stop_loss_atr"] += 0.5
+        rules.append(f"stop_loss_atr -> {p['stop_loss_atr']} (ATR% {atr_pct:.2%} > 2.5% — high volatility)")
+
+    if vol_ratio > 1.3:
+        p["volume_multiplier"] += 0.3
+        rules.append(f"volume_multiplier -> {p['volume_multiplier']:.1f} (volume_ratio {vol_ratio:.2f} > 1.3 — elevated volume)")
+
+    if hurst > 0.75:
+        p["max_holding_days"] = 30
+        rules.append(f"max_holding_days -> 30 (Hurst {hurst:.3f} > 0.75 — very strong trend)")
+
+    return p, rules
+
+
+def _compute_mean_reversion_params(atr_pct: float) -> tuple[dict, list[str]]:
+    """Deterministic mean-reversion parameter rules. Returns (params, rule_log)."""
+    p = copy.deepcopy(MEAN_REVERSION_BASE)
+    rules: list[str] = []
+
+    if atr_pct > 0.025:
+        p["rsi_entry_threshold"] = 35
+        p["stop_loss_atr"]      += 0.5
+        rules.append(f"rsi_entry_threshold -> 35, stop_loss_atr -> {p['stop_loss_atr']} (ATR% {atr_pct:.2%} > 2.5% — high volatility)")
+
+    if atr_pct > 0.030:
+        p["bb_std"] = 2.5
+        rules.append(f"bb_std -> 2.5 (ATR% {atr_pct:.2%} > 3.0% — very high volatility)")
+
+    if atr_pct < 0.015:
+        p["max_holding_days"] = 15
+        rules.append(f"max_holding_days -> 15 (ATR% {atr_pct:.2%} < 1.5% — slow mean reversion in low-vol market)")
+
+    return p, rules
 
 
 class StrategySelector:
@@ -101,45 +160,33 @@ class StrategySelector:
     def select(self, ticker: str, regime: dict,
                ohlcv_features: dict, macro: dict) -> dict:
         """
-        Map regime to strategy template, call LLM once for parameter adjustment.
-
-        Parameters
-        ----------
-        ticker        : str
-        regime        : RegimeClassifier.classify() output
-        ohlcv_features: OHLCVFetcher.compute_features() output
-        macro         : MacroScreener.screen() output
-
-        Returns
-        -------
-        dict with keys: ticker, strategy, regime, base_params,
-                        adjusted_params, llm_adjustments, reasoning
+        Deterministically compute strategy parameters, then call LLM once
+        for a plain-English explanation only.
         """
         regime_label = regime.get("regime", "Neutral")
         strategy     = _REGIME_TO_STRATEGY.get(regime_label, "Momentum")
         base_params  = copy.deepcopy(_STRATEGY_TO_BASE[strategy])
 
-        print(f"  [LLM] StrategySelector: {ticker} ({regime_label} → {strategy})...")
-        self._log(f"[StrategySelector] {ticker}: {regime_label} → {strategy}")
+        hurst     = float(regime.get("hurst", 0.5))
+        atr_pct   = float(regime.get("atr_pct", 0.02))
+        vol_ratio = float((ohlcv_features or {}).get("volume_ratio_30d", 1.0))
 
-        prompt = _PROMPT_TEMPLATE.format(
-            ticker      = ticker,
-            regime      = regime_label,
-            strategy    = strategy,
-            hurst       = regime.get("hurst", 0.5),
-            atr_pct     = regime.get("atr_pct", 0.02),
-            ohlcv_block = self._format_ohlcv(ohlcv_features),
-            market_bias = macro.get("market_bias", "neutral"),
-            favored     = ", ".join(macro.get("favored_sectors", [])),
-            risks       = ", ".join(macro.get("active_macro_risks", [])),
-            base_params = json.dumps(base_params, indent=2),
+        # ── Deterministic parameter computation ───────────────────────────────
+        if strategy == "Momentum":
+            adjusted_params, rule_log = _compute_momentum_params(hurst, atr_pct, vol_ratio)
+        else:
+            adjusted_params, rule_log = _compute_mean_reversion_params(atr_pct)
+
+        print(f"  [Strategy] {ticker}: {regime_label} -> {strategy} | "
+              f"Hurst={hurst:.3f} ATR%={atr_pct:.2%} VolRatio={vol_ratio:.2f}")
+        for r in rule_log:
+            print(f"    rule: {r}")
+
+        # ── LLM for explanation only ──────────────────────────────────────────
+        reasoning = self._get_reasoning(
+            ticker, strategy, regime_label, hurst, atr_pct, vol_ratio,
+            adjusted_params, macro,
         )
-
-        raw = self.llm_client(prompt)
-        print(f"  [LLM] StrategySelector: {ticker} done")
-        self._log(f"[StrategySelector] LLM response: {raw[:300]}")
-
-        adjusted_params, llm_adjustments, reasoning = self._parse(raw, base_params)
 
         return {
             "ticker":          ticker,
@@ -147,11 +194,30 @@ class StrategySelector:
             "regime":          regime_label,
             "base_params":     base_params,
             "adjusted_params": adjusted_params,
-            "llm_adjustments": llm_adjustments,
+            "llm_adjustments": rule_log,   # now shows algo rules, not LLM decisions
             "reasoning":       reasoning,
         }
 
     # ── private ───────────────────────────────────────────────────────────────
+
+    def _get_reasoning(self, ticker, strategy, regime_label, hurst, atr_pct,
+                       vol_ratio, params, macro) -> str:
+        params_block = "\n".join(f"  {k}: {v}" for k, v in params.items())
+        prompt = _REASONING_PROMPT.format(
+            ticker       = ticker,
+            strategy     = strategy,
+            regime       = regime_label,
+            params_block = params_block,
+            hurst        = hurst,
+            atr_pct      = atr_pct,
+            vol_ratio    = vol_ratio,
+            market_bias  = macro.get("market_bias", "neutral"),
+        )
+        try:
+            raw = self.llm_client(prompt)
+            return raw.strip() if raw.strip() else "Parameters set by regime-based algorithm."
+        except Exception:
+            return "Parameters set by regime-based algorithm."
 
     @staticmethod
     def _format_ohlcv(feats: dict) -> str:
@@ -161,33 +227,6 @@ class StrategySelector:
             f"  {k}: {v:.4f}" if isinstance(v, float) else f"  {k}: {v}"
             for k, v in feats.items()
         )
-
-    @staticmethod
-    def _parse(raw: str, base_params: dict) -> tuple[dict, list[str], str]:
-        """Parse LLM response; fall back to base_params on any parse failure."""
-        try:
-            data            = json.loads(raw)
-            overrides       = data.get("adjusted_params", {})
-            llm_adjustments = data.get("llm_adjustments", [])
-            reasoning       = data.get("reasoning", "")
-
-            # Merge: start from base, apply only valid overrides
-            adjusted = copy.deepcopy(base_params)
-            for k, v in overrides.items():
-                if k in adjusted:          # only touch known params
-                    adjusted[k] = v
-
-            if not isinstance(llm_adjustments, list):
-                llm_adjustments = []
-            llm_adjustments = [s for s in llm_adjustments if isinstance(s, str)]
-
-            if not isinstance(reasoning, str) or not reasoning.strip():
-                reasoning = "No reasoning provided."
-
-            return adjusted, llm_adjustments, reasoning
-
-        except (json.JSONDecodeError, ValueError):
-            return copy.deepcopy(base_params), [], "LLM parse failed — using base parameters."
 
 
 # ── CLI smoke test ────────────────────────────────────────────────────────────
@@ -208,7 +247,6 @@ if __name__ == "__main__":
     def llm(prompt):
         resp = ollama.chat(model="qwen3:14b",
                            messages=[{"role": "user", "content": prompt}],
-                           format="json",
                            options={"temperature": 0.0})
         return resp.message.content if hasattr(resp, "message") else resp["message"]["content"]
 

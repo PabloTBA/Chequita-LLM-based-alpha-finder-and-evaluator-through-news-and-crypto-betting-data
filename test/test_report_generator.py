@@ -376,3 +376,78 @@ class TestMonteCarloSection:
 
     def test_time_to_ruin_na_when_none(self, report_text):
         assert "N/A" in report_text  # median_time_to_ruin is None
+
+
+# ── Cycle 13: VaR / CVaR computed on invested days only (bug fix) ────────────
+
+class TestVaRInvestedDaysOnly:
+    """
+    VaR/CVaR must be computed only on days where the strategy is in position
+    (non-zero returns). Including flat cash days (return == 0.0) inflates the
+    denominator and collapses VaR to 0%.
+    """
+
+    def _make_sparse_returns(self, n_total=252, n_positive=20, n_negative=10,
+                              pos_val=0.02, neg_val=-0.03) -> pd.Series:
+        """Build a returns series that is mostly zeros with some invested days."""
+        vals = [0.0] * n_total
+        idx = pd.date_range("2024-01-02", periods=n_total, freq="B")
+        # Place negative returns near the beginning
+        for i in range(n_negative):
+            vals[i * 4] = neg_val           # every 4th day early on
+        # Place positive returns later
+        for i in range(n_positive):
+            vals[n_total - 1 - i * 2] = pos_val
+        return pd.Series(vals, index=idx)
+
+    def test_var_nonzero_when_returns_are_sparse(self):
+        """VaR must not be 0.0 when the series has meaningful tail losses."""
+        from report_generator import _advanced_metrics
+        returns = self._make_sparse_returns()
+        metrics = {"max_drawdown": 0.05}
+        result = _advanced_metrics(returns, [], metrics)
+        assert result["var_95"] < -0.001, (
+            f"VaR={result['var_95']:.4f} should reflect actual losses, not flat days"
+        )
+
+    def test_cvar_nonzero_when_returns_are_sparse(self):
+        """CVaR must not be 0.0 when the series has meaningful tail losses."""
+        from report_generator import _advanced_metrics
+        returns = self._make_sparse_returns()
+        metrics = {"max_drawdown": 0.05}
+        result = _advanced_metrics(returns, [], metrics)
+        assert result["cvar_95"] < -0.001, (
+            f"CVaR={result['cvar_95']:.4f} should reflect actual tail loss"
+        )
+
+    def test_var_reflects_worst_loss(self):
+        """VaR 5th percentile on invested days should be close to the worst daily loss."""
+        from report_generator import _advanced_metrics
+        # Exactly 20 invested days: 18 at +0.01, 2 at -0.05
+        vals = [0.0] * 252
+        for i in range(18):
+            vals[i * 10] = 0.01
+        vals[5]  = -0.05
+        vals[15] = -0.05
+        returns = pd.Series(vals, index=pd.date_range("2024-01-02", periods=252, freq="B"))
+        metrics = {"max_drawdown": 0.10}
+        result = _advanced_metrics(returns, [], metrics)
+        # 2/20 = 10% of invested days are at -5%; 5th percentile should hit -5%
+        assert result["var_95"] <= -0.04, f"VaR={result['var_95']:.4f} expected ~-0.05"
+
+    def test_full_series_var_would_be_zero(self):
+        """
+        Regression test: confirm that computing VaR on the FULL series (including zeros)
+        would produce a near-zero result — proving the fix is necessary.
+        """
+        vals = [0.0] * 252
+        vals[0] = -0.05
+        vals[1] = -0.05
+        returns = pd.Series(vals, index=pd.date_range("2024-01-02", periods=252, freq="B"))
+        # 5th percentile of full series (250 zeros + 2 losses) is 0.0
+        old_var = float(np.percentile(returns.dropna(), 5))
+        assert old_var == 0.0, "Old (buggy) VaR should be 0.0 on mostly-flat series"
+        # New VaR on invested days only should be negative
+        invested = returns[returns != 0.0].dropna()
+        new_var = float(np.percentile(invested, 5))
+        assert new_var < -0.04, f"New VaR={new_var:.4f} should reflect the -5% losses"

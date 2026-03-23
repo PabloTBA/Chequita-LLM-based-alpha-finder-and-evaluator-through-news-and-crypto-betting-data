@@ -111,7 +111,7 @@ class Backtester:
         max_holding       = params["max_holding_days"]
 
         atr           = self._atr(high, low, close)
-        ma            = close.rolling(ma_period).mean()
+        ma            = close.rolling(ma_period).mean().shift(1)   # shift(1): no look-ahead
         vol_ma        = volume.rolling(20).mean().shift(1)
         rolling_high  = close.rolling(entry_lookback).max().shift(1)
         blackout      = ohlcv["earnings_blackout"] if "earnings_blackout" in ohlcv.columns else pd.Series(False, index=ohlcv.index)
@@ -198,8 +198,8 @@ class Backtester:
 
         atr      = self._atr(high, low, close)
         rsi_ser  = self._rsi(close)
-        bb_ma    = close.rolling(bb_period).mean()
-        bb_std   = close.rolling(bb_period).std(ddof=1)
+        bb_ma    = close.rolling(bb_period).mean().shift(1)        # shift(1): no look-ahead
+        bb_std   = close.rolling(bb_period).std(ddof=1).shift(1)   # shift(1): no look-ahead
         lower_bb = bb_ma - bb_std_mult * bb_std
         middle_bb = bb_ma
         blackout  = ohlcv["earnings_blackout"] if "earnings_blackout" in ohlcv.columns else pd.Series(False, index=ohlcv.index)

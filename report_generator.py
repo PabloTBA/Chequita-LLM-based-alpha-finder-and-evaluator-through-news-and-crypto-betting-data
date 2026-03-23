@@ -287,6 +287,18 @@ class ReportGenerator:
             f"| P95 max consecutive losses | {mc.get('p95_max_consec_losses', 0)} |",
             f"| Optimal Kelly fraction | {mc.get('kelly_fraction', 0):.3f} |",
             f"| Suggested position size (½ Kelly) | {mc.get('kelly_fraction', 0) / 2:.3f} of capital |",
+            *(
+                [
+                    "",
+                    "> **Kelly = 0 note:** Negative expectancy at the trade-sequence level — "
+                    "the formula signals no provable edge. P(Ruin) can still be 0% because "
+                    "the fixed 1% position sizing caps total drawdown far below the 40% ruin "
+                    "floor even across many consecutive losses. Kelly = 0 is the stronger "
+                    "signal: do not trade this setup until edge is demonstrated.",
+                ]
+                if mc.get("kelly_fraction", 0) <= 0
+                else []
+            ),
             "",
             "**Equity confidence band** _(for graphing: trade# vs portfolio value)_",
             "",
@@ -332,7 +344,7 @@ class ReportGenerator:
             ]
 
         # ── 6. Backtest performance ────────────────────────────────────────────
-        lines += ["", "### 6. Backtest Performance (5 years)", ""]
+        lines += ["", "### 6. Backtest Performance (10 years)", ""]
         lines += [
             "| Metric | Value |",
             "|--------|-------|",
@@ -953,9 +965,9 @@ class ReportGenerator:
             trade_count = mc.get("trade_count", 0)
             disclaimer  = (
                 f"\n> ⚠️ **Statistical disclaimer:** This simulation is based on only "
-                f"**{trade_count} historical trades**. Bootstrap resampling with fewer than 30 trades "
+                f"**{trade_count} historical trades**. Bootstrap resampling with fewer than 60 trades "
                 f"produces wide, unreliable confidence bands. Treat these figures as directional only."
-            ) if trade_count and trade_count < 50 else ""
+            ) if trade_count and trade_count < 60 else ""
 
             blocks += [
                 f"### {ticker}",
@@ -986,6 +998,18 @@ class ReportGenerator:
                 f"| Median CAGR | {mc.get('median_cagr', 0):.2%} |",
                 f"| P95 Max Consecutive Losses | {mc.get('p95_max_consec_losses', 0)} |",
                 f"| Optimal Kelly Fraction | {mc.get('kelly_fraction', 0):.3f} |",
+                *(
+                    [
+                        "",
+                        "> **Kelly = 0 note:** Negative expectancy at the trade-sequence level — "
+                        "the formula signals no provable edge. P(Ruin) can still be 0% because "
+                        "the fixed 1% position sizing caps total drawdown far below the 40% ruin "
+                        "floor even across many consecutive losses. Kelly = 0 is the stronger "
+                        "signal: do not trade this setup until edge is demonstrated.",
+                    ]
+                    if mc.get("kelly_fraction", 0) <= 0
+                    else []
+                ),
                 "",
                 "#### Ruin Analysis",
                 "",
@@ -1117,10 +1141,19 @@ def _advanced_metrics(returns: pd.Series, trade_log: list[dict], metrics: dict) 
         # Calmar
         calmar = float(cagr / max_dd) if max_dd > 0 else 0.0
 
-        # VaR / CVaR 95%
-        var_95  = float(np.percentile(returns.dropna(), 5))
-        tail    = returns[returns <= var_95]
-        cvar_95 = float(tail.mean()) if len(tail) > 0 else var_95
+        # VaR / CVaR 95% — computed only on invested days (non-zero returns).
+        # Flat cash days (return == 0.0) are excluded because including them
+        # dilutes the tail and collapses VaR to 0%.
+        invested = returns[returns != 0.0].dropna()
+        if len(invested) >= 10:
+            var_95  = float(np.percentile(invested, 5))
+            tail    = invested[invested <= var_95]
+            cvar_95 = float(tail.mean()) if len(tail) > 0 else var_95
+        else:
+            # Fallback: too few invested days — use full series
+            var_95  = float(np.percentile(returns.dropna(), 5))
+            tail    = returns[returns <= var_95]
+            cvar_95 = float(tail.mean()) if len(tail) > 0 else var_95
 
         # Max drawdown recovery
         equity_fake = (1 + returns).cumprod()
@@ -1143,7 +1176,10 @@ def _advanced_metrics(returns: pd.Series, trade_log: list[dict], metrics: dict) 
 
         def _sharpe(r: pd.Series) -> float:
             s = r.std(ddof=1)
-            return float(r.mean() / s * math.sqrt(TRADING_DAYS)) if s > 0 else 0.0
+            if s < 1e-10:
+                return 0.0
+            raw = float(r.mean() / s * math.sqrt(TRADING_DAYS))
+            return float(np.clip(raw, -20.0, 20.0))
 
         result.update({
             "sortino":       sortino,
