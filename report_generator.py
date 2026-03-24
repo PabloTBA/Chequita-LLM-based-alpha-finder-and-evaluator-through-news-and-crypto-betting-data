@@ -990,7 +990,7 @@ class ReportGenerator:
             return "## Baseline Comparison\n\n_SPY data malformed._"
 
         # ── Baseline 1: SPY buy-and-hold ──────────────────────────────────────
-        spy_bnh_ret = float((spy_close.iloc[-1] - spy_close.iloc[0]) / spy_close.iloc[0])
+        spy_bnh_ret = float(np.array(spy_close.iloc[-1]).flat[0] / np.array(spy_close.iloc[0]).flat[0] - 1)
         spy_bnh_sharpe = _sharpe_from_returns(spy_daily)
 
         # ── Baseline 2: SPY 50-day MA cross ───────────────────────────────────
@@ -1408,11 +1408,12 @@ def _render_mechanics(strategy: str, params: dict) -> list[str]:
 
 def _sharpe_from_returns(returns: pd.Series, rf: float = 0.045) -> float:
     """Annualised Sharpe, capped ±20, matching DiagnosticsEngine."""
-    std = returns.std(ddof=1)
+    returns = pd.Series(np.array(returns).flatten())
+    std = float(returns.std(ddof=1))
     if std < 1e-10 or np.isnan(std):
         return 0.0
     daily_rf = rf / 252
-    raw = float((returns.mean() - daily_rf) / std * math.sqrt(252))
+    raw = float((float(returns.mean()) - daily_rf) / std * math.sqrt(252))
     return float(np.clip(raw, -20.0, 20.0))
 
 
