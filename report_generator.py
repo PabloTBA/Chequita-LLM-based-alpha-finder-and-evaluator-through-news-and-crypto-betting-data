@@ -984,7 +984,7 @@ class ReportGenerator:
             return "## Baseline Comparison\n\n_SPY data unavailable — baselines cannot be computed._"
 
         try:
-            spy_close  = spy_ohlcv["Close"].astype(float)
+            spy_close  = spy_ohlcv["Close"].astype(float).reset_index(drop=True)
             spy_daily  = spy_close.pct_change().fillna(0.0)
         except Exception:
             return "## Baseline Comparison\n\n_SPY data malformed._"
