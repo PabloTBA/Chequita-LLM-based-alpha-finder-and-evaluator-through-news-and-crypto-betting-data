@@ -7,7 +7,7 @@ from report_generator import _sharpe_from_returns
 # Reproduce the exact same data the pipeline passes
 spy_ohlcv = yf.download("SPY", period="5y", auto_adjust=True)
 
-spy_close   = spy_ohlcv["Close"].astype(float)
+spy_close   = spy_ohlcv["Close"].squeeze().astype(float)
 spy_daily   = spy_close.pct_change().fillna(0.0)
 spy_ma50    = spy_close.rolling(50).mean()
 in_pos_mask = (spy_close > spy_ma50).shift(1).fillna(False)
