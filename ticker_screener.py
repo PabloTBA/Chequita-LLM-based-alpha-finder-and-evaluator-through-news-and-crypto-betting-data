@@ -88,9 +88,17 @@ class TickerScreener:
 
     def prefilter(self, articles: dict[str, pd.DataFrame]) -> pd.DataFrame:
         """
-        Combine all 3 article sources, group by ticker, sum composite_scores,
+        Combine all article sources, group by ticker, aggregate scores,
         return top-50 as DataFrame with columns [ticker, composite_score].
-        Rows with missing/empty ticker are excluded.
+
+        Scoring aggregation — hybrid of max and normalised sum:
+          per_ticker_score = 0.7 × max_article_score
+                           + 0.3 × sum(article_score / n_tickers_in_article)
+
+        The normalisation by n_tickers prevents a single broadside article
+        ("AAPL MSFT GOOGL AMZN... lead rally") from giving every listed ticker
+        the full composite score.  The max component preserves the signal from
+        one genuinely high-quality, ticker-specific article.
         """
         frames = [df for df in articles.values() if isinstance(df, pd.DataFrame) and not df.empty]
 
@@ -103,7 +111,17 @@ class TickerScreener:
         if "tickers" in combined.columns and "ticker" not in combined.columns:
             combined = combined.rename(columns={"tickers": "ticker"})
 
-        # Split comma-separated ticker strings into one row per ticker
+        # Count tickers per article BEFORE exploding — needed for normalisation
+        combined["_n_tickers"] = (
+            combined["ticker"].astype(str)
+            .str.split(",")
+            .apply(lambda ts: max(1, len([t for t in ts if t.strip() and t.strip() != "nan"])))
+        )
+
+        # Normalised per-ticker contribution: article score ÷ number of tickers tagged
+        combined["_norm_score"] = combined["composite_score"] / combined["_n_tickers"]
+
+        # Explode to one row per ticker
         combined["ticker"] = combined["ticker"].astype(str).str.split(",")
         combined = combined.explode("ticker")
         combined["ticker"] = combined["ticker"].str.strip()
@@ -113,9 +131,15 @@ class TickerScreener:
         combined = combined[combined["ticker"].str.strip() != ""]
         combined = combined[combined["ticker"] != "nan"]
 
+        # Hybrid aggregation per ticker
+        agg = combined.groupby("ticker", as_index=False).agg(
+            _max_score=("composite_score", "max"),
+            _sum_norm =("_norm_score", "sum"),
+        )
+        agg["composite_score"] = 0.7 * agg["_max_score"] + 0.3 * agg["_sum_norm"]
+
         scored = (
-            combined.groupby("ticker", as_index=False)["composite_score"]
-            .sum()
+            agg[["ticker", "composite_score"]]
             .sort_values("composite_score", ascending=False)
             .head(PREFILTER_LIMIT)
             .reset_index(drop=True)

@@ -123,6 +123,7 @@ class OHLCVFetcher:
             "52w_high_prox":    float(self._52w_high_prox(close)),
             "52w_low_prox":     float(self._52w_low_prox(close)),
             "volume_ratio_30d": float(self._volume_ratio(volume, window=30)),
+            "adv_20d":          float(self._adv_shares(volume, window=20)),
         }
 
     # ── private feature calculators ───────────────────────────────────────────
@@ -179,10 +180,18 @@ class OHLCVFetcher:
 
     @staticmethod
     def _volume_ratio(volume: np.ndarray, window: int = 30) -> float:
-        avg = volume[-window:].mean()
+        # Use [-window-1:-1] to exclude today — avoids look-ahead bias in the denominator
+        hist = volume[-window - 1 : -1]
+        avg  = hist.mean() if len(hist) > 0 else 0.0
         if avg == 0:
             return 1.0
         return volume[-1] / avg
+
+    @staticmethod
+    def _adv_shares(volume: np.ndarray, window: int = 20) -> float:
+        """20-day average daily volume in shares (used for market-impact sizing)."""
+        hist = volume[-window - 1 : -1]   # exclude today — same non-look-ahead logic
+        return float(hist.mean()) if len(hist) > 0 else float(volume.mean())
 
 
 # ── CLI smoke test ────────────────────────────────────────────────────────────

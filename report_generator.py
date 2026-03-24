@@ -372,27 +372,35 @@ class ReportGenerator:
         for name, val, floor, ok in floors:
             lines.append(f"| {name} | {val} | {floor} | {'✅' if ok else '❌'} |")
 
-        wf_split = int(len(returns) * 0.70)
-        if not returns.empty and wf_split > 0:
-            is_ret  = returns.iloc[:wf_split]
-            oos_ret = returns.iloc[wf_split:]
-            is_cum  = float((1 + is_ret).prod() - 1)
-            oos_cum = float((1 + oos_ret).prod() - 1)
-            is_start  = str(returns.index[0])[:10]
-            is_end    = str(returns.index[wf_split - 1])[:10]
-            oos_start = str(returns.index[wf_split])[:10]
-            oos_end   = str(returns.index[-1])[:10]
+        # Multi-split walk-forward detail (60/40, 70/30, 80/20)
+        wf_splits = metrics.get("wf_splits", [])
+        wf_underpowered = metrics.get("wf_underpowered", False)
+        if wf_underpowered:
             lines += [
                 "",
-                "**Walk-forward (70% IS / 30% OOS):**",
-                "",
-                "| Period | Start | End | Cumulative Return |",
-                "|--------|-------|-----|-------------------|",
-                f"| In-sample (70%) | {is_start} | {is_end} | {is_cum:.2%} |",
-                f"| Out-of-sample (30%) | {oos_start} | {oos_end} | {oos_cum:.2%} |",
+                "> ⚠️  **Walk-forward underpowered** — fewer than 100 trades; "
+                "split results are not statistically meaningful and the WF gate was not applied.",
             ]
+        elif wf_splits and not returns.empty:
+            lines += ["", "**Walk-forward (3-split robustness: 60/40, 70/30, 80/20 — requires 2/3 passes):**", ""]
+            lines += [
+                "| IS/OOS | IS Sharpe | OOS Sharpe | Degradation | Pass |",
+                "|--------|-----------|------------|-------------|------|",
+            ]
+            for sp in wf_splits:
+                is_p  = int(sp["is_pct"] * 100)
+                oos_p = 100 - is_p
+                tick  = "✅" if sp.get("passed") else "❌"
+                lines.append(
+                    f"| {is_p}/{oos_p} | {sp['is_sharpe']:.3f} | "
+                    f"{sp['oos_sharpe']:.3f} | {sp['degradation']:.1%} | {tick} |"
+                )
+            n_pass = sum(1 for sp in wf_splits if sp.get("passed"))
+            lines.append(f"")
+            lines.append(f"**{n_pass}/3 splits passed** ({'✅ robust' if n_pass >= 2 else '❌ fragile — likely IS overfit'})")
 
         # ── 6. Backtest performance ────────────────────────────────────────────
+        slip_bps = bt.get("slippage_bps", 10.0)
         lines += ["", "### 6. Backtest Performance (10 years)", ""]
         lines += [
             "| Metric | Value |",
@@ -400,10 +408,23 @@ class ReportGenerator:
             f"| Net return (after slippage) | {net_ret:.2%}{spy_str} |",
             f"| Gross return (pre-cost) | {summary.get('gross_return', 0):.2%} |",
             f"| Total slippage cost | ${summary.get('total_slippage_cost', 0):,.2f} |",
+            f"| Slippage rate used | {slip_bps:.0f}bps/side (ADV-tiered) |",
             f"| Trade count | {summary.get('trade_count', 0)} |",
             f"| Win rate | {summary.get('win_rate', 0):.1%} |",
             "",
         ]
+
+        # Param divergence warnings — alert when live params deviate from backtest params
+        param_div = s.get("param_divergence_warnings", [])
+        if param_div:
+            lines += [
+                "> ⚠️  **Parameter divergence detected** — live signal uses different "
+                "parameters than the validated backtest:",
+                "",
+            ]
+            for w in param_div:
+                lines.append(f"> - {w}")
+            lines.append("")
 
         # Trade log
         if trade_log:
@@ -925,68 +946,96 @@ class ReportGenerator:
 
     @staticmethod
     def _execution_brief_section(po: dict) -> str:
-        eb = po.get("execution_brief", {})
-        active   = eb.get("active_signals", [])
-        p_risk   = eb.get("portfolio_risk", {})
-        warnings = eb.get("warnings", [])
+        """
+        Execution brief for ALL qualified tickers — both active (enter now) and
+        pending (enter when conditions met).  The trader needs this information
+        regardless of whether the signal is firing today, because the brief tells
+        them exactly how to size and execute the trade when it does fire.
+        """
+        brief    = po.get("execution_brief", {})
+        mkt      = brief.get("market_status", {})
+        active   = brief.get("active_signals", [])
+        pending  = brief.get("pending_signals", [])
+        p_risk   = brief.get("portfolio_risk", {})
+        warnings = brief.get("warnings", [])
 
-        mkt = eb.get("market_status", {})
-        mkt_label  = mkt.get("label", "UNKNOWN")
-        mkt_detail = mkt.get("detail", "")
-        mkt_line   = f"**NYSE Market Status:** {mkt_label} — {mkt_detail}"
-
-        blocks = ["## Execution Brief", "", mkt_line, ""]
-
-        if not active:
-            blocks.append(
-                "_No active entry signals today — no execution required._  \n"
-                f"**Inactive signals:** {eb.get('inactive_count', 0)}"
-            )
-            return "\n".join(blocks)
-
-        blocks += [
-            "### Portfolio-Level Risk",
+        lines = [
+            "## Execution Brief",
             "",
-            "| Metric | Value |",
-            "|--------|-------|",
-            f"| Active signals | {p_risk.get('active_count', 0)} |",
-            f"| Total adjusted dollar risk | ${p_risk.get('total_dollar_risk', 0):,.0f} |",
-            f"| % of portfolio | {p_risk.get('pct_of_portfolio', 0):.2f}% |",
-            "",
+            f"**NYSE:** {mkt.get('label', 'N/A')} — {mkt.get('detail', '')}  ",
         ]
 
         if warnings:
-            blocks.append("### Warnings")
-            blocks.append("")
+            lines += ["", "**Warnings:**"]
             for w in warnings:
-                blocks.append(f"- ⚠️  {w}")
-            blocks.append("")
+                lines.append(f"- ⚠️  {w}")
 
-        blocks += [
-            "### Active Signal Execution Details",
-            "",
-            "| Ticker | Entry | Stop | Size | Dollar Risk | Adj. Risk | Spread | Slippage | Impact | Note |",
-            "|--------|-------|------|------|-------------|-----------|--------|----------|--------|------|",
-        ]
-        for s in active:
-            spread_str   = f"${s['spread']:.4f}"  if s.get("spread")  is not None else "N/A (ATR est.)"
-            entry_str    = f"${s['entry_price']:,.2f}" if s.get("entry_price") is not None else "N/A"
-            stop_str     = f"${s['stop_price']:,.2f}"  if s.get("stop_price")  is not None else "N/A"
-            blocks.append(
-                f"| {s['ticker']} "
-                f"| {entry_str} "
-                f"| {stop_str} "
-                f"| {s['position_size']:,} "
-                f"| ${s['dollar_risk']:,.0f} "
-                f"| ${s['adjusted_risk']:,.0f} "
-                f"| {spread_str} "
-                f"| ${s['slippage_total']:,.2f} "
-                f"| {s['market_impact'].upper()} "
-                f"| {s['execution_note']} |"
-            )
+        def _render_brief(b: dict, active_signal: bool) -> list[str]:
+            status = "✅ ENTER NOW" if active_signal else "⏸ PENDING — conditions not yet met"
+            out = [
+                "",
+                f"### {b['ticker']} — {status}",
+                "",
+                "| Field | Value |",
+                "|-------|-------|",
+                f"| Entry price | ${b['entry_price']:,.2f} |" if b.get("entry_price") else "| Entry price | — |",
+                f"| Stop loss | ${b['stop_price']:,.2f} |" if b.get("stop_price") else "| Stop loss | — |",
+                f"| Position size | {b['position_size']:,} shares |",
+                f"| Dollar risk (1% rule) | ${b['dollar_risk']:,.0f} |",
+                f"| Slippage est. | ${b['slippage_per_share']:.4f}/share → ${b['slippage_total']:,.2f} total |",
+                f"| Adjusted net risk | ${b['adjusted_risk']:,.0f} |",
+                f"| Market impact | {b['market_impact']} |",
+                f"| ADV (20d) | {int(b.get('_adv', 0)):,} shares |" if b.get("_adv") else "",
+            ]
+            if b.get("target"):
+                out.append(f"| Mean-reversion target | ${b['target']:,.2f} |")
+            if not active_signal:
+                out += ["", "**Conditions to watch (enter when ALL are met):**", ""]
+                if b.get("entry_trigger") is not None:
+                    out.append(f"- Price must close **above ${b['entry_trigger']:,.2f}** (N-day high breakout)")
+                if b.get("volume_needed") is not None:
+                    out.append(f"- Volume must exceed **{b['volume_needed']:,.0f} shares** (volume confirmation)")
+                if b.get("rsi_needed") is not None:
+                    out.append(f"- RSI(14) must drop **below {b['rsi_needed']}** (oversold) AND price ≤ lower Bollinger Band")
+                out.append("")
+                out.append("_Setup above is projected at current ATR/price. Actual size/stop will be recalculated at entry bar._")
+            out.append(f"")
+            out.append(f"**Note:** {b['execution_note']}")
+            return out
 
-        blocks.append("")
-        return "\n".join(blocks)
+        if active:
+            lines += ["", "### 🚦 Active Signals — Enter at Next Open", ""]
+            for b in active:
+                lines += _render_brief(b, active_signal=True)
+        else:
+            lines += ["", "_No active entry signals today._", ""]
+
+        if pending:
+            lines += ["", "---", "", "### 👁 Pending Signals — Monitor Daily", ""]
+            lines += [
+                "_These tickers passed all 3 validation stages (backtest → diagnostics → Monte Carlo)_",
+                "_but have not yet triggered their entry signal. The setup below shows what the_",
+                "_trade will look like when conditions are met._",
+                "",
+            ]
+            for b in pending:
+                lines += _render_brief(b, active_signal=False)
+
+        if active or pending:
+            lines += [
+                "",
+                "---",
+                "",
+                "### Portfolio Risk Summary",
+                "",
+                f"| | Count | Dollar Risk | % of Portfolio |",
+                "|---|---|---|---|",
+                f"| Active signals | {p_risk.get('active_count', 0)} | "
+                f"${p_risk.get('total_dollar_risk', 0):,.0f} | "
+                f"{p_risk.get('pct_of_portfolio', 0):.1f}% |",
+            ]
+
+        return "\n".join(lines)
 
     @staticmethod
     def _monte_carlo_section(po: dict) -> str:

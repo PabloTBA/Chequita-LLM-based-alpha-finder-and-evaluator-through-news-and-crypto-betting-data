@@ -106,9 +106,17 @@ class ExecutionAdvisor:
     # ── public ────────────────────────────────────────────────────────────────
 
     def advise(self, strategies: list[dict]) -> dict:
-        active_signals: list[dict] = []
-        inactive_count = 0
-        warnings:       list[str]  = []
+        """
+        Build execution briefs for ALL strategies passed in.
+
+        Active signals  → full live/ATR slippage estimate, market impact check.
+        Inactive signals → projected setup (conditions not yet met) + same
+                           slippage/impact estimates so the trader knows exactly
+                           what to expect and what to watch for before entry.
+        """
+        active_briefs:   list[dict] = []
+        inactive_briefs: list[dict] = []
+        warnings:        list[str]  = []
 
         mkt = get_market_status()
         print(f"  [Execution] NYSE {mkt['label']} — {mkt['detail']}")
@@ -120,23 +128,26 @@ class ExecutionAdvisor:
 
         for strat in strategies:
             sig = strat.get("current_signal", {})
-            if not sig.get("signal_active"):
-                inactive_count += 1
-                continue
-
-            brief, strat_warnings = self._build_brief(strat, market_open=mkt["open"])
-            active_signals.append(brief)
+            is_active = bool(sig.get("signal_active"))
+            brief, strat_warnings = self._build_brief(
+                strat, market_open=mkt["open"], signal_active=is_active
+            )
+            if is_active:
+                active_briefs.append(brief)
+            else:
+                inactive_briefs.append(brief)
             warnings.extend(strat_warnings)
 
-        total_risk = sum(s["adjusted_risk"] for s in active_signals)
+        total_risk = sum(s["adjusted_risk"] for s in active_briefs)
         pct        = (total_risk / self._portfolio * 100) if self._portfolio else 0.0
 
         return {
-            "market_status":  mkt,
-            "active_signals": active_signals,
-            "inactive_count": inactive_count,
+            "market_status":   mkt,
+            "active_signals":  active_briefs,
+            "pending_signals": inactive_briefs,
+            "inactive_count":  len(inactive_briefs),
             "portfolio_risk": {
-                "active_count":      len(active_signals),
+                "active_count":      len(active_briefs),
                 "total_dollar_risk": total_risk,
                 "pct_of_portfolio":  pct,
             },
@@ -145,15 +156,29 @@ class ExecutionAdvisor:
 
     # ── internal ──────────────────────────────────────────────────────────────
 
-    def _build_brief(self, strat: dict, market_open: bool = True) -> tuple[dict, list[str]]:
+    def _build_brief(self, strat: dict, market_open: bool = True,
+                     signal_active: bool = False) -> tuple[dict, list[str]]:
+        """
+        Build an execution brief regardless of signal state.
+
+        When signal_active is True:  use 'setup' (exact current-bar entry).
+        When signal_active is False: use 'projected_setup' (entry at trigger price)
+                                     so the trader knows what the trade looks like
+                                     when (not if) the signal fires.
+        """
         ticker  = strat["ticker"]
-        sig     = strat["current_signal"]
-        setup   = sig.get("setup") or {}
+        sig     = strat.get("current_signal", {})
+
+        # Active signal: use the exact setup; inactive: use projected setup
+        if signal_active:
+            setup = sig.get("setup") or {}
+        else:
+            setup = sig.get("projected_setup") or sig.get("setup") or {}
 
         position_size = int(setup.get("position_size", 0))
         dollar_risk   = float(setup.get("dollar_risk", 0.0))
         current_atr   = float(setup.get("current_atr", 0.0))
-        adv           = strat.get("_adv", 0)   # injected by tests; 0 means unknown
+        adv           = strat.get("_adv", 0)
 
         warnings: list[str] = []
 
@@ -182,10 +207,14 @@ class ExecutionAdvisor:
             )
 
         # ── execution note ────────────────────────────────────────────────────
-        note = self._execution_note(market_impact, live_ok, spread, market_open=market_open)
+        note = self._execution_note(
+            market_impact, live_ok, spread, market_open=market_open,
+            signal_active=signal_active
+        )
 
         return {
             "ticker":              ticker,
+            "signal_active":       signal_active,
             "bid":                 bid,
             "ask":                 ask,
             "spread":              spread,
@@ -198,6 +227,10 @@ class ExecutionAdvisor:
             "stop_price":          setup.get("stop_price"),
             "position_size":       position_size,
             "dollar_risk":         dollar_risk,
+            "entry_trigger":       setup.get("entry_trigger"),   # price to watch
+            "volume_needed":       setup.get("volume_needed"),   # volume threshold
+            "rsi_needed":          setup.get("rsi_needed"),      # RSI threshold (MR)
+            "target":              setup.get("target"),          # MR target
         }, warnings
 
     def _fetch_spread(
@@ -235,8 +268,10 @@ class ExecutionAdvisor:
 
     @staticmethod
     def _execution_note(market_impact: str, live_ok: bool, spread: float | None,
-                        market_open: bool = True) -> str:
+                        market_open: bool = True, signal_active: bool = True) -> str:
         parts = []
+        if not signal_active:
+            parts.append("PENDING — conditions not yet met; use this setup when signal fires")
         if not market_open:
             parts.append("NYSE closed — queue order for next open; slippage is ATR-estimated")
         elif not live_ok:

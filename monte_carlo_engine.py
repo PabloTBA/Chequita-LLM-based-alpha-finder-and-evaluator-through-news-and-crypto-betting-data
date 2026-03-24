@@ -66,7 +66,8 @@ class MonteCarloEngine:
 
     # ── public ────────────────────────────────────────────────────────────────
 
-    def run(self, trade_log: list[dict], initial_portfolio: float = 100_000.0) -> dict:
+    def run(self, trade_log: list[dict], initial_portfolio: float = 100_000.0,
+            ohlcv_years: float | None = None) -> dict:
         if not trade_log:
             print("  [MC]  No trades — returning empty result")
             return self._empty_result(initial_portfolio)
@@ -76,18 +77,30 @@ class MonteCarloEngine:
         ruin_floor = initial_portfolio * (1.0 - self.ruin_threshold)
         print(f"  [MC]  Running {self.n_simulations:,} simulations ({n_trades} trades, portfolio ${initial_portfolio:,.0f}) ...")
 
-        # Compute actual backtest duration in years from trade dates
-        # (not n_trades/252 which conflates trade frequency with time)
-        try:
-            first_entry = min(t["entry_date"] for t in trade_log)
-            last_exit   = max(t["exit_date"]  for t in trade_log)
-            backtest_years = max((last_exit - first_entry).days / 365.25, 1 / 12)
-        except Exception:
-            backtest_years = n_trades / TRADING_DAYS  # fallback if dates missing
+        # Use the full OHLCV window duration (passed from orchestrator) as the
+        # annualisation denominator — NOT first_entry→last_exit, which understates
+        # the window when trades cluster in one sub-period and wildly overstates CAGR.
+        if ohlcv_years is not None and ohlcv_years > 0:
+            backtest_years = ohlcv_years
+        else:
+            try:
+                first_entry = min(t["entry_date"] for t in trade_log)
+                last_exit   = max(t["exit_date"]  for t in trade_log)
+                backtest_years = max((last_exit - first_entry).days / 365.25, 1 / 12)
+            except Exception:
+                backtest_years = n_trades / TRADING_DAYS
 
-        # Draw all simulations at once: shape (n_simulations, n_trades)
-        indices = self._rng.integers(0, n_trades, size=(self.n_simulations, n_trades))
-        sampled = pnls[indices]                          # (n_sims, n_trades)
+        # Block bootstrap: sample overlapping blocks of trades to preserve
+        # the serial autocorrelation in momentum strategies (losing streaks
+        # cluster during regime changes — IID bootstrap understates tail risk).
+        # Block size = average holding period (in trades), minimum 2, maximum 10.
+        avg_hold   = float(np.mean([max(t.get("holding_days", 1), 1) for t in trade_log]))
+        # Upper bound: n_trades // 4 ensures at least 4 independent blocks per sim.
+        # No hard cap at 10 — strategies with longer holds (e.g. 15–20 day swings)
+        # need larger blocks to preserve the autocorrelation of multi-day losing streaks.
+        block_size = int(np.clip(round(avg_hold), 2, max(2, n_trades // 4)))
+        indices    = self._block_bootstrap(n_trades, self.n_simulations, block_size)
+        sampled    = pnls[indices]                          # (n_sims, n_trades)
 
         # Equity curves: shape (n_sims, n_trades+1)
         equity = np.hstack([
@@ -115,12 +128,19 @@ class MonteCarloEngine:
                 -1.0,   # total ruin or worse → -100% CAGR
             )
 
-        # Sharpe per sim: daily P&L returns, excess over risk-free rate (industry standard).
-        # Subtracting DAILY_RF from each observation's mean matches the DiagnosticsEngine
-        # Sharpe formula so MC and backtest Sharpe figures are comparable.
-        daily_returns  = sampled / initial_portfolio          # (n_sims, n_trades)
-        excess_mean    = daily_returns.mean(axis=1) - DAILY_RF
-        ret_std        = daily_returns.std(axis=1, ddof=1)
+        # Sharpe per sim — convert each trade's dollar P&L to a per-day return so
+        # that multi-day holds are correctly annualised.  Without this, a 20-day trade
+        # returning $500 on $100k looks like a daily return of 0.5%, which when
+        # annualised by √252 produces a Sharpe ≈ 3-4× higher than the diagnostics
+        # engine (which operates on the actual daily returns series).
+        holding_days = np.array(
+            [max(t.get("holding_days", 1), 1) for t in trade_log], dtype=float
+        )  # (n_trades,)
+        # Broadcast: each bootstrapped trade gets its per-day P&L
+        per_day_pnl   = pnls / holding_days                   # (n_trades,)
+        sampled_daily = per_day_pnl[indices] / initial_portfolio  # (n_sims, n_trades)
+        excess_mean   = sampled_daily.mean(axis=1) - DAILY_RF
+        ret_std       = sampled_daily.std(axis=1, ddof=1)
         with np.errstate(invalid="ignore", divide="ignore"):
             sharpe = np.where(
                 ret_std > 1e-10,
@@ -264,6 +284,25 @@ class MonteCarloEngine:
             np.where(has_wins, 1.0, -1.0),   # all-win → 1.0; all-loss (or flat) → -1.0
         )
         return kelly
+
+    def _block_bootstrap(self, n_trades: int, n_sims: int, block_size: int) -> np.ndarray:
+        """
+        Circular block bootstrap: sample overlapping blocks of trades.
+
+        Each simulation samples ceil(n_trades / block_size) random starting
+        positions and takes blocks of length block_size, wrapping circularly.
+        Preserves local autocorrelation between consecutive trades.
+
+        Returns indices array of shape (n_sims, n_trades).
+        """
+        n_blocks = math.ceil(n_trades / block_size)
+        # Random starting positions: (n_sims, n_blocks)
+        starts  = self._rng.integers(0, n_trades, size=(n_sims, n_blocks))
+        offsets = np.arange(block_size, dtype=np.int64)  # (block_size,)
+        # Build all block indices: (n_sims, n_blocks, block_size)
+        block_indices = (starts[:, :, None] + offsets[None, None, :]) % n_trades
+        # Flatten to (n_sims, n_blocks * block_size) and trim to n_trades
+        return block_indices.reshape(n_sims, -1)[:, :n_trades]
 
     @staticmethod
     def _empty_result(initial_portfolio: float) -> dict:

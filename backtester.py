@@ -38,33 +38,67 @@ import pandas as pd
 RISK_PER_TRADE    = 0.01   # 1% of portfolio per trade
 ATR_PERIOD        = 14
 RSI_PERIOD        = 14
-DEFAULT_SLIP_BPS  = 10     # 10 basis points (0.10%) per side — conservative retail estimate
+DEFAULT_SLIP_BPS  = 10     # 10 basis points (0.10%) per side — fallback only
 ANNUAL_RF         = 0.045  # risk-free rate — must match diagnostics_engine.py
 DAILY_RF          = ANNUAL_RF / 252  # T-bill daily return earned on idle (flat) days
+
+# ADV-tiered slippage (basis points per side).
+# Mega-caps trade inside the spread; small-caps incur significant market impact.
+# Tiers calibrated to typical NYSE/NASDAQ retail execution:
+#   > 5M shares/day  → liquid, spread < 1¢ on most names → 5bps
+#   1M–5M            → normal mid-cap execution           → 10bps
+#   100K–1M          → thin mid-cap, wider spreads        → 25bps
+#   < 100K           → illiquid — expect 50–150bps realized → 75bps
+_SLIP_TIERS: list[tuple[float, float]] = [
+    (5_000_000, 5.0),    # ADV ≥ 5M  → 5bps
+    (1_000_000, 10.0),   # ADV ≥ 1M  → 10bps
+    (  100_000, 25.0),   # ADV ≥ 100K → 25bps
+    (       0,  75.0),   # ADV < 100K → 75bps
+]
+
+
+def _slip_bps_for_adv(adv_shares: float) -> float:
+    """Return the appropriate one-side slippage in basis points given ADV."""
+    for threshold, bps in _SLIP_TIERS:
+        if adv_shares >= threshold:
+            return bps
+    return 75.0   # safety fallback
 
 
 class Backtester:
     def __init__(self, initial_portfolio: float = 100_000.0, slippage_bps: float = DEFAULT_SLIP_BPS):
         self.initial_portfolio = initial_portfolio
+        self._default_slip_bps = slippage_bps
         self._slip = slippage_bps / 10_000  # convert to fraction
 
     # ── public ────────────────────────────────────────────────────────────────
 
-    def run(self, ticker: str, strategy: dict, ohlcv: pd.DataFrame) -> dict:
+    def run(self, ticker: str, strategy: dict, ohlcv: pd.DataFrame,
+            adv_shares: float = 0.0) -> dict:
         """
         Back-test a strategy against OHLCV data.
 
         Parameters
         ----------
-        ticker   : str
-        strategy : dict — output of StrategySelector.select(); must contain
-                   "strategy" (str) and "adjusted_params" (dict)
-        ohlcv    : pd.DataFrame with Open/High/Low/Close/Volume columns
+        ticker     : str
+        strategy   : dict — output of StrategySelector.select(); must contain
+                     "strategy" (str) and "adjusted_params" (dict)
+        ohlcv      : pd.DataFrame with Open/High/Low/Close/Volume columns
+        adv_shares : float — 20-day average daily volume in shares.  When > 0,
+                     overrides the instance default with the ADV-tiered slippage
+                     so backtest costs reflect actual liquidity.
 
         Returns
         -------
-        dict with keys: ticker, strategy, trade_log, equity_curve, returns, summary
+        dict with keys: ticker, strategy, trade_log, equity_curve, returns, summary,
+                        slippage_bps (the rate actually used)
         """
+        # Apply per-ticker ADV-tiered slippage when ADV is known
+        if adv_shares > 0:
+            self._slip = _slip_bps_for_adv(adv_shares) / 10_000
+        else:
+            self._slip = self._default_slip_bps / 10_000
+
         strategy_type = strategy["strategy"]
         params        = strategy["adjusted_params"]
 
@@ -85,6 +119,7 @@ class Backtester:
             except Exception:
                 pass
 
+        used_slip_bps = round(self._slip * 10_000, 1)
         return {
             "ticker":       ticker,
             "strategy":     strategy_type,
@@ -93,6 +128,7 @@ class Backtester:
             "returns":      returns,
             "in_position":  in_pos,
             "summary":      summary,
+            "slippage_bps": used_slip_bps,   # surfaced in report for transparency
         }
 
     # ── strategy engines ──────────────────────────────────────────────────────
@@ -335,6 +371,29 @@ class Backtester:
                 "target":       None,   # momentum has no fixed target
             }
 
+        # Projected setup: always compute trade parameters based on current bar
+        # so the execution brief can show the trader what the trade will look like
+        # when (not just if) the signal fires.
+        projected_setup = None
+        if a > 0:
+            stop_loss_atr = params["stop_loss_atr"]
+            proj_entry    = rh * (1 + self._slip) if rh < np.inf else c * (1 + self._slip)
+            stop_dist     = stop_loss_atr * a
+            proj_stop     = proj_entry - stop_dist
+            proj_size     = int((portfolio * RISK_PER_TRADE) / stop_dist)
+            projected_setup = {
+                "entry_price":   proj_entry,
+                "stop_price":    proj_stop,
+                "stop_dist":     stop_dist,
+                "position_size": proj_size,
+                "dollar_risk":   portfolio * RISK_PER_TRADE,
+                "current_atr":   a,
+                "current_ma":    m,
+                "target":        None,
+                "entry_trigger": rh,        # price that must be broken
+                "volume_needed": vol_multiplier * vm,  # volume threshold to confirm
+            }
+
         return {
             "signal_active":    active,
             "close":            c,
@@ -344,6 +403,7 @@ class Backtester:
             "breakout":         breakout,
             "volume_confirmed": vol_ok,
             "setup":            setup,
+            "projected_setup":  projected_setup,
             "details": (
                 f"Close {c:.2f} {'>' if breakout else '<='} {entry_lookback}d high {rh:.2f}"
                 f" | Volume {v:,.0f} {'>' if vol_ok else '<='} "
@@ -398,6 +458,29 @@ class Backtester:
                 "potential_gain": pot_gain,
             }
 
+        # Projected setup: always compute so execution brief is always populated
+        projected_setup = None
+        if a > 0 and lb > -np.inf:
+            stop_atr_param = params["stop_loss_atr"]
+            proj_entry     = lb * (1 + self._slip)
+            stop_dist      = stop_atr_param * a
+            proj_stop      = proj_entry - stop_dist
+            proj_size      = int((portfolio * RISK_PER_TRADE) / stop_dist)
+            pot_gain       = (mid - lb) * proj_size if mid > lb else 0.0
+            projected_setup = {
+                "entry_price":    proj_entry,
+                "stop_price":     proj_stop,
+                "stop_dist":      stop_dist,
+                "position_size":  proj_size,
+                "dollar_risk":    portfolio * RISK_PER_TRADE,
+                "current_atr":    a,
+                "current_ma":     mid,
+                "target":         mid,
+                "potential_gain": pot_gain,
+                "entry_trigger":  lb,      # RSI < rsi_entry AND close ≤ lower_BB
+                "rsi_needed":     rsi_entry,
+            }
+
         return {
             "signal_active": active,
             "close":         c,
@@ -408,6 +491,7 @@ class Backtester:
             "oversold":      oversold,
             "below_bb":      below_bb,
             "setup":         setup,
+            "projected_setup": projected_setup,
             "details": (
                 f"RSI {r:.1f} {'<' if oversold else '>='} {rsi_entry}"
                 f" | Close {c:.2f} {'<=' if below_bb else '>'} Lower BB {lb:.2f}"
@@ -417,12 +501,46 @@ class Backtester:
     # ── equity curve & summary ────────────────────────────────────────────────
 
     def _build_equity_curve(self, ohlcv: pd.DataFrame, trade_log: list[dict]) -> pd.Series:
-        curve   = pd.Series(self.initial_portfolio, index=ohlcv.index, dtype=float)
-        running = self.initial_portfolio
-        for trade in sorted(trade_log, key=lambda t: t["exit_date"]):
-            running += trade["pnl"]
-            curve.loc[trade["exit_date"]:] = running
-        return curve
+        """
+        Daily mark-to-market equity curve.
+
+        During an open trade, unrealized P&L = (close − entry_price) × position_size
+        is recognised each bar.  This gives a smooth, realistic equity curve whose
+        pct_change() produces a daily-returns series with meaningful Sharpe statistics.
+        Without MTM, the returns series has many zero-return flat days interrupted by
+        large single-bar jumps at exits, which artificially depresses volatility and
+        inflates Sharpe.
+        """
+        close  = ohlcv["Close"].astype(float)
+        equity = pd.Series(self.initial_portfolio, index=ohlcv.index, dtype=float)
+
+        if not trade_log:
+            return equity
+
+        date_to_idx: dict = {d: i for i, d in enumerate(ohlcv.index)}
+        cash = self.initial_portfolio
+
+        for trade in sorted(trade_log, key=lambda t: t["entry_date"]):
+            ei = date_to_idx.get(trade["entry_date"])
+            xi = date_to_idx.get(trade["exit_date"])
+            if ei is None or xi is None:
+                cash += trade["pnl"]
+                continue
+
+            ep  = trade["entry_price"]    # includes entry slippage
+            sz  = trade["position_size"]
+
+            # Vectorised MTM: equity = cash_before_entry + (close − entry_price) × size
+            hold_close = close.iloc[ei : xi + 1].values
+            equity.iloc[ei : xi + 1] = cash + (hold_close - ep) * sz
+
+            # Realise PnL at exit (exit_price already has exit slippage baked in)
+            cash += trade["pnl"]
+
+            # Flat period after exit will be overwritten when the next trade starts
+            equity.iloc[xi + 1 :] = cash
+
+        return equity
 
     def _build_returns(
         self, ohlcv: pd.DataFrame, trade_log: list[dict], equity_curve: pd.Series
@@ -481,13 +599,30 @@ class Backtester:
     @staticmethod
     def _atr(high: pd.Series, low: pd.Series, close: pd.Series,
              period: int = ATR_PERIOD) -> pd.Series:
+        """
+        Wilder-smoothed ATR — seeds with SMA of first `period` TRs, then RMA.
+        Identical seeding to ohlcv_fetcher and regime_classifier.
+        """
         prev_close = close.shift(1)
         tr = pd.concat([
             high - low,
             (high - prev_close).abs(),
             (low  - prev_close).abs(),
         ], axis=1).max(axis=1)
-        return tr.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+
+        tr_vals  = tr.values.astype(float)
+        atr_vals = np.full(len(tr_vals), np.nan)
+
+        # Find first run of `period` consecutive non-NaN TRs (skip the NaN at index 0 from shift)
+        first = 1  # index 0 is NaN from shift(1)
+        seed_end = first + period  # exclusive
+        if seed_end <= len(tr_vals) and not np.any(np.isnan(tr_vals[first:seed_end])):
+            atr_vals[seed_end - 1] = tr_vals[first:seed_end].mean()
+            for i in range(seed_end, len(tr_vals)):
+                if not np.isnan(tr_vals[i]):
+                    atr_vals[i] = (atr_vals[i - 1] * (period - 1) + tr_vals[i]) / period
+
+        return pd.Series(atr_vals, index=tr.index)
 
     @staticmethod
     def _rsi(close: pd.Series, period: int = RSI_PERIOD) -> pd.Series:

@@ -29,6 +29,7 @@ import pandas as pd
 
 # ── Hard floor constants (PRD defaults) ───────────────────────────────────────
 
+WF_MIN_TRADE_COUNT    = 100    # minimum trades for walk-forward to have statistical power
 SHARPE_FLOOR          = 0.50
 MAX_DD_FLOOR          = 0.20   # tightened from 30% → 20% (institutional standard)
 WIN_RATE_FLOOR        = 0.35
@@ -96,7 +97,8 @@ class DiagnosticsEngine:
 
     def _compute_metrics(self, trade_log: list[dict], returns: pd.Series) -> dict:
         sharpe = self._sharpe(returns)
-        wf_degrad, oos_sharpe = self._walk_forward_degradation(returns)
+        tc = len(trade_log)
+        wf_degrad, oos_sharpe, wf_splits = self._walk_forward_degradation(returns, trade_count=tc)
         return {
             "sharpe":                   sharpe,
             "oos_sharpe":               oos_sharpe,
@@ -105,7 +107,9 @@ class DiagnosticsEngine:
             "profit_factor":            self._profit_factor(trade_log),
             "kelly_fraction":           self._kelly_fraction(trade_log),
             "walk_forward_degradation": wf_degrad,
-            "trade_count":              len(trade_log),
+            "wf_splits":                wf_splits,   # detail per split for report
+            "trade_count":              tc,
+            "wf_underpowered":          tc < WF_MIN_TRADE_COUNT,
         }
 
     @staticmethod
@@ -139,9 +143,26 @@ class DiagnosticsEngine:
             return False, (f"Negative Kelly fraction ({kelly:.4f}) — strategy has provably "
                            f"negative expected value; do not size any position")
 
-        wf = metrics["walk_forward_degradation"]
-        if wf > WALKFWD_DEGRAD_FLOOR:
-            return False, f"Walk-forward degradation {wf:.1%} exceeds floor {WALKFWD_DEGRAD_FLOOR:.0%}"
+        # Walk-forward: require passing at least 2 of 3 splits (60/40, 70/30, 80/20).
+        # Underpowered splits count as passes so they don't wrongly reject.
+        wf_splits = metrics.get("wf_splits", [])
+        if wf_splits and not metrics.get("wf_underpowered", False):
+            n_pass = sum(1 for s in wf_splits if s.get("passed", True))
+            if n_pass < 2:
+                degrad_str = " | ".join(
+                    f"{int(s['is_pct']*100)}/{int((1-s['is_pct'])*100)}: {s['degradation']:.1%}"
+                    for s in wf_splits
+                )
+                return False, (
+                    f"Walk-forward failed ≥2 of 3 splits ({degrad_str}) — "
+                    f"median degradation {metrics['walk_forward_degradation']:.1%} "
+                    f"suggests IS overfit"
+                )
+        elif not wf_splits:
+            # Fallback: single-split check for callers that don't provide split detail
+            wf = metrics["walk_forward_degradation"]
+            if wf > WALKFWD_DEGRAD_FLOOR:
+                return False, f"Walk-forward degradation {wf:.1%} exceeds floor {WALKFWD_DEGRAD_FLOOR:.0%}"
 
         tc = metrics["trade_count"]
         if tc < MIN_TRADE_COUNT:
@@ -239,42 +260,77 @@ class DiagnosticsEngine:
         return float(np.clip(kelly, -1.0, 1.0))
 
     @staticmethod
-    def _walk_forward_degradation(returns: pd.Series) -> tuple[float, float]:
+    def _walk_forward_degradation(
+        returns: pd.Series, trade_count: int = 0
+    ) -> tuple[float, float, list[dict]]:
         """
-        Split returns 70/30 in-sample / out-of-sample (industry standard).
-        Degradation = (IS_Sharpe - OOS_Sharpe) / IS_Sharpe, clamped to [0, 1].
-        Returns 1.0 degradation when IS_Sharpe <= 0 (degenerate / already bad in-sample).
+        Multi-split walk-forward: run at IS/OOS ratios of 60/40, 70/30, 80/20.
+        Strategy passes walk-forward only if degradation ≤ WALKFWD_DEGRAD_FLOOR
+        in at least 2 of the 3 splits.  Reported degradation is the median
+        across passing splits (or worst split if all fail).
+
+        Reduces sensitivity to the specific IS/OOS cut-point: a strategy that
+        passes only because the 30% OOS window happened to be a favourable
+        regime will typically fail at least one of the other two cuts.
+
+        When trade_count < WF_MIN_TRADE_COUNT: returns neutral scores tagged as
+        underpowered — the gate is not applied on fewer than 100 trades because
+        a 30% OOS of 30 trades is 9 trades, which cannot distinguish real Sharpe
+        from sampling noise.
 
         Returns
         -------
-        (degradation, oos_sharpe) — both needed by the caller.
+        (median_degradation, median_oos_sharpe, split_detail_list)
+        split_detail_list contains one dict per split with keys:
+            is_pct, is_sharpe, oos_sharpe, degradation, passed
         """
-        split     = int(len(returns) * 0.70)
-        in_sample = returns.iloc[:split]
-        oos       = returns.iloc[split:]
+        if trade_count > 0 and trade_count < WF_MIN_TRADE_COUNT:
+            stub = [
+                {"is_pct": p, "is_sharpe": 0.0, "oos_sharpe": 0.0,
+                 "degradation": 0.0, "passed": True, "underpowered": True}
+                for p in (0.60, 0.70, 0.80)
+            ]
+            return 0.0, 0.0, stub
 
-        def sharpe(r: pd.Series) -> float:
+        def _sharpe(r: pd.Series) -> float:
             std = r.std(ddof=1)
             if std < 1e-10 or np.isnan(std):
                 return 0.0
             daily_rf = RISK_FREE_RATE / TRADING_DAYS
-            raw = float((r.mean() - daily_rf) / std * np.sqrt(TRADING_DAYS))
-            return float(np.clip(raw, -20.0, 20.0))
+            return float(np.clip(
+                (r.mean() - daily_rf) / std * np.sqrt(TRADING_DAYS), -20.0, 20.0
+            ))
 
-        is_sharpe  = sharpe(in_sample)
-        oos_sharpe = sharpe(oos)
+        splits = []
+        for is_pct in (0.60, 0.70, 0.80):
+            cut       = int(len(returns) * is_pct)
+            is_ret    = returns.iloc[:cut]
+            oos_ret   = returns.iloc[cut:]
+            is_s      = _sharpe(is_ret)
+            oos_s     = _sharpe(oos_ret)
 
-        # OOS better than or equal to IS → no degradation (improvement)
-        if oos_sharpe >= is_sharpe:
-            return 0.0, oos_sharpe
+            if oos_s >= is_s or is_s <= 0:
+                degrad = 0.0
+            else:
+                degrad = float(np.clip((is_s - oos_s) / is_s, 0.0, 1.0))
 
-        # IS bad but OOS also bad → fully degraded
-        if is_sharpe <= 0:
-            return 1.0, oos_sharpe
+            splits.append({
+                "is_pct":      is_pct,
+                "is_sharpe":   is_s,
+                "oos_sharpe":  oos_s,
+                "degradation": degrad,
+                "passed":      degrad <= WALKFWD_DEGRAD_FLOOR,
+                "underpowered": False,
+            })
 
-        # IS positive, OOS worse → graded degradation
-        degrad = (is_sharpe - oos_sharpe) / is_sharpe
-        return float(np.clip(degrad, 0.0, 1.0)), oos_sharpe
+        degradations = [s["degradation"] for s in splits]
+        oos_sharpes  = [s["oos_sharpe"]  for s in splits]
+
+        # Reported values: median across splits for robustness
+        median_degrad    = float(np.median(degradations))
+        median_oos_sharpe = float(np.median(oos_sharpes))
+
+        return median_degrad, median_oos_sharpe, splits
 
 
 # ── CLI smoke test ────────────────────────────────────────────────────────────

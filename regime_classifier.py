@@ -33,7 +33,7 @@ HURST_MEAN_REVERTING = 0.45
 ATR_HIGH_VOL         = 0.03    # 3%
 ATR_LOW_VOL          = 0.015   # 1.5%
 MIN_ROWS             = 30
-HURST_WINDOW         = 100     # trading days used for Hurst (30 is too noisy; 100 is industry minimum)
+HURST_WINDOW         = 252     # trading days used for Hurst (30 is too noisy; 100 is industry minimum)
 ATR_PERIOD           = 14
 
 
@@ -97,24 +97,41 @@ class RegimeClassifier:
     @staticmethod
     def _hurst(prices: np.ndarray) -> float:
         """
-        Estimate Hurst exponent via R/S analysis on log returns.
+        Estimate Hurst exponent via R/S analysis on detrended log-price residuals.
 
-        Uses multiple lag scales from 2 to n//2, fits log(R/S) ~ H*log(lag).
-        Returns 0.5 if estimation is not possible (too few unique R/S values).
+        Improvements over naive R/S:
+          1. Detrend by removing OLS linear fit from log-price before differencing
+             — eliminates upward Hurst bias from structural price drift.
+          2. Require ≥ 10 non-overlapping sub-windows per lag
+             — discards noisy large-lag estimates that have only 2-3 observations.
+          3. Weight OLS by number of sub-windows per lag
+             — stable short-lag R/S values (many windows) dominate the fit.
         """
-        if len(prices) < 4:
+        if len(prices) < 20:
             return 0.5
 
-        log_ret = np.diff(np.log(np.clip(prices, 1e-10, None)))
-        n       = len(log_ret)
+        log_prices = np.log(np.clip(prices, 1e-10, None))
 
-        lags    = range(2, max(3, n // 2))
-        log_rs  = []
-        log_lag = []
+        # 1. Detrend: subtract OLS linear trend from log-prices
+        t = np.arange(len(log_prices), dtype=float)
+        coeffs = np.polyfit(t, log_prices, 1)
+        detrended = log_prices - np.polyval(coeffs, t)
 
-        for lag in lags:
-            rs_vals = []
-            for start in range(0, n - lag + 1, lag):
+        log_ret = np.diff(detrended)
+        n = len(log_ret)
+
+        log_rs_vals: list[float] = []
+        log_lag_vals: list[float] = []
+        weights: list[float] = []
+
+        for lag in range(2, max(3, n // 2)):
+            n_windows = n // lag
+            # 2. Require at least 10 non-overlapping windows — discard sparse lags
+            if n_windows < 10:
+                continue
+
+            rs_vals: list[float] = []
+            for start in range(0, n_windows * lag, lag):
                 chunk = log_ret[start : start + lag]
                 if len(chunk) < 2:
                     continue
@@ -124,15 +141,19 @@ class RegimeClassifier:
                 S    = chunk.std(ddof=1)
                 if S > 0:
                     rs_vals.append(R / S)
-            if rs_vals:
-                log_rs.append(np.log(np.mean(rs_vals)))
-                log_lag.append(np.log(lag))
 
-        if len(log_lag) < 2:
+            if rs_vals:
+                log_rs_vals.append(np.log(np.mean(rs_vals)))
+                log_lag_vals.append(np.log(lag))
+                # 3. Weight = number of non-overlapping windows (stable lags weigh more)
+                weights.append(float(n_windows))
+
+        if len(log_lag_vals) < 2:
             return 0.5
 
-        H = float(np.polyfit(log_lag, log_rs, 1)[0])
-        # Clamp to [0, 1] — numerical edge cases can push slightly outside
+        w = np.array(weights)
+        w = w / w.sum()
+        H = float(np.polyfit(log_lag_vals, log_rs_vals, 1, w=w)[0])
         return float(np.clip(H, 0.0, 1.0))
 
     # ── private: ATR (Wilder smoothing) ──────────────────────────────────────

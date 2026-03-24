@@ -376,14 +376,41 @@ class PipelineOrchestrator:
                     ),
                     {"signal_active": None, "details": "N/A", "setup": None},
                 )
-                strategy = {**strategy, "current_signal": sig}
+                adv = int(feats.get("adv_20d", 0))
+                strategy = {**strategy, "current_signal": sig, "_adv": adv}
+
+            # ── Param divergence flag ─────────────────────────────────────────
+            # Warn when adjusted params differ materially from base params so the
+            # trader knows the live signal uses a different stop/band than the
+            # validated backtest.
+            param_warnings: list[str] = []
+            if strategy:
+                base_p = strategy.get("base_params", {})
+                adj_p  = strategy.get("adjusted_params", {})
+                for key in ("stop_loss_atr", "trailing_stop_atr", "bb_std"):
+                    b_val = base_p.get(key)
+                    a_val = adj_p.get(key)
+                    if b_val is not None and a_val is not None:
+                        diff = abs(a_val - b_val)
+                        if diff > 0.5:
+                            param_warnings.append(
+                                f"{key}: base={b_val} vs adjusted={a_val} (Δ={diff:.1f} > 0.5) — "
+                                f"live signal uses wider params than validated backtest"
+                            )
+                if param_warnings:
+                    strategy = {**strategy, "param_divergence_warnings": param_warnings}
+                    for w in param_warnings:
+                        print(f"  [WARN] {ticker} param divergence: {w}")
 
             # Use base_params for backtest to avoid circular LLM tuning —
             # LLM-adjusted params are only used for the live signal check above.
             backtest = self._safe(
                 f"backtester.run({ticker})",
-                lambda _t=ticker, _s=strategy, _o=ohlcv: m["backtester"].run(
-                    _t, {**_s, "adjusted_params": _s.get("base_params", _s["adjusted_params"])}, _o
+                lambda _t=ticker, _s=strategy, _o=ohlcv, _adv=adv: m["backtester"].run(
+                    _t,
+                    {**_s, "adjusted_params": _s.get("base_params", _s["adjusted_params"])},
+                    _o,
+                    adv_shares=float(_adv),
                 ),
                 None,
             )
@@ -444,9 +471,18 @@ class PipelineOrchestrator:
                     else:
                         label = "passed" if diag_passed else f"near-threshold Sharpe={diag_sharpe:.3f}"
                         print(f"  [Stage 10] {ticker} — running Monte Carlo ({label}, {trade_count} trades) ...")
+                        _ohlcv_yrs = None
+                        _odf = (ohlcv_raw or {}).get(ticker)
+                        if _odf is not None and not _odf.empty:
+                            try:
+                                _ohlcv_yrs = (_odf.index[-1] - _odf.index[0]).days / 365.25
+                            except Exception:
+                                pass
                         _mc = self._safe(
                             f"monte_carlo.run({ticker})",
-                            lambda _bt=backtest, _p=portfolio: m["monte_carlo"].run(_bt["trade_log"], _p),
+                            lambda _bt=backtest, _p=portfolio, _oy=_ohlcv_yrs: m["monte_carlo"].run(
+                                _bt["trade_log"], _p, ohlcv_years=_oy
+                            ),
                             None,
                         )
                         if _mc:
@@ -563,6 +599,13 @@ class PipelineOrchestrator:
         }
         from datetime import datetime as _dt
         timestamp = _dt.now().strftime("%H%M%S")
+
+        # ── Verdict accountability log ────────────────────────────────────────
+        # Append {run_date, ticker, verdict, sharpe, passed, strategy, regime} to
+        # a flat CSV so that after 30–50 runs a Kruskal-Wallis test can determine
+        # whether LLM buy/watch/avoid verdicts actually correlate with backtest outcome.
+        PipelineOrchestrator._log_verdict_outcomes(run_date, pipeline_output)
+
         print("[Stage 12] Generating full report ...")
         report_path   = m["reporter"].generate(pipeline_output, timestamp=timestamp)
         print("[Stage 12] Generating trader summary report ...")
@@ -575,6 +618,60 @@ class PipelineOrchestrator:
             "macro":       macro,
             **kwargs,
         }
+
+    @staticmethod
+    def _log_verdict_outcomes(run_date: str, pipeline_output: dict) -> None:
+        """
+        Append one row per ticker to data/verdict_log.csv.
+
+        Columns: run_date, ticker, verdict, strategy, regime, sharpe,
+                 max_drawdown, trade_count, passed, wf_underpowered
+
+        After ~50 runs, run a Kruskal-Wallis test on sharpe grouped by verdict
+        to verify the LLM screening stage is contributing alpha rather than noise.
+        """
+        import csv, os as _os
+
+        verdicts   = {v["ticker"]: v for v in pipeline_output.get("ticker_verdicts", [])}
+        diags      = {d["ticker"]: d for d in pipeline_output.get("diagnostics", [])}
+        strategies = {s["ticker"]: s for s in pipeline_output.get("strategies", [])}
+        regimes    = {r["ticker"]: r for r in pipeline_output.get("regimes", [])}
+
+        if not verdicts:
+            return
+
+        log_path = _os.path.join("data", "verdict_log.csv")
+        _os.makedirs("data", exist_ok=True)
+        write_header = not _os.path.exists(log_path)
+
+        rows = []
+        for ticker, v in verdicts.items():
+            d   = diags.get(ticker, {})
+            s   = strategies.get(ticker, {})
+            reg = regimes.get(ticker, {})
+            m   = d.get("metrics", {})
+            rows.append({
+                "run_date":       run_date,
+                "ticker":         ticker,
+                "verdict":        v.get("verdict", "watch"),
+                "strategy":       s.get("strategy", ""),
+                "regime":         reg.get("regime", ""),
+                "sharpe":         round(m.get("sharpe", 0.0), 4),
+                "max_drawdown":   round(m.get("max_drawdown", 0.0), 4),
+                "trade_count":    m.get("trade_count", 0),
+                "passed":         int(d.get("passed", False)),
+                "wf_underpowered": int(m.get("wf_underpowered", False)),
+            })
+
+        try:
+            with open(log_path, "a", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+                if write_header:
+                    writer.writeheader()
+                writer.writerows(rows)
+            print(f"  [VerdictLog] Appended {len(rows)} rows → {log_path}")
+        except Exception as e:
+            print(f"  [VerdictLog] Write failed (non-fatal): {e}")
 
     def _build_modules(self) -> dict:
         """Construct real module instances from config (used in production)."""
