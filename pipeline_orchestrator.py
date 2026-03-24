@@ -228,19 +228,11 @@ class PipelineOrchestrator:
             None,
         )
 
-        # ── Stage 1c: fetch + embed prediction markets ────────────────────────
-        print("[Stage 1c] Fetching prediction markets ...")
-        markets = self._safe(
-            "market_client.fetch",
-            lambda: m["market_client"].fetch(collect_end),
-            [],
-        ) or []
-
         # ── Stage 2: summarize ────────────────────────────────────────────────
         print("[Stage 2] Summarizing news ...")
         summary = self._safe(
             "summarizer",
-            lambda: m["summarizer"].summarize(articles, as_of_date=run_date, markets=markets),
+            lambda: m["summarizer"].summarize(articles, as_of_date=run_date),
             {},
         )
 
@@ -264,7 +256,6 @@ class PipelineOrchestrator:
         if top50 is None or (isinstance(top50, pd.DataFrame) and top50.empty):
             return self._finish(
                 m, run_date, summary, macro,
-                markets=markets,
                 ticker_verdicts=[], regimes=[], strategies=[], diagnostics=[], backtests=[],
                 monte_carlos=[],
                 execution_brief={"active_signals": [], "inactive_count": 0,
@@ -589,7 +580,6 @@ class PipelineOrchestrator:
 
         return self._finish(
             m, run_date, summary, macro,
-            markets=markets,
             ticker_verdicts=ticker_verdicts or [],
             regimes=regimes or [],
             strategies=strategies,
@@ -789,8 +779,6 @@ class PipelineOrchestrator:
         from report_generator            import ReportGenerator
         from execution_advisor           import ExecutionAdvisor
         from rag_store                   import RAGStore
-        from prediction_market_client    import PredictionMarketClient
-
         rag = RAGStore(persist_dir=cfg.get("chroma_dir", "data/chroma"))
         return {
             "collector":     Stage1DataCollector(
@@ -821,14 +809,6 @@ class PipelineOrchestrator:
                                 initial_portfolio=cfg.get("initial_portfolio", 100_000.0)
                              ),
             "rag_store":     rag,
-            "market_client": PredictionMarketClient(
-                                cache_dir=cfg.get("cache_dir", "data/cache"),
-                                min_volume=cfg.get("market_min_volume", 100_000.0),
-                                max_markets=cfg.get("market_max_markets", 50),
-                                categories=cfg.get("market_categories",
-                                                   ["Economics", "Politics", "Crypto"]),
-                                rag_store=rag,
-                             ),
         }
 
 
