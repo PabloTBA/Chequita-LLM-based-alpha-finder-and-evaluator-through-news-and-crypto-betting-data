@@ -9,7 +9,7 @@ for the report — it has no influence on the numbers.
 Regime -> Strategy mapping
 --------------------------
     Trending         -> Momentum
-    High-Volatility  -> Momentum
+    High-Volatility  -> VolatilityBreakout  (BB squeeze → expansion alpha)
     Mean-Reverting   -> Mean-Reversion
     Low-Volatility   -> Mean-Reversion
     Neutral          -> Momentum  (default)
@@ -71,18 +71,62 @@ MEAN_REVERSION_BASE: dict = {
     "max_holding_days":    10,
 }
 
+VOLATILITY_BREAKOUT_BASE: dict = {
+    # Bollinger Band squeeze → expansion breakout.
+    # Alpha source: volatility compression precedes directional moves.
+    # The squeeze compresses THEN the price breaks out — entry conditions:
+    #   1. BB width was in the bottom squeeze_pct percentile within squeeze_lookback bars
+    #      (confirms prior compression)
+    #   2. Close breaks above the upper Bollinger Band (breakout direction = long)
+    #   3. Volume > volume_mult × 20-bar average (confirms institutional participation)
+    "bb_period":         20,
+    "squeeze_pct":       0.20,   # BB width in bottom N-th percentile = squeeze
+    "squeeze_lookback":  5,      # bars back to look for prior squeeze
+    "volume_mult":       1.5,    # volume must exceed N× 20-bar avg at breakout
+    "stop_loss_atr":     2.0,
+    "trailing_stop_atr": 2.5,
+    "max_holding_days":  15,
+}
+
 _REGIME_TO_STRATEGY: dict[str, str] = {
-    "Trending":        "Momentum",
-    "High-Volatility": "Momentum",
-    "Neutral":         "Momentum",
-    "Mean-Reverting":  "Mean-Reversion",
-    "Low-Volatility":  "Mean-Reversion",
+    "Trending":         "Momentum",
+    "High-Volatility":  "VolatilityBreakout",   # vol compression → expansion alpha
+    "Neutral":          "Momentum",
+    "Mean-Reverting":   "Mean-Reversion",
+    "Low-Volatility":   "Mean-Reversion",
 }
 
 _STRATEGY_TO_BASE: dict[str, dict] = {
-    "Momentum":       MOMENTUM_BASE,
-    "Mean-Reversion": MEAN_REVERSION_BASE,
+    "Momentum":           MOMENTUM_BASE,
+    "Mean-Reversion":     MEAN_REVERSION_BASE,
+    "VolatilityBreakout": VOLATILITY_BREAKOUT_BASE,
 }
+
+_HYPOTHESIS_PROMPT = """\
+You are a quantitative researcher selecting the best strategy for a ticker.
+
+TICKER: {ticker}
+REGIME (algorithmic): {regime}  |  Hurst: {hurst:.3f}
+VOLATILITY: ATR/price = {atr_pct:.2%}
+MOMENTUM: 20d return = {ret_20d:.2%}  |  RSI(14) = {rsi:.1f}  |  Volume ratio = {vol_ratio:.2f}x
+MARKET CONTEXT: {market_bias}
+NEWS VERDICT: {news_verdict}
+NEWS REASONING: {news_reasoning}
+
+AVAILABLE STRATEGY CLASSES:
+1. Momentum            — N-day high breakout + volume confirmation. Edge: trend persistence (Hurst > 0.55).
+2. Mean-Reversion      — RSI oversold + below lower Bollinger Band. Edge: oscillation in low-Hurst assets.
+3. VolatilityBreakout  — BB squeeze → expansion + ATR surge. Edge: compressed volatility preceding directional move.
+
+REGIME RULE SELECTED: {regime_rule_strategy}
+
+Do you AGREE or DISAGREE with this selection given the news context and current conditions?
+
+Respond in EXACTLY this format (one line only):
+VERDICT: AGREE
+or
+VERDICT: DISAGREE | SUGGESTED: [Momentum|Mean-Reversion|VolatilityBreakout] | REASON: [one sentence]
+"""
 
 _REASONING_PROMPT = """\
 You are writing a one-sentence explanation for a trading report.
@@ -148,6 +192,37 @@ def _compute_mean_reversion_params(atr_pct: float) -> tuple[dict, list[str]]:
     return p, rules
 
 
+def _compute_volatility_breakout_params(atr_pct: float, hurst: float) -> tuple[dict, list[str]]:
+    """Deterministic VolatilityBreakout parameter rules. Returns (params, rule_log)."""
+    p = copy.deepcopy(VOLATILITY_BREAKOUT_BASE)
+    rules: list[str] = []
+
+    if atr_pct > 0.04:
+        # Extreme volatility: widen stops so we're not stopped out by normal noise
+        p["stop_loss_atr"]     = 2.5
+        p["trailing_stop_atr"] = 3.0
+        rules.append(
+            f"stop_loss_atr -> 2.5, trailing_stop_atr -> 3.0 "
+            f"(ATR% {atr_pct:.2%} > 4% — extreme volatility, widen stops)"
+        )
+
+    if hurst > 0.55:
+        # Trending bias in high-vol — allow longer hold to capture continuation
+        p["max_holding_days"] = 20
+        rules.append(
+            f"max_holding_days -> 20 (Hurst {hurst:.3f} > 0.55 — trending bias, extend hold)"
+        )
+
+    if atr_pct < 0.015:
+        # Very low vol — require more volume confirmation to avoid noise breakouts
+        p["volume_mult"] = 2.0
+        rules.append(
+            f"volume_mult -> 2.0 (ATR% {atr_pct:.2%} < 1.5% — tighten volume confirmation)"
+        )
+
+    return p, rules
+
+
 class StrategySelector:
     def __init__(self, llm_client: callable, verbose: bool = False):
         self.llm_client = llm_client
@@ -158,10 +233,13 @@ class StrategySelector:
             print(msg)
 
     def select(self, ticker: str, regime: dict,
-               ohlcv_features: dict, macro: dict) -> dict:
+               ohlcv_features: dict, macro: dict,
+               ticker_verdict: dict | None = None) -> dict:
         """
-        Deterministically compute strategy parameters, then call LLM once
-        for a plain-English explanation only.
+        Deterministically compute strategy parameters, then call LLM twice:
+          1. Alpha hypothesis: does the LLM agree with the regime-rule strategy?
+             If it disagrees, the disagreement is logged as a signal for the trader.
+          2. Reasoning: plain-English explanation of the final params.
         """
         regime_label = regime.get("regime", "Neutral")
         strategy     = _REGIME_TO_STRATEGY.get(regime_label, "Momentum")
@@ -170,10 +248,14 @@ class StrategySelector:
         hurst     = float(regime.get("hurst", 0.5))
         atr_pct   = float(regime.get("atr_pct", 0.02))
         vol_ratio = float((ohlcv_features or {}).get("volume_ratio_30d", 1.0))
+        rsi       = float((ohlcv_features or {}).get("rsi_14", 50.0))
+        ret_20d   = float((ohlcv_features or {}).get("return_20d", 0.0))
 
         # ── Deterministic parameter computation ───────────────────────────────
         if strategy == "Momentum":
             adjusted_params, rule_log = _compute_momentum_params(hurst, atr_pct, vol_ratio)
+        elif strategy == "VolatilityBreakout":
+            adjusted_params, rule_log = _compute_volatility_breakout_params(atr_pct, hurst)
         else:
             adjusted_params, rule_log = _compute_mean_reversion_params(atr_pct)
 
@@ -181,6 +263,15 @@ class StrategySelector:
               f"Hurst={hurst:.3f} ATR%={atr_pct:.2%} VolRatio={vol_ratio:.2f}")
         for r in rule_log:
             print(f"    rule: {r}")
+
+        # ── LLM alpha hypothesis ───────────────────────────────────────────────
+        # The LLM reviews the regime-rule selection against news/macro context and
+        # either confirms or suggests a different strategy class. This is the only
+        # place where the LLM contributes alpha signal (not just cosmetic explanation).
+        llm_hypothesis = self._get_hypothesis(
+            ticker, strategy, regime_label, hurst, atr_pct, vol_ratio,
+            rsi, ret_20d, macro, ticker_verdict,
+        )
 
         # ── LLM for explanation only ──────────────────────────────────────────
         reasoning = self._get_reasoning(
@@ -194,11 +285,64 @@ class StrategySelector:
             "regime":          regime_label,
             "base_params":     base_params,
             "adjusted_params": adjusted_params,
-            "llm_adjustments": rule_log,   # now shows algo rules, not LLM decisions
+            "llm_adjustments": rule_log,   # algo rules, not LLM decisions
+            "llm_hypothesis":  llm_hypothesis,  # LLM strategy class vote + reasoning
             "reasoning":       reasoning,
         }
 
     # ── private ───────────────────────────────────────────────────────────────
+
+    def _get_hypothesis(
+        self, ticker, regime_rule_strategy, regime_label, hurst, atr_pct,
+        vol_ratio, rsi, ret_20d, macro, ticker_verdict,
+    ) -> dict:
+        """
+        Ask the LLM whether it agrees with the regime-rule strategy selection.
+        Returns a dict with keys: agree (bool), suggested (str|None), reason (str|None).
+        When the LLM disagrees, the suggested strategy class and reason are surfaced
+        in the report as an alpha hypothesis signal for the trader to consider.
+        """
+        verdict  = (ticker_verdict or {}).get("verdict", "watch")
+        reas_str = (ticker_verdict or {}).get("reasoning", "No news context available.")
+        prompt   = _HYPOTHESIS_PROMPT.format(
+            ticker               = ticker,
+            regime               = regime_label,
+            hurst                = hurst,
+            atr_pct              = atr_pct,
+            ret_20d              = ret_20d,
+            rsi                  = rsi,
+            vol_ratio            = vol_ratio,
+            market_bias          = macro.get("market_bias", "neutral"),
+            news_verdict         = verdict.upper(),
+            news_reasoning       = reas_str[:300],
+            regime_rule_strategy = regime_rule_strategy,
+        )
+        try:
+            raw = (self.llm_client(prompt) or "").strip()
+            # Parse: "VERDICT: AGREE" or "VERDICT: DISAGREE | SUGGESTED: X | REASON: Y"
+            if raw.upper().startswith("VERDICT: AGREE"):
+                result = {"agree": True, "suggested": None, "reason": None}
+            elif "DISAGREE" in raw.upper():
+                suggested = None
+                reason    = None
+                for part in raw.split("|"):
+                    part = part.strip()
+                    if part.upper().startswith("SUGGESTED:"):
+                        candidate = part.split(":", 1)[1].strip()
+                        # Validate it's a known strategy class
+                        if candidate in _STRATEGY_TO_BASE:
+                            suggested = candidate
+                    elif part.upper().startswith("REASON:"):
+                        reason = part.split(":", 1)[1].strip()
+                result = {"agree": False, "suggested": suggested, "reason": reason}
+                if suggested and suggested != regime_rule_strategy:
+                    print(f"  [LLM Hypothesis] {ticker}: disagrees → suggests {suggested} | {reason}")
+            else:
+                # Unparseable — treat as agree to avoid false signals
+                result = {"agree": True, "suggested": None, "reason": raw[:200]}
+        except Exception:
+            result = {"agree": True, "suggested": None, "reason": None}
+        return result
 
     def _get_reasoning(self, ticker, strategy, regime_label, hurst, atr_pct,
                        vol_ratio, params, macro) -> str:

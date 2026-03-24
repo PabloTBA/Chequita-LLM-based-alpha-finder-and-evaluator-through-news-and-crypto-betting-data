@@ -56,8 +56,8 @@ app.add_middleware(
 _state: dict[str, Any] = {
     "status":       "idle",   # idle | running | done | error
     "run_date":     None,
-    "report_path":  None,
-    "summary_path": None,
+    "SummaryReport": None,
+    "TraderReport":  None,
     "error":        None,
     "params":       None,
 }
@@ -158,11 +158,11 @@ def _run_pipeline(cfg: dict, run_date: str | None) -> None:
 
         _state["status"]       = "done"
         _state["run_date"]     = result.get("run_date")
-        _state["report_path"]  = result.get("report_path")
-        _state["summary_path"] = result.get("summary_path")
+        _state["SummaryReport"] = result.get("SummaryReport")
+        _state["TraderReport"]  = result.get("TraderReport")
 
-        _log_queue.put(f"[API] Done.  Report  → {result.get('report_path')}")
-        _log_queue.put(f"[API]        Summary → {result.get('summary_path')}")
+        _log_queue.put(f"[API] Done.  SummaryReport → {result.get('SummaryReport')}")
+        _log_queue.put(f"[API]        TraderReport  → {result.get('TraderReport')}")
 
     except Exception as exc:
         import traceback
@@ -323,7 +323,7 @@ def get_status():
 @app.get("/api/report", response_class=PlainTextResponse)
 def get_report():
     """Return the last full pipeline report as Markdown text."""
-    path = _state.get("report_path")
+    path = _state.get("SummaryReport")
     if not path or not os.path.exists(path):
         raise HTTPException(status_code=404, detail="No report available yet.")
     with open(path, encoding="utf-8") as f:
@@ -333,7 +333,7 @@ def get_report():
 @app.get("/api/summary", response_class=PlainTextResponse)
 def get_summary():
     """Return the last trader summary as Markdown text."""
-    path = _state.get("summary_path")
+    path = _state.get("TraderReport")
     if not path or not os.path.exists(path):
         raise HTTPException(status_code=404, detail="No summary available yet.")
     with open(path, encoding="utf-8") as f:

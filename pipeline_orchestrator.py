@@ -150,6 +150,14 @@ _PARAM_ALTERNATIVES: dict[str, list[dict]] = {
         {"rsi_entry_threshold": 30, "rsi_exit_threshold": 50, "bb_period": 15,
          "bb_std": 1.8, "stop_loss_atr": 1.5, "max_holding_days": 8},
     ],
+    "VolatilityBreakout": [
+        # Tighter squeeze — only enter the most compressed setups
+        {"bb_period": 20, "squeeze_pct": 0.10, "squeeze_lookback": 5,
+         "volume_mult": 1.5, "stop_loss_atr": 2.0, "trailing_stop_atr": 2.5, "max_holding_days": 15},
+        # Looser squeeze, longer hold, higher volume bar
+        {"bb_period": 20, "squeeze_pct": 0.30, "squeeze_lookback": 7,
+         "volume_mult": 2.0, "stop_loss_atr": 2.5, "trailing_stop_atr": 3.0, "max_holding_days": 20},
+    ],
 }
 
 
@@ -190,6 +198,17 @@ class PipelineOrchestrator:
         run_date     = date if date is not None else _yesterday()
         start        = _subtract_days(run_date, 90)
         collect_end  = _today_utc()   # include today's UTC articles even if run_date is yesterday
+
+        # ── Meta-learning: read historical verdict outcomes ────────────────────
+        # Computes per-regime/strategy pass rates from prior runs so the report
+        # can flag combinations with historically poor OOS performance.
+        meta_insights = PipelineOrchestrator._load_meta_insights()
+        if meta_insights.get("insights"):
+            print(f"  [MetaLearning] Loaded {meta_insights['total_runs']} historical runs — "
+                  f"{len(meta_insights['insights'])} regime/strategy combinations tracked.")
+        if meta_insights.get("warnings"):
+            for w in meta_insights["warnings"]:
+                print(f"  [MetaLearning] WARNING: {w}")
 
         m = self._modules
 
@@ -253,6 +272,7 @@ class PipelineOrchestrator:
                                  "warnings": []},
                 spy_ohlcv=None,
                 correlation_warnings=[],
+                meta_insights=meta_insights,
             )
 
         tickers = top50["ticker"].tolist()
@@ -364,7 +384,9 @@ class PipelineOrchestrator:
 
             strategy = self._safe(
                 f"selector.select({ticker})",
-                lambda _t=ticker, _r=regime, _f=feats: m["selector"].select(_t, _r, _f, macro),
+                lambda _t=ticker, _r=regime, _f=feats, _v=tv: m["selector"].select(
+                    _t, _r, _f, macro, ticker_verdict=_v
+                ),
                 None,
             )
 
@@ -387,7 +409,7 @@ class PipelineOrchestrator:
             if strategy:
                 base_p = strategy.get("base_params", {})
                 adj_p  = strategy.get("adjusted_params", {})
-                for key in ("stop_loss_atr", "trailing_stop_atr", "bb_std"):
+                for key in ("stop_loss_atr", "trailing_stop_atr", "bb_std", "volume_mult"):
                     b_val = base_p.get(key)
                     a_val = adj_p.get(key)
                     if b_val is not None and a_val is not None:
@@ -578,6 +600,7 @@ class PipelineOrchestrator:
             spy_ohlcv=spy_ohlcv,
             correlation_warnings=correlation_warnings,
             features=features,
+            meta_insights=meta_insights,
         )
 
     # ── internal helpers ──────────────────────────────────────────────────────
@@ -607,16 +630,91 @@ class PipelineOrchestrator:
         PipelineOrchestrator._log_verdict_outcomes(run_date, pipeline_output)
 
         print("[Stage 12] Generating full report ...")
-        report_path   = m["reporter"].generate(pipeline_output, timestamp=timestamp)
+        SummaryReport = m["reporter"].generate(pipeline_output, timestamp=timestamp)
         print("[Stage 12] Generating trader summary report ...")
-        summary_path  = m["reporter"].generate_summary(pipeline_output, timestamp=timestamp)
+        TraderReport  = m["reporter"].generate_summary(pipeline_output, timestamp=timestamp)
         return {
-            "report_path":  report_path,
-            "summary_path": summary_path,
+            "SummaryReport": SummaryReport,
+            "TraderReport":  TraderReport,
             "run_date":    run_date,
             "summary":     summary,
             "macro":       macro,
             **kwargs,
+        }
+
+    @staticmethod
+    def _load_meta_insights() -> dict:
+        """
+        Read data/verdict_log.csv and compute per-(regime+strategy) performance stats.
+
+        Returns a dict with keys:
+          insights       : dict[str, dict] — keyed by "Regime+Strategy"
+                           values: {n, avg_sharpe, pass_rate}
+          warnings       : list[str] — combinations with historically poor pass rate
+          total_runs     : int
+          sample_too_small: bool — set when fewer than 10 rows
+
+        After ~30 runs, this gives the system memory of which strategy/regime
+        combinations have historically produced passing OOS Sharpes, allowing
+        the report to flag when the current selection is historically weak.
+        """
+        import csv as _csv
+        import os as _os
+        from collections import defaultdict as _ddict
+
+        log_path = _os.path.join("data", "verdict_log.csv")
+        if not _os.path.exists(log_path):
+            return {"sample_too_small": True, "total_runs": 0, "insights": {}, "warnings": []}
+
+        rows = []
+        try:
+            with open(log_path, "r", encoding="utf-8") as f:
+                reader = _csv.DictReader(f)
+                rows   = list(reader)
+        except Exception:
+            return {"sample_too_small": True, "total_runs": 0, "insights": {}, "warnings": []}
+
+        if len(rows) < 10:
+            return {"sample_too_small": True, "total_runs": len(rows), "insights": {}, "warnings": []}
+
+        groups: dict = _ddict(list)
+        for row in rows:
+            regime   = row.get("regime", "Unknown")
+            strategy = row.get("strategy", "Unknown")
+            key      = f"{regime}+{strategy}"
+            try:
+                groups[key].append({
+                    "sharpe": float(row.get("sharpe", 0)),
+                    "passed": int(row.get("passed", 0)),
+                })
+            except (ValueError, TypeError):
+                pass
+
+        insights: dict = {}
+        for key, entries in groups.items():
+            if len(entries) >= 5:
+                avg_sharpe = sum(e["sharpe"] for e in entries) / len(entries)
+                pass_rate  = sum(e["passed"] for e in entries) / len(entries)
+                insights[key] = {
+                    "n":          len(entries),
+                    "avg_sharpe": round(avg_sharpe, 3),
+                    "pass_rate":  round(pass_rate, 3),
+                }
+
+        warnings: list[str] = []
+        for key, stats in insights.items():
+            if stats["pass_rate"] < 0.10 and stats["n"] >= 10:
+                warnings.append(
+                    f"{key}: only {stats['pass_rate']:.0%} historical pass rate "
+                    f"over {stats['n']} runs (avg Sharpe {stats['avg_sharpe']:.3f}) — "
+                    f"this regime/strategy combination has shown weak edge"
+                )
+
+        return {
+            "sample_too_small": False,
+            "total_runs":       len(rows),
+            "insights":         insights,
+            "warnings":         warnings,
         }
 
     @staticmethod
@@ -774,8 +872,8 @@ if __name__ == "__main__":
 
     result = PipelineOrchestrator(config).run(date)
 
-    print(f"\nReport  : {result['report_path']}")
-    print(f"Summary : {result.get('summary_path', 'n/a')}")
+    print(f"\nSummaryReport : {result['SummaryReport']}")
+    print(f"TraderReport  : {result.get('TraderReport', 'n/a')}")
     print(f"Date    : {result['run_date']}")
     print(f"Bias   : {result['summary'].get('market_bias', 'n/a')}")
     print(f"Tickers: {len(result['ticker_verdicts'])} verdicts | "

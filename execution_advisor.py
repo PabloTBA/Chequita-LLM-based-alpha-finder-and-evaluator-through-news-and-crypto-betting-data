@@ -227,10 +227,18 @@ class ExecutionAdvisor:
             "stop_price":          setup.get("stop_price"),
             "position_size":       position_size,
             "dollar_risk":         dollar_risk,
-            "entry_trigger":       setup.get("entry_trigger"),   # price to watch
-            "volume_needed":       setup.get("volume_needed"),   # volume threshold
-            "rsi_needed":          setup.get("rsi_needed"),      # RSI threshold (MR)
-            "target":              setup.get("target"),          # MR target
+            # Momentum conditions
+            "entry_trigger":       setup.get("entry_trigger"),
+            "volume_needed":       setup.get("volume_needed"),
+            # Mean-Reversion conditions
+            "rsi_needed":          setup.get("rsi_needed"),
+            "target":              setup.get("target"),
+            # VolatilityBreakout conditions
+            "squeeze_pct_threshold": setup.get("squeeze_pct_threshold"),
+            "min_atr_expansion":     setup.get("min_atr_expansion"),
+            "atr_expansion_ratio":   setup.get("atr_expansion_ratio"),
+            # ADV for market impact display
+            "_adv":                adv,
         }, warnings
 
     def _fetch_spread(

@@ -57,7 +57,9 @@ class ReportGenerator:
             self._strategy_section(pipeline_output),
             self._diagnostic_section(pipeline_output),
             self._backtest_section(pipeline_output),
+            self._baseline_section(pipeline_output),
             self._monte_carlo_section(pipeline_output),
+            self._meta_learning_section(pipeline_output),
             self._execution_brief_section(pipeline_output),
         ]
 
@@ -248,10 +250,13 @@ class ReportGenerator:
                 lines.append(f"| Target (mean-reversion) | ${setup['target']:,.2f} |")
         else:
             failed = []
-            if sig.get("breakout") is False:     failed.append("price breakout")
-            if sig.get("volume_confirmed") is False: failed.append("volume confirmation")
-            if sig.get("oversold") is False:     failed.append("RSI oversold")
-            if sig.get("below_bb") is False:     failed.append("below lower BB")
+            if sig.get("breakout") is False:          failed.append("price breakout")
+            if sig.get("volume_confirmed") is False:  failed.append("volume confirmation")
+            if sig.get("oversold") is False:          failed.append("RSI oversold")
+            if sig.get("below_bb") is False:          failed.append("below lower BB")
+            if sig.get("squeeze_detected") is False:  failed.append("BB squeeze not detected")
+            if sig.get("atr_expanding") is False:     failed.append("ATR not yet expanding")
+            if sig.get("bb_breakout") is False:       failed.append("close ≤ upper Bollinger Band")
             reason = " + ".join(failed) if failed else "conditions"
             lines += [
                 f"**Status: ⏸ INACTIVE — {reason} not met**",
@@ -661,12 +666,22 @@ class ReportGenerator:
                 blocks += ["", "**LLM adjustments:**", ""]
                 for note in adj:
                     blocks.append(f"- {note}")
+            # LLM alpha hypothesis — show when LLM disagrees with regime rule
+            hyp = s.get("llm_hypothesis", {})
+            if hyp and not hyp.get("agree", True) and hyp.get("suggested"):
+                blocks += [
+                    "",
+                    f"> 🔬 **LLM Alpha Hypothesis:** Disagrees with regime-rule selection. "
+                    f"Suggests **{hyp['suggested']}** instead."
+                    + (f" Reason: _{hyp['reason']}_" if hyp.get("reason") else ""),
+                ]
+
             # Current signal status
             blocks += ["", "#### Current Entry Signal (as of run date)", ""]
             if sig.get("signal_active") is True:
                 blocks.append("**Status: ✅ ACTIVE — entry condition met on latest bar**")
             elif sig.get("signal_active") is False:
-                # Show exactly which condition(s) failed
+                # Show exactly which condition(s) failed — handles all three strategy types
                 failed = []
                 if sig.get("breakout") is False:
                     failed.append("price breakout")
@@ -676,6 +691,12 @@ class ReportGenerator:
                     failed.append("RSI oversold")
                 if sig.get("below_bb") is False:
                     failed.append("below lower BB")
+                if sig.get("squeeze_detected") is False:
+                    failed.append("BB squeeze not detected")
+                if sig.get("atr_expanding") is False:
+                    failed.append("ATR not yet expanding")
+                if sig.get("bb_breakout") is False:
+                    failed.append("close ≤ upper Bollinger Band")
                 reason = " + ".join(failed) if failed else "entry condition"
                 blocks.append(f"**Status: ⏸ INACTIVE — {reason} not met**")
             else:
@@ -945,6 +966,145 @@ class ReportGenerator:
         return "\n".join(blocks)
 
     @staticmethod
+    def _baseline_section(po: dict) -> str:
+        """
+        Compare every backtested strategy against two simple baselines:
+          1. SPY buy-and-hold (full window, fully invested)
+          2. SPY 50-day MA cross (long when SPY > 50d MA, else flat — earns RF)
+
+        Showing baselines forces honest evaluation: a strategy with Sharpe 0.6
+        and 8% net return looks very different if the baseline is SPY at 24%.
+        A strategy that can't beat a simple MA cross has no demonstrated alpha.
+        """
+        spy_ohlcv  = po.get("spy_ohlcv")
+        backtests  = po.get("backtests", [])
+        diag_map   = {d["ticker"]: d for d in po.get("diagnostics", [])}
+
+        if spy_ohlcv is None or spy_ohlcv.empty:
+            return "## Baseline Comparison\n\n_SPY data unavailable — baselines cannot be computed._"
+
+        try:
+            spy_close  = spy_ohlcv["Close"].astype(float)
+            spy_daily  = spy_close.pct_change().fillna(0.0)
+        except Exception:
+            return "## Baseline Comparison\n\n_SPY data malformed._"
+
+        # ── Baseline 1: SPY buy-and-hold ──────────────────────────────────────
+        spy_bnh_ret = float((spy_close.iloc[-1] - spy_close.iloc[0]) / spy_close.iloc[0])
+        spy_bnh_sharpe = _sharpe_from_returns(spy_daily)
+
+        # ── Baseline 2: SPY 50-day MA cross ───────────────────────────────────
+        spy_ma50    = spy_close.rolling(50).mean()
+        in_pos_mask = (spy_close > spy_ma50).shift(1).fillna(False)
+        # Flat days earn RF (same treatment as backtester for apples-to-apples)
+        daily_rf    = 0.045 / 252
+        ma_rets     = spy_daily.copy()
+        ma_rets[~in_pos_mask] = daily_rf
+        spy_ma_ret    = float((1 + ma_rets).prod() - 1)
+        spy_ma_sharpe = _sharpe_from_returns(ma_rets)
+
+        lines = [
+            "## Baseline Comparison",
+            "",
+            "> Every strategy must be judged against what a passive, zero-effort investor would earn.",
+            "> A strategy that underperforms SPY buy-and-hold provides negative alpha even with a",
+            "> positive return. A strategy that underperforms a simple MA cross has no edge over",
+            "> basic trend-following.",
+            "",
+            "### Reference Baselines",
+            "",
+            "| Baseline | Total Return | Sharpe | Notes |",
+            "|----------|-------------|--------|-------|",
+            f"| SPY buy-and-hold | {spy_bnh_ret:.2%} | {spy_bnh_sharpe:.3f} | Fully invested, full window |",
+            f"| SPY 50d MA cross | {spy_ma_ret:.2%} | {spy_ma_sharpe:.3f} | Long when SPY > 50d MA, flat (earns RF) otherwise |",
+            "",
+            "### Strategy vs Baselines",
+            "",
+            "| Ticker | Strategy | Net Return | Sharpe | vs SPY B&H | vs 50d MA cross |",
+            "|--------|----------|------------|--------|-----------|-----------------|",
+        ]
+
+        for bt in backtests:
+            t       = bt["ticker"]
+            summary = bt.get("summary", {})
+            net_ret = summary.get("total_return", 0.0)
+            diag    = diag_map.get(t, {})
+            sharpe  = diag.get("metrics", {}).get("sharpe", 0.0)
+
+            bnh_diff = net_ret - spy_bnh_ret
+            ma_diff  = sharpe  - spy_ma_sharpe
+
+            bnh_icon = "✅" if bnh_diff >= 0 else "❌"
+            ma_icon  = "✅" if ma_diff  >= 0 else "❌"
+
+            lines.append(
+                f"| {t} | {bt['strategy']} | {net_ret:.2%} | {sharpe:.3f}"
+                f" | {bnh_icon} {bnh_diff:+.2%}"
+                f" | {ma_icon} {ma_diff:+.3f} |"
+            )
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _meta_learning_section(po: dict) -> str:
+        """
+        Surface historical regime+strategy performance from verdict_log.csv.
+        Helps the trader understand which combinations have shown real edge
+        over prior runs versus which are historically weak.
+        After 30+ runs this becomes a reliable regime/strategy performance heatmap.
+        """
+        meta = po.get("meta_insights", {})
+
+        if meta.get("sample_too_small"):
+            n = meta.get("total_runs", 0)
+            return (
+                "## Historical Alpha Learning\n\n"
+                f"_Only {n} historical runs recorded. A minimum of 10 is needed to compute "
+                "per-regime/strategy statistics. Run the pipeline on more dates to accumulate "
+                "the performance database._"
+            )
+
+        insights  = meta.get("insights", {})
+        warnings  = meta.get("warnings", [])
+        total_runs = meta.get("total_runs", 0)
+
+        if not insights:
+            return (
+                "## Historical Alpha Learning\n\n"
+                f"_{total_runs} total runs — no single regime/strategy combination has ≥5 observations yet._"
+            )
+
+        lines = [
+            "## Historical Alpha Learning",
+            "",
+            f"_Based on {total_runs} pipeline runs stored in `data/verdict_log.csv`. "
+            "Combinations with <5 observations are excluded._",
+            "",
+        ]
+
+        if warnings:
+            lines += ["### ⚠️ Weak Combinations (historically < 10% pass rate)", ""]
+            for w in warnings:
+                lines.append(f"> ❌ {w}")
+            lines.append("")
+
+        lines += [
+            "### Per-Regime/Strategy Performance History",
+            "",
+            "| Regime + Strategy | Observations | Avg Sharpe | Pass Rate |",
+            "|-------------------|-------------|------------|-----------|",
+        ]
+
+        for key, stats in sorted(insights.items(), key=lambda x: -x[1]["avg_sharpe"]):
+            pr_icon = "✅" if stats["pass_rate"] >= 0.3 else ("⚠️" if stats["pass_rate"] >= 0.1 else "❌")
+            lines.append(
+                f"| {key} | {stats['n']} | {stats['avg_sharpe']:.3f} | "
+                f"{pr_icon} {stats['pass_rate']:.0%} |"
+            )
+
+        return "\n".join(lines)
+
+    @staticmethod
     def _execution_brief_section(po: dict) -> str:
         """
         Execution brief for ALL qualified tickers — both active (enter now) and
@@ -991,12 +1151,20 @@ class ReportGenerator:
                 out.append(f"| Mean-reversion target | ${b['target']:,.2f} |")
             if not active_signal:
                 out += ["", "**Conditions to watch (enter when ALL are met):**", ""]
-                if b.get("entry_trigger") is not None:
+                # Momentum conditions
+                if b.get("entry_trigger") is not None and b.get("volume_needed") is not None:
                     out.append(f"- Price must close **above ${b['entry_trigger']:,.2f}** (N-day high breakout)")
-                if b.get("volume_needed") is not None:
                     out.append(f"- Volume must exceed **{b['volume_needed']:,.0f} shares** (volume confirmation)")
-                if b.get("rsi_needed") is not None:
+                # Mean-Reversion conditions
+                elif b.get("rsi_needed") is not None:
                     out.append(f"- RSI(14) must drop **below {b['rsi_needed']}** (oversold) AND price ≤ lower Bollinger Band")
+                # VolatilityBreakout conditions
+                elif b.get("entry_trigger") is not None:
+                    out.append(f"- Close must **break above upper Bollinger Band (${b['entry_trigger']:,.2f})**")
+                    if b.get("squeeze_pct_threshold") is not None:
+                        out.append(f"- BB width must be in the bottom {int(b.get('squeeze_pct_threshold', 0)*100 if isinstance(b.get('squeeze_pct_threshold'), float) else 20)}% of its rolling history (squeeze)")
+                    if b.get("min_atr_expansion") is not None:
+                        out.append(f"- ATR must expand to ≥{b['min_atr_expansion']}× its 20-day average (expansion confirmed)")
                 out.append("")
                 out.append("_Setup above is projected at current ATR/price. Actual size/stop will be recalculated at entry bar._")
             out.append(f"")
@@ -1200,12 +1368,54 @@ def _render_mechanics(strategy: str, params: dict) -> list[str]:
             f"3. **MA exit** — Close ≥ {bp}-day SMA (middle Bollinger Band = mean-reversion target)",
             f"4. **Max holding** — Force exit after {mh} trading days",
         ]
+    elif strategy == "VolatilityBreakout":
+        bp  = params.get("bb_period", "N")
+        sq  = params.get("squeeze_pct", "N")
+        sl_days = params.get("squeeze_lookback", 5)
+        vm  = params.get("volume_mult", 1.5)
+        sl  = params.get("stop_loss_atr", "N")
+        ts  = params.get("trailing_stop_atr", "N")
+        mh  = params.get("max_holding_days", "N")
+        sq_pct_str = f"{int(sq*100)}th" if isinstance(sq, float) else str(sq)
+        lines += [
+            "**Why it works:** Bollinger Band squeeze → breakout is a well-documented alpha source."
+            " When a stock's daily range compresses below its historical norm (the 'squeeze'), market"
+            " participants are accumulating positions before a catalyst. When price finally breaks"
+            " above the upper Bollinger Band on elevated volume, the accumulation phase ends and the"
+            " directional move begins. Unlike a simple momentum breakout, the squeeze filter means"
+            " we only enter when volatility was genuinely compressed beforehand — avoiding chasing"
+            " moves that started without compression.",
+            "",
+            "**Order type:** Market order at next session open.",
+            "",
+            "**Entry (ALL conditions required):**",
+            f"- BB width was in the bottom {sq_pct_str} percentile of its rolling {bp}-bar history within the last {sl_days} bars (prior compression confirmed)",
+            f"- Close > upper Bollinger Band ({bp}-day MA + 2σ) (breakout direction = long)",
+            f"- Volume > {vm}× 20-bar average (confirms institutional participation — not a low-volume fake break)",
+            "",
+            f"**Position sizing:** 1% portfolio risk ÷ ({sl} × ATR₁₄) = shares to buy",
+            "",
+            "**Exit rules (checked in priority order each day):**",
+            f"1. **Trailing stop** — Close < highest close since entry − {ts} × ATR₁₄",
+            f"2. **Hard stop loss** — Close < entry price − {sl} × ATR₁₄ (floor for trailing stop)",
+            f"3. **Max holding** — Force exit after {mh} trading days",
+        ]
     else:
         lines.append(f"_Mechanics not defined for strategy type: {strategy}_")
     return lines
 
 
 # ── math helpers ──────────────────────────────────────────────────────────────
+
+def _sharpe_from_returns(returns: pd.Series, rf: float = 0.045) -> float:
+    """Annualised Sharpe, capped ±20, matching DiagnosticsEngine."""
+    std = returns.std(ddof=1)
+    if std < 1e-10 or np.isnan(std):
+        return 0.0
+    daily_rf = rf / 252
+    raw = float((returns.mean() - daily_rf) / std * math.sqrt(252))
+    return float(np.clip(raw, -20.0, 20.0))
+
 
 def _drawdown_series(equity: pd.Series) -> pd.Series:
     rolling_max = equity.cummax()

@@ -104,6 +104,8 @@ class Backtester:
 
         if strategy_type == "Momentum":
             trade_log = self._run_momentum(ohlcv, params)
+        elif strategy_type == "VolatilityBreakout":
+            trade_log = self._run_volatility_breakout(ohlcv, params)
         else:
             trade_log = self._run_mean_reversion(ohlcv, params)
 
@@ -301,6 +303,122 @@ class Backtester:
 
         return trades
 
+    def _run_volatility_breakout(self, ohlcv: pd.DataFrame, params: dict) -> list[dict]:
+        """
+        VolatilityBreakout strategy engine.
+
+        Alpha source: Bollinger Band compression (squeeze) followed by
+        directional breakout is a well-documented precursor to large moves.
+        Volatility compresses → bands narrow → price breaks above the upper band
+        on elevated volume → the move is underway.
+
+        Entry conditions (ALL required):
+          1. BB width was in the bottom squeeze_pct percentile within the last
+             squeeze_lookback bars — confirms prior compression phase.
+          2. Close > upper Bollinger Band — breakout direction = long.
+          3. Volume > volume_mult × 20-bar average — confirms institutional participation.
+          4. Not inside earnings blackout window.
+
+        Exit (priority order):
+          1. Trailing stop: close < peak − trailing_stop_atr × ATR
+          2. Hard stop:     close < entry − stop_loss_atr × ATR  (floor for trailing stop)
+          3. Max holding days
+        """
+        close  = ohlcv["Close"].astype(float)
+        high   = ohlcv["High"].astype(float)
+        low    = ohlcv["Low"].astype(float)
+        volume = ohlcv["Volume"].astype(float)
+
+        bb_period         = params["bb_period"]
+        squeeze_pct       = params["squeeze_pct"]
+        squeeze_lookback  = params.get("squeeze_lookback", 5)
+        volume_mult       = params.get("volume_mult", 1.5)
+        stop_loss_atr     = params["stop_loss_atr"]
+        trailing_stop_atr = params["trailing_stop_atr"]
+        max_holding       = params["max_holding_days"]
+
+        atr      = self._atr(high, low, close)
+        bb_ma    = close.rolling(bb_period).mean().shift(1)
+        bb_std_s = close.rolling(bb_period).std(ddof=1).shift(1)
+        upper_bb = bb_ma + 2.0 * bb_std_s
+
+        # Normalised BB width: 4σ/mid (proportional to %BB width) — shift(1) no look-ahead
+        bb_width = (4.0 * bb_std_s) / bb_ma.replace(0, np.nan)
+        # squeeze_threshold: rolling bb_period-bar quantile of BB width — shift(1) no look-ahead
+        squeeze_threshold = bb_width.rolling(bb_period).quantile(squeeze_pct).shift(1)
+        # Was there a squeeze in the last squeeze_lookback bars?
+        # shift(1) on the squeeze flag prevents same-bar look-ahead
+        squeezed_flag = (bb_width.shift(1) <= squeeze_threshold)
+        was_squeezed_recently = squeezed_flag.rolling(squeeze_lookback).max().fillna(0).astype(bool)
+
+        vol_ma   = volume.rolling(20).mean().shift(1)
+        blackout = ohlcv["earnings_blackout"] if "earnings_blackout" in ohlcv.columns else pd.Series(False, index=ohlcv.index)
+
+        # Need bb_period + 20 bars (for percentile) + ATR warmup + lookback
+        start = max(bb_period + squeeze_lookback + 5, ATR_PERIOD + 5, 30)
+
+        trades       = []
+        in_position  = False
+        equity       = self.initial_portfolio
+        entry_price  = stop_price = pos_size = peak = 0.0
+        entry_date   = None
+        holding_days = 0
+
+        for i in range(start, len(ohlcv)):
+            c   = float(close.iloc[i])
+            v   = float(volume.iloc[i])
+            a   = float(atr.iloc[i])
+            ub  = float(upper_bb.iloc[i])  if not np.isnan(upper_bb.iloc[i])  else np.inf
+            vm  = float(vol_ma.iloc[i])    if not np.isnan(vol_ma.iloc[i])    else 0.0
+            was_sq = bool(was_squeezed_recently.iloc[i])
+
+            if np.isnan(a) or a <= 0 or ub == np.inf:
+                continue
+
+            if not in_position:
+                vol_confirmed = v > volume_mult * vm and vm > 0
+                bb_breakout   = c > ub
+
+                if was_sq and bb_breakout and vol_confirmed and not bool(blackout.iloc[i]):
+                    in_position   = True
+                    entry_price   = c * (1 + self._slip)
+                    entry_date    = close.index[i]
+                    stop_price    = entry_price - stop_loss_atr * a
+                    pos_size      = (equity * RISK_PER_TRADE) / (stop_loss_atr * a)
+                    peak          = c
+                    holding_days  = 0
+                    target_1r     = entry_price + stop_loss_atr * a
+                    reached_1r    = False
+            else:
+                holding_days += 1
+                peak          = max(peak, c)
+                trailing_stop = max(peak - trailing_stop_atr * a, stop_price)
+                h_bar         = float(high.iloc[i])
+                if h_bar >= target_1r:
+                    reached_1r = True
+
+                exit_reason: str | None = None
+                if c < trailing_stop:
+                    exit_reason = "stop_loss" if trailing_stop <= stop_price + 1e-6 else "trailing_stop"
+                elif holding_days >= max_holding:
+                    exit_reason = "max_holding"
+
+                if exit_reason:
+                    exit_price  = c * (1 - self._slip)
+                    gross_pnl   = (c - (entry_price / (1 + self._slip))) * pos_size
+                    pnl         = (exit_price - entry_price) * pos_size
+                    equity     += pnl
+                    trades.append(_make_trade(
+                        entry_date, entry_price, close.index[i], exit_price,
+                        holding_days, pos_size, pnl, exit_reason,
+                        gross_pnl=gross_pnl,
+                        slippage_cost=abs(gross_pnl - pnl),
+                        reached_1r=reached_1r,
+                    ))
+                    in_position = False
+
+        return trades
+
     # ── current signal ────────────────────────────────────────────────────────
 
     def signal_status(
@@ -321,6 +439,8 @@ class Backtester:
         try:
             if strategy_type == "Momentum":
                 return self._momentum_signal(ohlcv, params, initial_portfolio)
+            if strategy_type == "VolatilityBreakout":
+                return self._volatility_breakout_signal(ohlcv, params, initial_portfolio)
             return self._mean_rev_signal(ohlcv, params, initial_portfolio)
         except Exception as e:
             return {"signal_active": None, "details": f"Signal check failed: {e}", "setup": None}
@@ -495,6 +615,95 @@ class Backtester:
             "details": (
                 f"RSI {r:.1f} {'<' if oversold else '>='} {rsi_entry}"
                 f" | Close {c:.2f} {'<=' if below_bb else '>'} Lower BB {lb:.2f}"
+            ),
+        }
+
+    def _volatility_breakout_signal(
+        self, ohlcv: pd.DataFrame, params: dict, portfolio: float
+    ) -> dict:
+        close  = ohlcv["Close"].astype(float)
+        high   = ohlcv["High"].astype(float)
+        low    = ohlcv["Low"].astype(float)
+        volume = ohlcv["Volume"].astype(float)
+
+        bb_period        = params["bb_period"]
+        squeeze_pct      = params["squeeze_pct"]
+        squeeze_lookback = params.get("squeeze_lookback", 5)
+        volume_mult      = params.get("volume_mult", 1.5)
+        stop_loss_atr    = params["stop_loss_atr"]
+
+        atr      = self._atr(high, low, close)
+        bb_ma    = close.rolling(bb_period).mean()
+        bb_std_s = close.rolling(bb_period).std(ddof=1)
+        upper_bb = bb_ma + 2.0 * bb_std_s
+        bb_width = (4.0 * bb_std_s) / bb_ma.replace(0, np.nan)
+        sq_thresh        = bb_width.rolling(bb_period).quantile(squeeze_pct).shift(1)
+        squeezed_flag    = (bb_width.shift(1) <= sq_thresh)
+        was_sq_recently  = bool(squeezed_flag.rolling(squeeze_lookback).max().iloc[-1] or False)
+
+        vol_ma = volume.rolling(20).mean()
+
+        c   = float(close.iloc[-1])
+        a   = float(atr.iloc[-1])     if not pd.isna(atr.iloc[-1])     else 0.0
+        ub  = float(upper_bb.iloc[-1]) if not pd.isna(upper_bb.iloc[-1]) else float("inf")
+        v   = float(volume.iloc[-1])
+        vm  = float(vol_ma.iloc[-1])   if not pd.isna(vol_ma.iloc[-1])  else 0.0
+        mid = float(bb_ma.iloc[-1])    if not pd.isna(bb_ma.iloc[-1])   else 0.0
+
+        vol_confirmed = v > volume_mult * vm and vm > 0
+        bb_breakout   = c > ub and ub < float("inf")
+        active        = was_sq_recently and bb_breakout and vol_confirmed
+
+        setup = None
+        if active and a > 0:
+            stop_dist  = stop_loss_atr * a
+            pos_size   = int((portfolio * RISK_PER_TRADE) / stop_dist)
+            stop_price = c - stop_dist
+            setup = {
+                "entry_price":   c,
+                "stop_price":    stop_price,
+                "stop_dist":     stop_dist,
+                "position_size": pos_size,
+                "dollar_risk":   portfolio * RISK_PER_TRADE,
+                "current_atr":   a,
+                "current_ma":    mid,
+                "target":        None,
+            }
+
+        projected_setup = None
+        if a > 0 and ub < float("inf"):
+            stop_dist  = stop_loss_atr * a
+            proj_entry = ub * (1 + self._slip)
+            proj_stop  = proj_entry - stop_dist
+            proj_size  = int((portfolio * RISK_PER_TRADE) / stop_dist)
+            projected_setup = {
+                "entry_price":     proj_entry,
+                "stop_price":      proj_stop,
+                "stop_dist":       stop_dist,
+                "position_size":   proj_size,
+                "dollar_risk":     portfolio * RISK_PER_TRADE,
+                "current_atr":     a,
+                "current_ma":      mid,
+                "target":          None,
+                "entry_trigger":   ub,
+                "volume_needed":   volume_mult * vm,
+                "squeeze_lookback": squeeze_lookback,
+                "squeeze_detected": was_sq_recently,
+            }
+
+        return {
+            "signal_active":      active,
+            "close":              c,
+            "upper_bb":           ub,
+            "squeeze_detected":   was_sq_recently,
+            "bb_breakout":        bb_breakout,
+            "volume_confirmed":   vol_confirmed,
+            "setup":              setup,
+            "projected_setup":    projected_setup,
+            "details": (
+                f"Squeeze (last {squeeze_lookback}d): {'YES' if was_sq_recently else 'NO'}"
+                f" | Close {c:.2f} vs Upper BB {ub:.2f}"
+                f" | Volume {v:,.0f} vs {volume_mult}x avg {vm:,.0f}"
             ),
         }
 

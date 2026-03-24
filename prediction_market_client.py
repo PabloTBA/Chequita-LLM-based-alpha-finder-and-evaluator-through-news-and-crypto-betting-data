@@ -1,9 +1,8 @@
 """
 PredictionMarketClient
 ======================
-Fetches active and recently-resolved prediction markets from the Polymarket
-CLOB API, filters by category and minimum volume, caches per-date to disk,
-and optionally inserts results into a RAGStore.
+Loads prediction markets from disk cache, filters by category and minimum
+volume, and optionally inserts results into a RAGStore.
 
 Public interface
 ----------------
@@ -24,15 +23,8 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timedelta
 from typing import Any
 
-import requests
-
-_BASE_URL        = "https://gamma-api.polymarket.com/markets"
-_REQUEST_DELAY   = 0.2   # seconds between paginated requests
-_PAGE_SIZE       = 100
-_RESOLVE_WINDOW  = 90    # days — match the news corpus rolling window
 _DEFAULT_MAX_MARKETS = 50  # cap total markets stored to RAG to avoid embedding lag
 
 
@@ -58,41 +50,30 @@ class PredictionMarketClient:
 
     def fetch(self, as_of_date: str) -> list[dict]:
         """
-        Return filtered, formatted prediction markets for as_of_date.
-        Serves from cache if available; fetches and caches otherwise.
-        On any API error returns [] without writing cache.
+        Return filtered prediction markets for as_of_date from cache.
+        Returns [] if no cache file exists for the date.
         """
         cache_path = self._cache_path(as_of_date)
 
-        # ── cache hit ─────────────────────────────────────────────────────────
-        if os.path.exists(cache_path):
-            with open(cache_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            print(f"  [CACHE] {as_of_date} prediction_markets: {len(data)} markets")
-            return data
+        print(f"  [PredictionMarkets] Getting prediction market data for {as_of_date} ...")
 
-        # ── live fetch ────────────────────────────────────────────────────────
-        try:
-            raw = self._fetch_all(as_of_date)
-        except Exception as exc:
-            print(f"  [ERROR] prediction_markets fetch failed: {exc}")
+        if not os.path.exists(cache_path):
+            print(f"  [PredictionMarkets] No cached data found for {as_of_date}, skipping.")
             return []
 
-        markets = [self._format(m) for m in raw if self._keep(m)]
+        with open(cache_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        markets = [m for m in data if self._keep(m)]
         markets = sorted(markets, key=lambda m: m["volume"], reverse=True)[:self._max_markets]
 
-        if not markets:
-            print(f"  [API]   {as_of_date} prediction_markets: 0 markets after filtering")
-            return []
+        print(f"  [PredictionMarkets] Loaded {len(markets)} markets from cache.")
 
-        # ── write cache ───────────────────────────────────────────────────────
-        with open(cache_path, "w", encoding="utf-8") as f:
-            json.dump(markets, f, ensure_ascii=False, indent=2)
-        print(f"  [API]   {as_of_date} prediction_markets: {len(markets)} markets cached")
-
-        # ── RAG insertion ─────────────────────────────────────────────────────
-        if self._rag_store is not None:
+        # ── RAG embedding ─────────────────────────────────────────────────────
+        if self._rag_store is not None and markets:
+            print(f"  [PredictionMarkets] Embedding {len(markets)} markets into RAG ...")
             self._rag_store.insert_markets(markets)
+            print(f"  [PredictionMarkets] RAG embedding complete.")
 
         return markets
 
@@ -100,44 +81,6 @@ class PredictionMarketClient:
 
     def _cache_path(self, date_str: str) -> str:
         return os.path.join(self._cache_dir, f"{date_str}_prediction_markets.json")
-
-    def _fetch_all(self, as_of_date: str) -> list[dict]:
-        """Fetch active + recently resolved markets from Polymarket."""
-        resolve_cutoff = (
-            datetime.strptime(as_of_date, "%Y-%m-%d") - timedelta(days=_RESOLVE_WINDOW)
-        ).strftime("%Y-%m-%d")
-
-        active   = self._paginate({"active": "true",  "closed": "false"})
-        resolved = self._paginate({"active": "false", "closed": "true",
-                                   "end_date_min": resolve_cutoff})
-        return active + resolved
-
-    def _paginate(self, extra_params: dict) -> list[dict]:
-        results = []
-        offset  = 0
-        while True:
-            params = {"limit": _PAGE_SIZE, "offset": offset, **extra_params}
-            resp = None
-            for attempt in range(1, 4):
-                try:
-                    resp = requests.get(_BASE_URL, params=params, timeout=45)
-                    break
-                except requests.exceptions.Timeout:
-                    print(f"  [WARN]  Polymarket timeout (attempt {attempt}/3), retrying...")
-            if resp is None:
-                print(f"  [WARN]  Polymarket: all retries failed, skipping page")
-                break
-            if resp.status_code != 200:
-                print(f"  [WARN]  Polymarket HTTP {resp.status_code}")
-                break
-            page = resp.json() or []
-            if not page:
-                break
-            results.extend(page)
-            if len(page) < _PAGE_SIZE:
-                break
-            offset += _PAGE_SIZE
-        return results
 
     def _keep(self, m: dict) -> bool:
         category = m.get("category", "")

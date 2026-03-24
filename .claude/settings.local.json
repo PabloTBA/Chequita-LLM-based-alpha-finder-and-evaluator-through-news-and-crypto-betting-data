@@ -72,7 +72,12 @@
       "Bash(python -m pytest test/test_diagnostics_engine.py test/test_report_generator.py -v)",
       "Bash(python test_algorithms_comprehensive.py)",
       "Bash(python -c \"import fastapi, uvicorn, pydantic; print\\(''OK''\\)\")",
-      "Bash(python -c \"import fastapi, uvicorn, pydantic; print\\(''fastapi'', fastapi.__version__, ''| uvicorn'', uvicorn.__version__, ''| pydantic'', pydantic.__version__\\)\")"
+      "Bash(python -c \"import fastapi, uvicorn, pydantic; print\\(''fastapi'', fastapi.__version__, ''| uvicorn'', uvicorn.__version__, ''| pydantic'', pydantic.__version__\\)\")",
+      "Bash(python -c \"import strategy_selector; print\\(''strategy_selector OK''\\)\")",
+      "Bash(python -c \"import backtester; print\\(''backtester OK''\\)\")",
+      "Bash(python -c \"import report_generator; print\\(''report_generator OK''\\)\")",
+      "Bash(python -c \"import pipeline_orchestrator; print\\(''pipeline_orchestrator OK''\\)\")",
+      "Bash(python -c \"import execution_advisor; print\\(''execution_advisor OK''\\)\")"
     ]
   }
 }
