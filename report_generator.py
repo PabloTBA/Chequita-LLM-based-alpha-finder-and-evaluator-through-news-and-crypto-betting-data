@@ -984,7 +984,7 @@ class ReportGenerator:
             return "## Baseline Comparison\n\n_SPY data unavailable — baselines cannot be computed._"
 
         try:
-            spy_close  = spy_ohlcv["Close"].astype(float).reset_index(drop=True)
+            spy_close  = spy_ohlcv["Close"].squeeze().astype(float)
             spy_daily  = spy_close.pct_change().fillna(0.0)
         except Exception:
             return "## Baseline Comparison\n\n_SPY data malformed._"
@@ -998,8 +998,7 @@ class ReportGenerator:
         in_pos_mask = (spy_close > spy_ma50).shift(1).fillna(False)
         # Flat days earn RF (same treatment as backtester for apples-to-apples)
         daily_rf    = 0.045 / 252
-        ma_rets     = spy_daily.copy()
-        ma_rets[~in_pos_mask] = daily_rf
+        ma_rets     = spy_daily.where(in_pos_mask, daily_rf)
         spy_ma_ret    = float((1 + ma_rets).prod() - 1)
         spy_ma_sharpe = _sharpe_from_returns(ma_rets)
 
