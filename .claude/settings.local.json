@@ -77,7 +77,11 @@
       "Bash(python -c \"import backtester; print\\(''backtester OK''\\)\")",
       "Bash(python -c \"import report_generator; print\\(''report_generator OK''\\)\")",
       "Bash(python -c \"import pipeline_orchestrator; print\\(''pipeline_orchestrator OK''\\)\")",
-      "Bash(python -c \"import execution_advisor; print\\(''execution_advisor OK''\\)\")"
+      "Bash(python -c \"import execution_advisor; print\\(''execution_advisor OK''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''c:/Users/panal/Downloads/Chequita-LLM-based-alpha-finder-and-evaluator-through-news-and-crypto-betting-data/alpha_engine.py''\\).read\\(\\)\\); print\\(''alpha_engine.py: OK''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''c:/Users/panal/Downloads/Chequita-LLM-based-alpha-finder-and-evaluator-through-news-and-crypto-betting-data/backtester.py''\\).read\\(\\)\\); print\\(''backtester.py: OK''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''c:/Users/panal/Downloads/Chequita-LLM-based-alpha-finder-and-evaluator-through-news-and-crypto-betting-data/strategy_selector.py''\\).read\\(\\)\\); print\\(''strategy_selector.py: OK''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''c:/Users/panal/Downloads/Chequita-LLM-based-alpha-finder-and-evaluator-through-news-and-crypto-betting-data/pipeline_orchestrator.py''\\).read\\(\\)\\); print\\(''pipeline_orchestrator.py: OK''\\)\")"
     ]
   }
 }
