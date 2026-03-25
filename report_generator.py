@@ -1259,7 +1259,10 @@ class ReportGenerator:
                 # Mean-Reversion conditions
                 elif b.get("rsi_needed") is not None:
                     out.append(f"- RSI(14) must drop **below {b['rsi_needed']}** (oversold) AND price ≤ lower Bollinger Band")
-                # VolatilityBreakout conditions
+                # AlphaCombined conditions (entry_trigger is a string like "alpha_signal > 0.45")
+                elif b.get("entry_trigger") is not None and isinstance(b.get("entry_trigger"), str):
+                    out.append(f"- Entry condition: **{b['entry_trigger']}** (cross-sectional alpha signal threshold)")
+                # VolatilityBreakout conditions (entry_trigger is a float price level)
                 elif b.get("entry_trigger") is not None:
                     out.append(f"- Close must **break above upper Bollinger Band (${b['entry_trigger']:,.2f})**")
                     if b.get("squeeze_pct_threshold") is not None:
