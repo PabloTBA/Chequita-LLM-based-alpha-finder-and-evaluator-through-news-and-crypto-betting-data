@@ -89,19 +89,31 @@ VOLATILITY_BREAKOUT_BASE: dict = {
     "max_holding_days":  15,
 }
 
+ALPHA_COMBINED_BASE: dict = {
+    # Cross-sectional multi-factor signal strategy.
+    # alpha_threshold: minimum combined z-score to enter.
+    # reversal_threshold: exit when signal drops below this (signal flipped).
+    # Designed for mean-reversion regimes; much higher trade frequency than RSI+BB.
+    "alpha_threshold":    0.40,
+    "reversal_threshold": -0.50,
+    "stop_loss_atr":      1.5,
+    "trailing_stop_atr":  2.0,
+    "max_holding_days":   10,
+}
+
 _REGIME_TO_STRATEGY: dict[str, str] = {
     # Directional trend regimes
-    "Trending-Up":      "Momentum",           # follow the trend long
-    "Trending-Down":    "Mean-Reversion",     # fade the downtrend / buy oversold dips
+    "Trending-Up":      "Momentum",            # follow the trend long
+    "Trending-Down":    "AlphaCombined",        # multi-signal: idiosyncratic reversion + volume exhaustion
     # Volatility regimes
-    "High-Volatility":  "VolatilityBreakout", # squeeze → expansion alpha
-    "Low-Volatility":   "Mean-Reversion",     # tight bands → mean revert quickly
-    "Crisis":           "Mean-Reversion",     # extreme moves statistically revert; tight params
+    "High-Volatility":  "VolatilityBreakout",  # squeeze → expansion alpha
+    "Low-Volatility":   "AlphaCombined",        # cross-sectional MR fires well in quiet markets
+    "Crisis":           "AlphaCombined",        # extreme moves: use alpha signal with tight stops
     # Statistical regimes
-    "Mean-Reverting":   "Mean-Reversion",
-    "Neutral":          "Momentum",           # default — slight trend bias
+    "Mean-Reverting":   "AlphaCombined",        # primary regime for multi-factor MR
+    "Neutral":          "AlphaCombined",        # default: cross-sectional alpha more robust than RSI+BB
     # Exogenous event regime
-    "Event-Driven":     "Mean-Reversion",     # post-earnings gaps tend to fill within 5–10 days
+    "Event-Driven":     "AlphaCombined",        # post-event idiosyncratic drift + volume exhaustion
     # Legacy label — kept for backward compatibility with any cached data
     "Trending":         "Momentum",
 }
@@ -110,6 +122,7 @@ _STRATEGY_TO_BASE: dict[str, dict] = {
     "Momentum":           MOMENTUM_BASE,
     "Mean-Reversion":     MEAN_REVERSION_BASE,
     "VolatilityBreakout": VOLATILITY_BREAKOUT_BASE,
+    "AlphaCombined":      ALPHA_COMBINED_BASE,
 }
 
 _HYPOTHESIS_PROMPT = """\
@@ -127,6 +140,7 @@ AVAILABLE STRATEGY CLASSES:
 1. Momentum            — N-day high breakout + volume confirmation. Edge: trend persistence (Hurst > 0.55).
 2. Mean-Reversion      — RSI oversold + below lower Bollinger Band. Edge: oscillation in low-Hurst assets.
 3. VolatilityBreakout  — BB squeeze → expansion + ATR surge. Edge: compressed volatility preceding directional move.
+4. AlphaCombined       — Cross-sectional multi-factor signal (CS-MR + residual + vol-spike + momentum). Edge: diversified alpha, higher trade frequency, market-neutral component.
 
 REGIME RULE SELECTED: {regime_rule_strategy}
 
@@ -135,7 +149,7 @@ Do you AGREE or DISAGREE with this selection given the news context and current 
 Respond in EXACTLY this format (one line only):
 VERDICT: AGREE
 or
-VERDICT: DISAGREE | SUGGESTED: [Momentum|Mean-Reversion|VolatilityBreakout] | REASON: [one sentence]
+VERDICT: DISAGREE | SUGGESTED: [Momentum|Mean-Reversion|VolatilityBreakout|AlphaCombined] | REASON: [one sentence]
 """
 
 _REASONING_PROMPT = """\
@@ -233,6 +247,63 @@ def _compute_volatility_breakout_params(atr_pct: float, hurst: float) -> tuple[d
     return p, rules
 
 
+def _compute_alpha_combined_params(
+    atr_pct: float, hurst: float, regime_label: str
+) -> tuple[dict, list[str]]:
+    """Deterministic AlphaCombined parameter rules. Returns (params, rule_log)."""
+    import copy as _copy
+    p = _copy.deepcopy(ALPHA_COMBINED_BASE)
+    rules: list[str] = []
+
+    # Crisis: tighten stops, lower threshold to enter more defensively
+    if regime_label == "Crisis":
+        p["stop_loss_atr"]     = 1.0
+        p["trailing_stop_atr"] = 1.5
+        p["max_holding_days"]  = 5
+        p["alpha_threshold"]   = 0.50   # require stronger signal in panic conditions
+        rules.append(
+            "Crisis: stop_loss_atr=1.0, trailing=1.5, max_hold=5, "
+            "alpha_threshold=0.50 (tighter params in extreme vol)"
+        )
+
+    # Event-Driven: short gap-fill window
+    if regime_label == "Event-Driven":
+        p["max_holding_days"]  = 7
+        p["alpha_threshold"]   = 0.45
+        rules.append(
+            "Event-Driven: max_holding_days=7, alpha_threshold=0.45 "
+            "(target post-event gap fill within 7 bars)"
+        )
+
+    # Trending-Down: want stronger reversion signal before buying the dip
+    if regime_label == "Trending-Down":
+        p["alpha_threshold"]   = 0.55   # require stronger signal in downtrend
+        p["max_holding_days"]  = 7
+        rules.append(
+            "Trending-Down: alpha_threshold=0.55, max_holding_days=7 "
+            "(only trade strongest idiosyncratic bounce signals)"
+        )
+
+    # High ATR: widen stops slightly
+    if atr_pct > 0.03:
+        p["stop_loss_atr"]    += 0.5
+        p["trailing_stop_atr"] += 0.5
+        rules.append(
+            f"High ATR {atr_pct:.2%}: stop_loss_atr={p['stop_loss_atr']}, "
+            f"trailing={p['trailing_stop_atr']}"
+        )
+
+    # Low vol: extend max hold (reversion takes longer in quiet markets)
+    if atr_pct < 0.015:
+        p["max_holding_days"] = max(p["max_holding_days"], 15)
+        rules.append(
+            f"Low ATR {atr_pct:.2%}: max_holding_days={p['max_holding_days']} "
+            "(slow reversion in quiet market)"
+        )
+
+    return p, rules
+
+
 class StrategySelector:
     def __init__(self, llm_client: callable, verbose: bool = False):
         self.llm_client = llm_client
@@ -266,24 +337,26 @@ class StrategySelector:
             adjusted_params, rule_log = _compute_momentum_params(hurst, atr_pct, vol_ratio)
         elif strategy == "VolatilityBreakout":
             adjusted_params, rule_log = _compute_volatility_breakout_params(atr_pct, hurst)
+        elif strategy == "AlphaCombined":
+            adjusted_params, rule_log = _compute_alpha_combined_params(atr_pct, hurst, regime_label)
         else:
             adjusted_params, rule_log = _compute_mean_reversion_params(atr_pct)
 
-        # ── Regime-specific overrides ──────────────────────────────────────────
+        # ── Regime-specific overrides (Momentum only — AlphaCombined handles its own) ──
         # Crisis: tighten stops and shorten max hold to reduce exposure in panic conditions
-        if regime_label == "Crisis":
-            adjusted_params["stop_loss_atr"]     = min(adjusted_params.get("stop_loss_atr", 1.5), 1.0)
-            adjusted_params["max_holding_days"]  = min(adjusted_params.get("max_holding_days", 10), 5)
+        if regime_label == "Crisis" and strategy == "Momentum":
+            adjusted_params["stop_loss_atr"]    = min(adjusted_params.get("stop_loss_atr", 1.5), 1.0)
+            adjusted_params["max_holding_days"] = min(adjusted_params.get("max_holding_days", 10), 5)
             rule_log.append("Crisis override: stop_loss_atr <= 1.0, max_holding_days <= 5")
 
         # Event-Driven: target short gap-fill window (5–7 days post-earnings)
-        if regime_label == "Event-Driven":
-            adjusted_params["max_holding_days"]  = min(adjusted_params.get("max_holding_days", 10), 7)
-            adjusted_params["rsi_entry_threshold"] = max(adjusted_params.get("rsi_entry_threshold", 30), 35)
+        if regime_label == "Event-Driven" and strategy == "Mean-Reversion":
+            adjusted_params["max_holding_days"]      = min(adjusted_params.get("max_holding_days", 10), 7)
+            adjusted_params["rsi_entry_threshold"]   = max(adjusted_params.get("rsi_entry_threshold", 30), 35)
             rule_log.append("Event-Driven override: max_holding_days <= 7 (gap-fill window)")
 
         # Trending-Down: tighten entry to only buy deep oversold, reduce hold
-        if regime_label == "Trending-Down":
+        if regime_label == "Trending-Down" and strategy == "Mean-Reversion":
             adjusted_params["rsi_entry_threshold"] = min(adjusted_params.get("rsi_entry_threshold", 30), 25)
             adjusted_params["max_holding_days"]    = min(adjusted_params.get("max_holding_days", 10), 8)
             rule_log.append("Trending-Down override: rsi_entry_threshold <= 25, max_holding_days <= 8")

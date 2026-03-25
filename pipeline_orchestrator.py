@@ -316,6 +316,20 @@ class PipelineOrchestrator:
                     ohlcv_raw[_t],
                 )
 
+        # ── Stage 5d: cross-sectional alpha signal enrichment ─────────────────
+        # AlphaEngine computes CS-MR, residual reversion, volume-spike, and
+        # short-term momentum signals across the full universe, then injects
+        # alpha_signal into each OHLCV DataFrame.  The backtester reads this
+        # column when running AlphaCombined strategy — no look-ahead because
+        # AlphaEngine uses shift(1) throughout.
+        print("[Stage 5d] Computing cross-sectional alpha signals ...")
+        if ohlcv_raw:
+            ohlcv_raw = self._safe(
+                "alpha_engine.compute",
+                lambda: m["alpha_engine"].compute(dict(ohlcv_raw)),
+                ohlcv_raw,
+            )
+
         # ── Stage 6: compute features ─────────────────────────────────────────
         print(f"[Stage 6] Computing features ...")
         features: dict[str, Any] = {}
@@ -805,6 +819,7 @@ class PipelineOrchestrator:
         from report_generator            import ReportGenerator
         from execution_advisor           import ExecutionAdvisor
         from rag_store                   import RAGStore
+        from alpha_engine                import AlphaEngine
         from portfolio_optimizer         import PortfolioOptimizer
         rag = RAGStore(persist_dir=cfg.get("chroma_dir", "data/chroma"))
         return {
@@ -839,6 +854,7 @@ class PipelineOrchestrator:
             "portfolio_optimizer": PortfolioOptimizer(
                                 initial_portfolio=cfg.get("initial_portfolio", 100_000.0)
                              ),
+            "alpha_engine":        AlphaEngine(),
         }
 
 

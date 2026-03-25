@@ -24,6 +24,13 @@ Exit priority (Mean-Reversion)
   3. Middle BB        : close ≥ bb_period-day MA
   4. Max holding      : holding_days ≥ max_holding_days
 
+Exit priority (AlphaCombined)
+------------------------------
+  1. Hard stop loss   : close < entry − stop_loss_atr × ATR_at_entry
+  2. Trailing stop    : close < peak  − trailing_stop_atr × ATR
+  3. Alpha reversal   : alpha_signal < reversal_threshold  (signal flips negative)
+  4. Max holding      : holding_days ≥ max_holding_days
+
 Public interface
 ----------------
   bt     = Backtester(initial_portfolio=100_000.0)
@@ -106,6 +113,8 @@ class Backtester:
             trade_log = self._run_momentum(ohlcv, params)
         elif strategy_type == "VolatilityBreakout":
             trade_log = self._run_volatility_breakout(ohlcv, params)
+        elif strategy_type == "AlphaCombined":
+            trade_log = self._run_alpha_combined(ohlcv, params)
         else:
             trade_log = self._run_mean_reversion(ohlcv, params)
 
@@ -317,6 +326,117 @@ class Backtester:
 
         return trades
 
+    def _run_alpha_combined(self, ohlcv: pd.DataFrame, params: dict) -> list[dict]:
+        """
+        AlphaCombined strategy engine.
+
+        Alpha source: pre-computed cross-sectional multi-factor signal injected
+        by AlphaEngine as the ``alpha_signal`` column.  The signal combines:
+          - Cross-sectional 5-day mean reversion (40%)
+          - Market-neutral idiosyncratic residual reversion (30%)
+          - Volume-spike exhaustion fade (20%)
+          - 2-day short-term momentum (10%)
+
+        Entry:  alpha_signal > alpha_threshold  AND  not in earnings blackout
+        Exit (priority order):
+          1. Hard stop  : close < entry - stop_loss_atr × ATR
+          2. Trailing   : close < peak  - trailing_stop_atr × ATR
+          3. Reversal   : alpha_signal < reversal_threshold (signal flips negative)
+          4. Max hold   : holding_days ≥ max_holding_days
+
+        Trade frequency is much higher than RSI+BB because the cross-sectional
+        z-score threshold fires on the bottom ~30-40% of the universe each day.
+        """
+        close  = ohlcv["Close"].astype(float)
+        high   = ohlcv["High"].astype(float)
+        low    = ohlcv["Low"].astype(float)
+
+        alpha_th  = float(params.get("alpha_threshold",   0.40))
+        rev_th    = float(params.get("reversal_threshold", -0.50))
+        stop_atr  = float(params.get("stop_loss_atr",     1.5))
+        trail_atr = float(params.get("trailing_stop_atr", 2.0))
+        max_hold  = int(params.get("max_holding_days",    10))
+
+        atr = self._atr(high, low, close)
+
+        # alpha_signal is pre-computed and already shift(1)-lagged by AlphaEngine
+        if "alpha_signal" in ohlcv.columns:
+            alpha_sig = ohlcv["alpha_signal"].astype(float)
+        else:
+            alpha_sig = pd.Series(0.0, index=ohlcv.index)
+
+        blackout = (
+            ohlcv["earnings_blackout"]
+            if "earnings_blackout" in ohlcv.columns
+            else pd.Series(False, index=ohlcv.index)
+        )
+
+        start = max(ATR_PERIOD + 5, 25)
+
+        trades       = []
+        in_position  = False
+        equity       = self.initial_portfolio
+        entry_price  = stop_price = trail_stop = pos_size = peak = 0.0
+        entry_date   = None
+        holding_days = 0
+        target_1r    = 0.0
+        reached_1r   = False
+
+        for i in range(start, len(ohlcv)):
+            c = float(close.iloc[i])
+            a = float(atr.iloc[i])
+            s = float(alpha_sig.iloc[i]) if not np.isnan(alpha_sig.iloc[i]) else 0.0
+
+            if np.isnan(a) or a <= 0:
+                continue
+
+            if not in_position:
+                if s > alpha_th and not bool(blackout.iloc[i]):
+                    in_position  = True
+                    entry_price  = c * (1 + self._slip)
+                    entry_date   = close.index[i]
+                    stop_price   = entry_price - stop_atr * a
+                    trail_stop   = stop_price
+                    pos_size     = (equity * RISK_PER_TRADE) / (stop_atr * a)
+                    peak         = c
+                    holding_days = 0
+                    target_1r    = entry_price + stop_atr * a
+                    reached_1r   = False
+            else:
+                holding_days += 1
+                peak          = max(peak, c)
+                trail_stop    = max(peak - trail_atr * a, stop_price)
+                h_bar         = float(high.iloc[i])
+                if h_bar >= target_1r:
+                    reached_1r = True
+
+                exit_reason: str | None = None
+                if c < trail_stop:
+                    exit_reason = (
+                        "stop_loss" if trail_stop <= stop_price + 1e-6
+                        else "trailing_stop"
+                    )
+                elif s < rev_th:
+                    exit_reason = "alpha_reversal"
+                elif holding_days >= max_hold:
+                    exit_reason = "max_holding"
+
+                if exit_reason:
+                    exit_price  = c * (1 - self._slip)
+                    gross_pnl   = (c - (entry_price / (1 + self._slip))) * pos_size
+                    pnl         = (exit_price - entry_price) * pos_size
+                    equity     += pnl
+                    trades.append(_make_trade(
+                        entry_date, entry_price, close.index[i], exit_price,
+                        holding_days, pos_size, pnl, exit_reason,
+                        gross_pnl=gross_pnl,
+                        slippage_cost=abs(gross_pnl - pnl),
+                        reached_1r=reached_1r,
+                    ))
+                    in_position = False
+
+        return trades
+
     def _run_volatility_breakout(self, ohlcv: pd.DataFrame, params: dict) -> list[dict]:
         """
         VolatilityBreakout strategy engine.
@@ -455,6 +575,8 @@ class Backtester:
                 return self._momentum_signal(ohlcv, params, initial_portfolio)
             if strategy_type == "VolatilityBreakout":
                 return self._volatility_breakout_signal(ohlcv, params, initial_portfolio)
+            if strategy_type == "AlphaCombined":
+                return self._alpha_combined_signal(ohlcv, params, initial_portfolio)
             return self._mean_rev_signal(ohlcv, params, initial_portfolio)
         except Exception as e:
             return {"signal_active": None, "details": f"Signal check failed: {e}", "setup": None}
@@ -629,6 +751,74 @@ class Backtester:
             "details": (
                 f"RSI {r:.1f} {'<' if oversold else '>='} {rsi_entry}"
                 f" | Close {c:.2f} {'<=' if below_bb else '>'} Lower BB {lb:.2f}"
+            ),
+        }
+
+    def _alpha_combined_signal(
+        self, ohlcv: pd.DataFrame, params: dict, portfolio: float
+    ) -> dict:
+        """Current-bar signal check for AlphaCombined strategy."""
+        close = ohlcv["Close"].astype(float)
+        high  = ohlcv["High"].astype(float)
+        low   = ohlcv["Low"].astype(float)
+
+        alpha_th = float(params.get("alpha_threshold",   0.40))
+        stop_atr = float(params.get("stop_loss_atr",     1.5))
+
+        atr = self._atr(high, low, close)
+
+        if "alpha_signal" in ohlcv.columns:
+            alpha_sig = ohlcv["alpha_signal"].astype(float)
+        else:
+            alpha_sig = pd.Series(0.0, index=ohlcv.index)
+
+        c = float(close.iloc[-1])
+        a = float(atr.iloc[-1])   if not pd.isna(atr.iloc[-1])        else 0.0
+        s = float(alpha_sig.iloc[-1]) if not pd.isna(alpha_sig.iloc[-1]) else 0.0
+
+        active = s > alpha_th
+
+        setup = None
+        if active and a > 0:
+            stop_dist   = stop_atr * a
+            pos_size    = int((portfolio * RISK_PER_TRADE) / stop_dist)
+            stop_price  = c - stop_dist
+            setup = {
+                "entry_price":   c,
+                "stop_price":    stop_price,
+                "stop_dist":     stop_dist,
+                "position_size": pos_size,
+                "dollar_risk":   portfolio * RISK_PER_TRADE,
+                "current_atr":   a,
+                "target":        None,
+            }
+
+        projected_setup = None
+        if a > 0:
+            stop_dist  = stop_atr * a
+            proj_entry = c * (1 + self._slip)
+            proj_stop  = proj_entry - stop_dist
+            proj_size  = int((portfolio * RISK_PER_TRADE) / stop_dist)
+            projected_setup = {
+                "entry_price":   proj_entry,
+                "stop_price":    proj_stop,
+                "stop_dist":     stop_dist,
+                "position_size": proj_size,
+                "dollar_risk":   portfolio * RISK_PER_TRADE,
+                "current_atr":   a,
+                "target":        None,
+                "entry_trigger": f"alpha_signal > {alpha_th:.2f}",
+            }
+
+        return {
+            "signal_active":    active,
+            "close":            c,
+            "alpha_signal":     s,
+            "alpha_threshold":  alpha_th,
+            "setup":            setup,
+            "projected_setup":  projected_setup,
+            "details": (
+                f"alpha_signal {s:.3f} {'>' if active else '<='} threshold {alpha_th:.2f}"
             ),
         }
 
