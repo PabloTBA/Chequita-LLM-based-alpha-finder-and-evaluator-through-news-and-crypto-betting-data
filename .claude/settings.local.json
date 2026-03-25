@@ -81,7 +81,10 @@
       "Bash(python -c \"import ast; ast.parse\\(open\\(''c:/Users/panal/Downloads/Chequita-LLM-based-alpha-finder-and-evaluator-through-news-and-crypto-betting-data/alpha_engine.py''\\).read\\(\\)\\); print\\(''alpha_engine.py: OK''\\)\")",
       "Bash(python -c \"import ast; ast.parse\\(open\\(''c:/Users/panal/Downloads/Chequita-LLM-based-alpha-finder-and-evaluator-through-news-and-crypto-betting-data/backtester.py''\\).read\\(\\)\\); print\\(''backtester.py: OK''\\)\")",
       "Bash(python -c \"import ast; ast.parse\\(open\\(''c:/Users/panal/Downloads/Chequita-LLM-based-alpha-finder-and-evaluator-through-news-and-crypto-betting-data/strategy_selector.py''\\).read\\(\\)\\); print\\(''strategy_selector.py: OK''\\)\")",
-      "Bash(python -c \"import ast; ast.parse\\(open\\(''c:/Users/panal/Downloads/Chequita-LLM-based-alpha-finder-and-evaluator-through-news-and-crypto-betting-data/pipeline_orchestrator.py''\\).read\\(\\)\\); print\\(''pipeline_orchestrator.py: OK''\\)\")"
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''c:/Users/panal/Downloads/Chequita-LLM-based-alpha-finder-and-evaluator-through-news-and-crypto-betting-data/pipeline_orchestrator.py''\\).read\\(\\)\\); print\\(''pipeline_orchestrator.py: OK''\\)\")",
+      "Bash(python test_pipeline.py)",
+      "Bash(python -c \"import sys,io; sys.stdout=io.TextIOWrapper\\(sys.stdout.buffer,encoding=''''utf-8''''\\); exec\\(open\\(''''test_pipeline.py''''\\).read\\(\\)\\)\")",
+      "Bash(set PYTHONIOENCODING=utf-8)"
     ]
   }
 }
