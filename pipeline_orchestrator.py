@@ -226,12 +226,28 @@ class PipelineOrchestrator:
         m = self._modules
 
         # ── Stage 1: collect ──────────────────────────────────────────────────
+        benzinga_key = self._cfg.get("benzinga_api_key")
+        if not benzinga_key:
+            print("[ERROR] Stage 1: BENZINGA_API is not set — news collection will be empty. "
+                  "Set BENZINGA_API in your .env file.")
+
         print(f"\n[Stage 1] Collecting news {start} → {collect_end} ...")
         articles = self._safe(
             "collector",
             lambda: m["collector"].collect_range(start, collect_end),
             {},
         )
+
+        # Count total articles across all sources/dates for early-warning
+        total_articles = sum(
+            len(df) for df in articles.values() if hasattr(df, "__len__")
+        ) if articles else 0
+        if total_articles == 0:
+            print("[WARN] Stage 1: 0 articles collected. Check BENZINGA_API key, "
+                  "network access, and cache directory. All downstream stages will "
+                  "have no news context.")
+        else:
+            print(f"[Stage 1] Collected {total_articles} articles total.")
 
         # ── Stage 1b: RAG insert news ─────────────────────────────────────────
         print("[Stage 1b] Inserting news into RAG store ...")
@@ -640,6 +656,9 @@ class PipelineOrchestrator:
         try:
             return fn()
         except Exception as exc:
+            import traceback
+            print(f"  [ERROR] Stage '{stage}' failed: {exc}")
+            print(traceback.format_exc())
             return fallback
 
     @staticmethod

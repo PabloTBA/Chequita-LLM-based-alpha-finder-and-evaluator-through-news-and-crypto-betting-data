@@ -80,8 +80,14 @@ class ReportGenerator:
         filepath  = os.path.join(self.output_dir, filename)
 
         # Build lookup maps
+        # Only tickers where diagnostic truly passed (stress_test=True means diag failed
+        # but Sharpe was 0–0.5; those must NOT appear in the trader summary).
+        diag_passed_set = {d["ticker"] for d in pipeline_output.get("diagnostics", [])
+                           if d.get("passed")}
         mc_map   = {mc["ticker"]: mc for mc in pipeline_output.get("monte_carlos", [])
-                    if not mc.get("insufficient_sample")}
+                    if not mc.get("insufficient_sample")
+                    and not mc.get("stress_test")
+                    and mc["ticker"] in diag_passed_set}
         diag_map = {d["ticker"]: d  for d in pipeline_output.get("diagnostics", [])}
         bt_map   = {b["ticker"]: b  for b in pipeline_output.get("backtests", [])}
         strat_map= {s["ticker"]: s  for s in pipeline_output.get("strategies", [])}
