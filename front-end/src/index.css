@@ -1,0 +1,34 @@
+@import url('https://fonts.googleapis.com/css2?family=Jersey+25&display=swap');
+
+@import "tailwindcss";
+
+:root {
+  background-color: #000;
+}
+
+/* Custom utility for your new font */
+.font-jersey {
+  font-family: "Jersey 25", serif;
+  font-weight: 400;
+  font-style: normal;
+}
+
+/* Buzzing Effect */
+@keyframes neon-buzz {
+  0%, 19%, 21%, 23%, 25%, 54%, 56%, 100% {
+    /* Reduced to a single, softer layer to match your old design */
+    text-shadow: 0 0 15px rgba(223, 191, 23, 0.5);
+    transform: translate(0, 0);
+    opacity: 1;
+  }
+  20%, 24%, 55% {
+    /* Dimmer flicker state */
+    text-shadow: 0 0 5px rgba(223, 191, 23, 0.2);
+    transform: translate(0.2px, -0.2px);
+    opacity: 0.7;
+  }
+}
+
+.animate-neon-buzz {
+  animation: neon-buzz 4s linear infinite; /* Slowed down slightly for a calmer buzz */
+}

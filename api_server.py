@@ -189,8 +189,8 @@ class RunRequest(BaseModel):
                                         --min-volume 10000 --max-markets 30
     """
     date:        str | None = None    # YYYY-MM-DD; None → yesterday UTC+8
-    days:        int        = 7       # news summary window (capped at 14)
-    max_tickers: int        = 5       # max tickers to fully analyse
+    days:        int        = 14      # news summary window (capped at 14)
+    max_tickers: int        = 15      # max tickers to fully analyse
     min_volume:  float      = 10_000  # min prediction-market volume (USD)
     max_markets: int        = 30      # max prediction markets to store/embed
 
