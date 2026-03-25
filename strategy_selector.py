@@ -57,9 +57,10 @@ MOMENTUM_BASE: dict = {
     "entry_lookback":    10,
     "volume_multiplier": 1.2,
     "trailing_stop_atr": 2.0,
-    "ma_exit_period":    10,
+    "ma_exit_period":    20,    # widened from 10 — 10d MA fires too early, cutting winners short
     "stop_loss_atr":     1.5,
     "max_holding_days":  20,
+    "momentum_lookback": 252,   # 12-1 month momentum gate: only enter if 11m return (skip last month) > 0
 }
 
 MEAN_REVERSION_BASE: dict = {
@@ -89,11 +90,20 @@ VOLATILITY_BREAKOUT_BASE: dict = {
 }
 
 _REGIME_TO_STRATEGY: dict[str, str] = {
-    "Trending":         "Momentum",
-    "High-Volatility":  "VolatilityBreakout",   # vol compression → expansion alpha
-    "Neutral":          "Momentum",
+    # Directional trend regimes
+    "Trending-Up":      "Momentum",           # follow the trend long
+    "Trending-Down":    "Mean-Reversion",     # fade the downtrend / buy oversold dips
+    # Volatility regimes
+    "High-Volatility":  "VolatilityBreakout", # squeeze → expansion alpha
+    "Low-Volatility":   "Mean-Reversion",     # tight bands → mean revert quickly
+    "Crisis":           "Mean-Reversion",     # extreme moves statistically revert; tight params
+    # Statistical regimes
     "Mean-Reverting":   "Mean-Reversion",
-    "Low-Volatility":   "Mean-Reversion",
+    "Neutral":          "Momentum",           # default — slight trend bias
+    # Exogenous event regime
+    "Event-Driven":     "Mean-Reversion",     # post-earnings gaps tend to fill within 5–10 days
+    # Legacy label — kept for backward compatibility with any cached data
+    "Trending":         "Momentum",
 }
 
 _STRATEGY_TO_BASE: dict[str, dict] = {
@@ -258,6 +268,25 @@ class StrategySelector:
             adjusted_params, rule_log = _compute_volatility_breakout_params(atr_pct, hurst)
         else:
             adjusted_params, rule_log = _compute_mean_reversion_params(atr_pct)
+
+        # ── Regime-specific overrides ──────────────────────────────────────────
+        # Crisis: tighten stops and shorten max hold to reduce exposure in panic conditions
+        if regime_label == "Crisis":
+            adjusted_params["stop_loss_atr"]     = min(adjusted_params.get("stop_loss_atr", 1.5), 1.0)
+            adjusted_params["max_holding_days"]  = min(adjusted_params.get("max_holding_days", 10), 5)
+            rule_log.append("Crisis override: stop_loss_atr <= 1.0, max_holding_days <= 5")
+
+        # Event-Driven: target short gap-fill window (5–7 days post-earnings)
+        if regime_label == "Event-Driven":
+            adjusted_params["max_holding_days"]  = min(adjusted_params.get("max_holding_days", 10), 7)
+            adjusted_params["rsi_entry_threshold"] = max(adjusted_params.get("rsi_entry_threshold", 30), 35)
+            rule_log.append("Event-Driven override: max_holding_days <= 7 (gap-fill window)")
+
+        # Trending-Down: tighten entry to only buy deep oversold, reduce hold
+        if regime_label == "Trending-Down":
+            adjusted_params["rsi_entry_threshold"] = min(adjusted_params.get("rsi_entry_threshold", 30), 25)
+            adjusted_params["max_holding_days"]    = min(adjusted_params.get("max_holding_days", 10), 8)
+            rule_log.append("Trending-Down override: rsi_entry_threshold <= 25, max_holding_days <= 8")
 
         print(f"  [Strategy] {ticker}: {regime_label} -> {strategy} | "
               f"Hurst={hurst:.3f} ATR%={atr_pct:.2%} VolRatio={vol_ratio:.2f}")

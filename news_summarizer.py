@@ -28,6 +28,7 @@ Usage:
 """
 
 import json
+import re
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -146,18 +147,25 @@ class NewsSummarizer:
             )
         return base
 
+    @staticmethod
+    def _clean_llm_json(raw: str) -> str:
+        """Strip Qwen3 <think> blocks and markdown fences, return first JSON object."""
+        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
+        fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL)
+        if fence:
+            return fence.group(1)
+        brace = re.search(r"\{[^{}]*\"market_bias\"[^{}]*\}", raw, re.DOTALL)
+        if brace:
+            return brace.group(0)
+        return raw.strip()
+
     def _parse_llm_response(self, raw: str) -> dict:
         """
         Parse LLM JSON response. Returns a safe fallback on parse failure
         rather than raising — upstream pipeline should never crash here.
         """
         try:
-            # Strip markdown code fences if the model added them
-            text = raw.strip()
-            if text.startswith("```"):
-                text = text.split("```")[1]
-                if text.startswith("json"):
-                    text = text[4:]
+            text = self._clean_llm_json(raw)
             data = json.loads(text)
             return {
                 "summary":     str(data.get("summary", "")),

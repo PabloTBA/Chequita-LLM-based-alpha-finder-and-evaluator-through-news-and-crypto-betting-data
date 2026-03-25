@@ -147,6 +147,7 @@ class Backtester:
         ma_period         = params["ma_exit_period"]
         stop_loss_atr     = params["stop_loss_atr"]
         max_holding       = params["max_holding_days"]
+        mom_lookback      = int(params.get("momentum_lookback", 0))
 
         atr           = self._atr(high, low, close)
         ma            = close.rolling(ma_period).mean().shift(1)   # shift(1): no look-ahead
@@ -154,7 +155,16 @@ class Backtester:
         rolling_high  = close.rolling(entry_lookback).max().shift(1)
         blackout      = ohlcv["earnings_blackout"] if "earnings_blackout" in ohlcv.columns else pd.Series(False, index=ohlcv.index)
 
-        start = max(entry_lookback, 20, ma_period, ATR_PERIOD)
+        # 12-1 month momentum gate: return from [t-252] to [t-21], fully non-look-ahead.
+        # Skipping the most recent month avoids short-term reversal contamination.
+        # Only computed when momentum_lookback > 0 (Momentum strategy only).
+        if mom_lookback > 0:
+            mom_filter = (close.shift(22) / close.shift(mom_lookback + 1) - 1)
+        else:
+            mom_filter = None
+
+        start = max(entry_lookback, 20, ma_period, ATR_PERIOD,
+                    mom_lookback + 2 if mom_lookback > 0 else 0)
 
         trades       = []
         in_position  = False
@@ -175,7 +185,11 @@ class Backtester:
                 continue
 
             if not in_position:
-                if c > rh and v > vol_multiplier * vm and not bool(blackout.iloc[i]):
+                mom_ok = True
+                if mom_filter is not None:
+                    mv = float(mom_filter.iloc[i])
+                    mom_ok = not np.isnan(mv) and mv > 0.0
+                if c > rh and v > vol_multiplier * vm and mom_ok and not bool(blackout.iloc[i]):
                     in_position  = True
                     entry_price  = c * (1 + self._slip)   # pay spread on entry
                     entry_date   = close.index[i]

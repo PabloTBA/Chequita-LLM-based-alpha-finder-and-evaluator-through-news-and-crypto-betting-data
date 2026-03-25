@@ -22,10 +22,12 @@ Public interface
 
 from __future__ import annotations
 
+import math
 from typing import Callable, Optional
 
 import numpy as np
 import pandas as pd
+import scipy.stats as _stats
 
 # ── Hard floor constants (PRD defaults) ───────────────────────────────────────
 
@@ -99,6 +101,8 @@ class DiagnosticsEngine:
         sharpe = self._sharpe(returns)
         tc = len(trade_log)
         wf_degrad, oos_sharpe, wf_splits = self._walk_forward_degradation(returns, trade_count=tc)
+        t_stat, p_value                  = self._tstat(returns)
+        bs_p5, bs_p95                    = self._bootstrap_sharpe_ci(returns)
         return {
             "sharpe":                   sharpe,
             "oos_sharpe":               oos_sharpe,
@@ -107,9 +111,14 @@ class DiagnosticsEngine:
             "profit_factor":            self._profit_factor(trade_log),
             "kelly_fraction":           self._kelly_fraction(trade_log),
             "walk_forward_degradation": wf_degrad,
-            "wf_splits":                wf_splits,   # detail per split for report
+            "wf_splits":                wf_splits,
             "trade_count":              tc,
             "wf_underpowered":          tc < WF_MIN_TRADE_COUNT,
+            # Robustness / statistical significance
+            "t_stat":                   t_stat,     # Lo (2002) autocorr-corrected t-stat
+            "p_value":                  p_value,    # one-tailed H1: Sharpe > 0
+            "bootstrap_sharpe_p5":      bs_p5,      # 5th pct of bootstrap Sharpe dist
+            "bootstrap_sharpe_p95":     bs_p95,     # 95th pct
         }
 
     @staticmethod
@@ -258,6 +267,81 @@ class DiagnosticsEngine:
         L = sum(-p for p in losses) / len(losses)  # mean loss (positive)
         kelly = W / L - (1.0 - W) / G
         return float(np.clip(kelly, -1.0, 1.0))
+
+    @staticmethod
+    def _tstat(returns: pd.Series) -> tuple[float, float]:
+        """
+        t-statistic for H0: mean excess return = 0, with Lo (2002) correction
+        for serial autocorrelation in the return series.
+
+        Returns (t_stat, p_value) where p_value is one-tailed (H1: Sharpe > 0).
+        A p_value < 0.05 means the Sharpe is statistically distinguishable from
+        noise at 95% confidence.
+        """
+        n = len(returns)
+        if n < 10:
+            return 0.0, 1.0
+        daily_rf = RISK_FREE_RATE / TRADING_DAYS
+        excess   = np.array(returns, dtype=float) - daily_rf
+        mean_e   = float(excess.mean())
+        std_e    = float(excess.std(ddof=1))
+        if std_e < 1e-10 or math.isnan(std_e):
+            return 0.0, 1.0
+
+        # Lo (2002) autocorrelation correction — Bartlett kernel
+        q    = max(1, int(n ** 0.25))
+        acf  = 0.0
+        for k in range(1, q + 1):
+            if n - k > 0:
+                rho = float(np.corrcoef(excess[:-k], excess[k:])[0, 1])
+                if not math.isnan(rho):
+                    acf += rho * (1.0 - k / (q + 1.0))
+        acf_factor = max(1.0 + 2.0 * acf, 0.1)   # floor at 0.1 to avoid div/0
+
+        sr_daily = mean_e / std_e
+        t_stat   = sr_daily * math.sqrt(n / acf_factor)
+        p_value  = float(1.0 - _stats.t.cdf(t_stat, df=n - 1))
+
+        return round(float(t_stat), 3), round(p_value, 4)
+
+    @staticmethod
+    def _bootstrap_sharpe_ci(
+        returns: pd.Series,
+        n_bootstrap: int = 1000,
+        block_size:  int = 20,
+    ) -> tuple[float, float]:
+        """
+        Block-bootstrap 90% confidence interval for annualised Sharpe.
+
+        Block size = 20 trading days (≈ 1 month) preserves the serial
+        dependence structure of returns (volatility clustering, autocorrelation).
+
+        Returns (p5, p95): the 5th and 95th percentile of the bootstrap
+        Sharpe distribution.  A bootstrap p5 > 0 provides strong evidence
+        that the Sharpe is genuinely positive, not a sampling artefact.
+        """
+        r = np.array(returns, dtype=float)
+        n = len(r)
+        if n < 40:
+            return 0.0, 0.0
+        daily_rf = RISK_FREE_RATE / TRADING_DAYS
+        sharpes: list[float] = []
+        rng = np.random.default_rng(seed=42)   # reproducible
+        for _ in range(n_bootstrap):
+            # Circular block bootstrap
+            n_blocks = math.ceil(n / block_size)
+            starts   = rng.integers(0, n, size=n_blocks)
+            sample   = np.concatenate([
+                np.roll(r, -int(s))[:block_size] for s in starts
+            ])[:n]
+            std = float(sample.std(ddof=1))
+            if std > 1e-10:
+                sr = (float(sample.mean()) - daily_rf) / std * math.sqrt(TRADING_DAYS)
+                sharpes.append(sr)
+        if not sharpes:
+            return 0.0, 0.0
+        return round(float(np.percentile(sharpes, 5)),  3), \
+               round(float(np.percentile(sharpes, 95)), 3)
 
     @staticmethod
     def _walk_forward_degradation(

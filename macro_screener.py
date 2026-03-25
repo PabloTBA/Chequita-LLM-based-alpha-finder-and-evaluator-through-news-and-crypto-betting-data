@@ -21,6 +21,7 @@ Output keys
 from __future__ import annotations
 
 import json
+import re
 
 VALID_BIASES = {"bullish", "bearish", "neutral"}
 
@@ -93,9 +94,28 @@ class MacroScreener:
             f"Overall market bias from news: {summary.get('market_bias', 'neutral')}\n"
         )
 
+    @staticmethod
+    def _extract_json(raw: str) -> str:
+        """
+        Strip Qwen3 <think>...</think> reasoning blocks and markdown fences,
+        then return the first JSON object found in the remaining text.
+        """
+        # Remove <think>...</think> blocks (Qwen3 extended-thinking output)
+        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
+        # Remove markdown code fences  ```json ... ``` or ``` ... ```
+        fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL)
+        if fence:
+            return fence.group(1)
+        # Last resort: find the first {...} block that contains "market_bias"
+        brace = re.search(r"\{[^{}]*\"market_bias\"[^{}]*\}", raw, re.DOTALL)
+        if brace:
+            return brace.group(0)
+        return raw.strip()
+
     def _parse(self, raw: str) -> dict:
+        cleaned = self._extract_json(raw)
         try:
-            data = json.loads(raw)
+            data = json.loads(cleaned)
         except (json.JSONDecodeError, ValueError):
             self._log("[MacroScreener] JSON parse failed — returning neutral default")
             return dict(_NEUTRAL_DEFAULT)

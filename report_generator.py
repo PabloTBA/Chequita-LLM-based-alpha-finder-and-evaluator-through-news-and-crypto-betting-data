@@ -29,7 +29,7 @@ class ReportGenerator:
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
 
-    def generate(self, pipeline_output: dict, timestamp: str | None = None) -> str:
+    def generate(self, pipeline_output: dict, timestamp: str | None = None) -> str:  # noqa: ARG002
         """
         Build and write the Markdown report.
 
@@ -44,8 +44,7 @@ class ReportGenerator:
         str — absolute path of the written .md file
         """
         run_date  = pipeline_output.get("run_date", datetime.today().strftime("%Y-%m-%d"))
-        timestamp = timestamp or datetime.now().strftime("%H%M%S")
-        filename  = f"report_{run_date}_{timestamp}.md"
+        filename  = "ReportSummary.md"
         filepath  = os.path.join(self.output_dir, filename)
 
         sections = [
@@ -58,6 +57,7 @@ class ReportGenerator:
             self._diagnostic_section(pipeline_output),
             self._backtest_section(pipeline_output),
             self._baseline_section(pipeline_output),
+            self._portfolio_section(pipeline_output),
             self._monte_carlo_section(pipeline_output),
             self._meta_learning_section(pipeline_output),
             self._execution_brief_section(pipeline_output),
@@ -69,15 +69,14 @@ class ReportGenerator:
         print(f"  [Report] Full report    → {filepath}")
         return filepath
 
-    def generate_summary(self, pipeline_output: dict, timestamp: str | None = None) -> str:
+    def generate_summary(self, pipeline_output: dict, timestamp: str | None = None) -> str:  # noqa: ARG002
         """
         Generate a trader-focused summary report containing only tickers
         that passed all 3 stages (backtest → diagnostics → Monte Carlo).
         Ordered by importance to the trader. Numbers preserved for graphing.
         """
         run_date  = pipeline_output.get("run_date", datetime.today().strftime("%Y-%m-%d"))
-        timestamp = timestamp or datetime.now().strftime("%H%M%S")
-        filename  = f"summary_{run_date}_{timestamp}.md"
+        filename  = "TraderSummary.md"
         filepath  = os.path.join(self.output_dir, filename)
 
         # Build lookup maps
@@ -1041,6 +1040,109 @@ class ReportGenerator:
                 f" | {bnh_icon} {bnh_diff:+.2%}"
                 f" | {ma_icon} {ma_diff:+.3f} |"
             )
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _portfolio_section(po: dict) -> str:
+        """
+        Portfolio construction results:
+         - Cross-sectional momentum ranking (12-1 month)
+         - Volatility-parity allocation weights
+         - Correlation-adjusted final weights
+         - Portfolio-level Sharpe, Vol, VaR, CVaR, MaxDD
+         - Per-ticker t-stat and bootstrap Sharpe CI from diagnostics
+        """
+        pr = po.get("portfolio_result") or {}
+        if not pr:
+            return "## Portfolio Construction\n\n_Portfolio optimiser did not run._"
+
+        lines = ["## Portfolio Construction", ""]
+
+        # ── CS Momentum Ranking ──────────────────────────────────────────────
+        cs_ranks = pr.get("cs_momentum_ranks", [])
+        if cs_ranks:
+            lines += ["### Cross-Sectional Momentum Ranking (12-1 Month)", ""]
+            lines.append("| Rank | Ticker | 12-1m Return | Status |")
+            lines.append("|------|--------|-------------|--------|")
+            alloc_tickers = {a["ticker"] for a in pr.get("allocations", [])}
+            rej_tickers   = {r["ticker"] for r in pr.get("rejected", [])}
+            for r in cs_ranks:
+                ticker = r["ticker"]
+                mom    = r.get("mom_12_1", 0.0)
+                if ticker in alloc_tickers:
+                    status = "✅ Allocated"
+                elif ticker in rej_tickers:
+                    status = "❌ Filtered"
+                else:
+                    status = "—"
+                lines.append(f"| {r['rank']} | {ticker} | {mom:+.1%} | {status} |")
+            lines.append("")
+
+        # ── Allocations ──────────────────────────────────────────────────────
+        allocations = pr.get("allocations", [])
+        if allocations:
+            lines += ["### Volatility-Parity Allocations", ""]
+            lines.append("| Ticker | Weight | $ Allocated | Sharpe | CS Rank | Rationale |")
+            lines.append("|--------|--------|-------------|--------|---------|-----------|")
+            for a in allocations:
+                lines.append(
+                    f"| {a['ticker']} | {a['weight']:.1%} | "
+                    f"${a['dollar_allocation']:,.0f} | {a['sharpe']:.3f} | "
+                    f"{a['cs_rank']} | {a['rationale']} |"
+                )
+            lines.append("")
+        else:
+            lines.append("_No tickers passed portfolio construction filters._\n")
+
+        # ── Rejected ─────────────────────────────────────────────────────────
+        rejected = pr.get("rejected", [])
+        if rejected:
+            lines += ["### Rejected by Portfolio Filter", ""]
+            for r in rejected:
+                lines.append(f"- **{r['ticker']}**: {r['reason']}")
+            lines.append("")
+
+        # ── Portfolio Metrics ─────────────────────────────────────────────────
+        pm = pr.get("portfolio_metrics") or {}
+        if pm and pm.get("sharpe", 0) != 0:
+            lines += ["### Portfolio-Level Risk Metrics", ""]
+            lines.append("| Metric | Value |")
+            lines.append("|--------|-------|")
+            lines.append(f"| Portfolio Sharpe | {pm.get('sharpe', 0):.3f} |")
+            lines.append(f"| Annualised Vol   | {pm.get('annual_vol', 0):.1%} |")
+            lines.append(f"| VaR (95%)        | {pm.get('var_95', 0):.2%} |")
+            lines.append(f"| CVaR (95%)       | {pm.get('cvar_95', 0):.2%} |")
+            lines.append(f"| Max Drawdown     | {pm.get('max_drawdown', 0):.1%} |")
+            lines.append("")
+
+        # ── Per-Ticker Statistical Significance ──────────────────────────────
+        diagnostics = po.get("diagnostics", [])
+        has_stats = any(
+            d.get("metrics", {}).get("t_stat") is not None for d in diagnostics
+        )
+        if has_stats:
+            lines += ["### Statistical Significance (per Ticker)", ""]
+            lines.append("_t-stat uses Lo (2002) autocorrelation correction. "
+                          "Bootstrap CI is 90% block-bootstrap (block=20 days). "
+                          "p-val < 0.05 = statistically significant at 95% confidence._")
+            lines.append("")
+            lines.append("| Ticker | Sharpe | t-stat | p-value | Bootstrap 90% CI | Significant? |")
+            lines.append("|--------|--------|--------|---------|------------------|--------------|")
+            for d in diagnostics:
+                m      = d.get("metrics", {})
+                ticker = d.get("ticker", "?")
+                sharpe = m.get("sharpe", 0)
+                t_stat = m.get("t_stat", 0)
+                p_val  = m.get("p_value", 1)
+                bs_p5  = m.get("bootstrap_sharpe_p5", 0)
+                bs_p95 = m.get("bootstrap_sharpe_p95", 0)
+                sig    = "✅" if p_val < 0.05 else ("⚠️" if p_val < 0.10 else "❌")
+                lines.append(
+                    f"| {ticker} | {sharpe:.3f} | {t_stat:.2f} | {p_val:.3f} | "
+                    f"[{bs_p5:.2f}, {bs_p95:.2f}] | {sig} |"
+                )
+            lines.append("")
 
         return "\n".join(lines)
 

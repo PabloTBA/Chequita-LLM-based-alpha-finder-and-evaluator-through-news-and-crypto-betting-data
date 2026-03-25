@@ -109,6 +109,19 @@ _SECTOR_MAP: dict[str, str] = {
 
 _MAX_PER_SECTOR = 2  # hard cap on tickers per sector in the shortlist
 
+# Tickers that are economic duplicates of a preferred ticker.
+# If the preferred ticker is present, the alias is always dropped.
+_TICKER_ALIASES: dict[str, str] = {
+    "GOOG": "GOOGL",   # GOOG class-C and GOOGL class-A are >0.99 correlated — keep GOOGL
+}
+
+
+def _deduplicate_aliases(tickers: list[str]) -> list[str]:
+    """Drop any ticker whose preferred alias is already in the list."""
+    ticker_set = set(tickers)
+    return [t for t in tickers
+            if not (_TICKER_ALIASES.get(t) in ticker_set)]
+
 
 def _enforce_sector_diversity(tickers: list[str], max_per_sector: int = _MAX_PER_SECTOR) -> list[str]:
     """
@@ -324,6 +337,7 @@ class PipelineOrchestrator:
         )
         shortlisted = shortlisted or tickers
         shortlisted = _enforce_sector_diversity(shortlisted)
+        shortlisted = _deduplicate_aliases(shortlisted)
         max_tickers = self._cfg.get("max_tickers", 15)
         shortlisted = shortlisted[:max_tickers]
 
@@ -578,6 +592,17 @@ class PipelineOrchestrator:
 
         spy_ohlcv = (ohlcv_raw or {}).get("SPY")
 
+        # ── Stage 11b: portfolio optimisation ────────────────────────────────
+        print("[Stage 11b] Running portfolio optimisation ...")
+        portfolio_result = self._safe(
+            "portfolio_optimizer.optimize",
+            lambda: m["portfolio_optimizer"].optimize(
+                backtests, diagnostics, ohlcv_shortlisted or {}
+            ),
+            {"cs_momentum_ranks": [], "allocations": [], "rejected": [],
+             "portfolio_metrics": {}, "portfolio_returns": None},
+        )
+
         return self._finish(
             m, run_date, summary, macro,
             ticker_verdicts=ticker_verdicts or [],
@@ -591,6 +616,7 @@ class PipelineOrchestrator:
             correlation_warnings=correlation_warnings,
             features=features,
             meta_insights=meta_insights,
+            portfolio_result=portfolio_result,
         )
 
     # ── internal helpers ──────────────────────────────────────────────────────
@@ -779,6 +805,7 @@ class PipelineOrchestrator:
         from report_generator            import ReportGenerator
         from execution_advisor           import ExecutionAdvisor
         from rag_store                   import RAGStore
+        from portfolio_optimizer         import PortfolioOptimizer
         rag = RAGStore(persist_dir=cfg.get("chroma_dir", "data/chroma"))
         return {
             "collector":     Stage1DataCollector(
@@ -808,7 +835,10 @@ class PipelineOrchestrator:
             "execution_advisor": ExecutionAdvisor(
                                 initial_portfolio=cfg.get("initial_portfolio", 100_000.0)
                              ),
-            "rag_store":     rag,
+            "rag_store":           rag,
+            "portfolio_optimizer": PortfolioOptimizer(
+                                initial_portfolio=cfg.get("initial_portfolio", 100_000.0)
+                             ),
         }
 
 
