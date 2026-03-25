@@ -1,0 +1,48 @@
+# MFT Alpha Finder & Evaluator — Python dependencies
+# Install with: pip install -r requirements.txt
+#
+# NOTE: PyTorch (torch) install depends on your hardware.
+# See the separate torch install command at the bottom of this file.
+
+# ── Core data / math ─────────────────────────────────────────────────────────
+numpy>=1.26
+pandas>=2.0
+scipy>=1.11
+
+# ── Market data ───────────────────────────────────────────────────────────────
+yfinance>=0.2.36
+
+# ── LLM / AI ──────────────────────────────────────────────────────────────────
+ollama>=0.2.0
+
+# ── Vector store (RAG) ────────────────────────────────────────────────────────
+chromadb>=0.5.0
+
+# ── Web / API ─────────────────────────────────────────────────────────────────
+requests>=2.31
+fastapi>=0.111
+uvicorn>=0.29
+pydantic>=2.0
+
+# ── Visualisation ─────────────────────────────────────────────────────────────
+matplotlib>=3.8
+
+# ── Environment / config ──────────────────────────────────────────────────────
+python-dotenv>=1.0
+
+# ── Testing ───────────────────────────────────────────────────────────────────
+pytest>=8.0
+
+# ── PyTorch ───────────────────────────────────────────────────────────────────
+# Install separately depending on your hardware:
+#
+#   CPU only:
+#     pip install torch --index-url https://download.pytorch.org/whl/cpu
+#
+#   NVIDIA GPU (CUDA 12.1):
+#     pip install torch --index-url https://download.pytorch.org/whl/cu121
+#
+#   AMD GPU (ROCm):
+#     pip install torch --index-url https://download.pytorch.org/whl/rocm6.0
+#
+# torch>=2.2
