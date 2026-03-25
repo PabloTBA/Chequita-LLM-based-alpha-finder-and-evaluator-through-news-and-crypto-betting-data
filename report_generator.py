@@ -29,6 +29,42 @@ class ReportGenerator:
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
 
+    @staticmethod
+    def _strip_table_pipes(md: str) -> str:
+        """Convert markdown pipe tables to pipe-free aligned plain-text rows."""
+        lines = md.split("\n")
+        out = []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            # Detect a markdown table block: line starts with '|'
+            if line.lstrip().startswith("|"):
+                # Collect all consecutive table lines
+                block = []
+                while i < len(lines) and lines[i].lstrip().startswith("|"):
+                    block.append(lines[i])
+                    i += 1
+                # Parse each row into cells, skip separator rows (---|--- pattern)
+                rows = []
+                for row in block:
+                    cells = [c.strip() for c in row.strip().strip("|").split("|")]
+                    if all(set(c.replace("-", "").replace(":", "").replace(" ", "")) == set() for c in cells):
+                        continue  # separator row
+                    rows.append(cells)
+                if not rows:
+                    continue
+                # Normalise column count
+                ncols = max(len(r) for r in rows)
+                rows = [r + [""] * (ncols - len(r)) for r in rows]
+                # Compute column widths
+                widths = [max(len(r[c]) for r in rows) for c in range(ncols)]
+                for row in rows:
+                    out.append("  ".join(cell.ljust(widths[ci]) for ci, cell in enumerate(row)).rstrip())
+            else:
+                out.append(line)
+                i += 1
+        return "\n".join(out)
+
     def generate(self, pipeline_output: dict, timestamp: str | None = None) -> str:  # noqa: ARG002
         """
         Build and write the Markdown report.
@@ -64,7 +100,7 @@ class ReportGenerator:
         ]
 
         with open(filepath, "w", encoding="utf-8") as f:
-            f.write("\n\n".join(sections))
+            f.write(self._strip_table_pipes("\n\n".join(sections)))
 
         print(f"  [Report] Full report    → {filepath}")
         return filepath
@@ -131,7 +167,7 @@ class ReportGenerator:
         sections.append(self._summary_macro(macro, summary))
 
         with open(filepath, "w", encoding="utf-8") as f:
-            f.write("\n\n".join(sections))
+            f.write(self._strip_table_pipes("\n\n".join(sections)))
 
         print(f"  [Report] Trader summary → {filepath}")
         return filepath
@@ -159,7 +195,7 @@ class ReportGenerator:
 
     @staticmethod
     def _summary_action(qualified, strat_map, run_date) -> str:
-        lines = ["## ⚡ Today's Action", ""]
+        lines = ["## Today's Action", ""]
         active_any = False
         for ticker in qualified:
             s   = strat_map.get(ticker, {})
@@ -168,7 +204,7 @@ class ReportGenerator:
                 active_any = True
                 setup = sig.get("setup", {})
                 lines += [
-                    f"### ✅ {ticker} — ENTER NOW ({s.get('strategy', '')})",
+                    f"### {ticker} — ENTER NOW ({s.get('strategy', '')})",
                     "",
                     f"- **Order:** Market order at next session open (~${setup.get('entry_price', 0):,.2f})",
                     f"- **Stop loss:** ${setup.get('stop_price', 0):,.2f} "
@@ -221,7 +257,7 @@ class ReportGenerator:
                         (spy_window.iloc[-1] - spy_window.iloc[0]) / spy_window.iloc[0]
                     )
                     alpha = net_ret - spy_period_ret
-                    flag  = "alpha ✅" if alpha >= 0 else "underperform ❌"
+                    flag  = "outperform" if alpha >= 0 else "underperform"
                     spy_str = (
                         f" | SPY (same period): {spy_period_ret:+.2%}"
                         f" | Alpha: {alpha:+.2%} ({flag})"
@@ -240,7 +276,7 @@ class ReportGenerator:
         if sig.get("signal_active") is True:
             setup = sig.get("setup", {})
             lines += [
-                "**Status: ✅ ACTIVE — enter at next session open**",
+                "**Status: ACTIVE — enter at next session open**",
                 "",
                 "| Field | Value |",
                 "|-------|-------|",
@@ -264,7 +300,7 @@ class ReportGenerator:
             if sig.get("bb_breakout") is False:       failed.append("close ≤ upper Bollinger Band")
             reason = " + ".join(failed) if failed else "conditions"
             lines += [
-                f"**Status: ⏸ INACTIVE — {reason} not met**",
+                f"**Status: INACTIVE — {reason} not met**",
                 "",
                 f"```",
                 sig.get("details", "N/A"),
@@ -380,7 +416,7 @@ class ReportGenerator:
         ]
         lines += ["| Metric | Value | Floor | Pass |", "|--------|-------|-------|------|"]
         for name, val, floor, ok in floors:
-            lines.append(f"| {name} | {val} | {floor} | {'✅' if ok else '❌'} |")
+            lines.append(f"| {name} | {val} | {floor} | {'PASS' if ok else 'FAIL'} |")
 
         # Multi-split walk-forward detail (60/40, 70/30, 80/20)
         wf_splits = metrics.get("wf_splits", [])
@@ -388,7 +424,7 @@ class ReportGenerator:
         if wf_underpowered:
             lines += [
                 "",
-                "> ⚠️  **Walk-forward underpowered** — fewer than 100 trades; "
+                "> WARNING: **Walk-forward underpowered** — fewer than 100 trades; "
                 "split results are not statistically meaningful and the WF gate was not applied.",
             ]
         elif wf_splits and not returns.empty:
@@ -400,14 +436,14 @@ class ReportGenerator:
             for sp in wf_splits:
                 is_p  = int(sp["is_pct"] * 100)
                 oos_p = 100 - is_p
-                tick  = "✅" if sp.get("passed") else "❌"
+                tick  = "PASS" if sp.get("passed") else "FAIL"
                 lines.append(
                     f"| {is_p}/{oos_p} | {sp['is_sharpe']:.3f} | "
                     f"{sp['oos_sharpe']:.3f} | {sp['degradation']:.1%} | {tick} |"
                 )
             n_pass = sum(1 for sp in wf_splits if sp.get("passed"))
             lines.append(f"")
-            lines.append(f"**{n_pass}/3 splits passed** ({'✅ robust' if n_pass >= 2 else '❌ fragile — likely IS overfit'})")
+            lines.append(f"**{n_pass}/3 splits passed** ({'robust' if n_pass >= 2 else 'fragile — likely IS overfit'})")
 
         # ── 6. Backtest performance ────────────────────────────────────────────
         slip_bps = bt.get("slippage_bps", 10.0)
@@ -428,7 +464,7 @@ class ReportGenerator:
         param_div = s.get("param_divergence_warnings", [])
         if param_div:
             lines += [
-                "> ⚠️  **Parameter divergence detected** — live signal uses different "
+                "> WARNING: **Parameter divergence detected** — live signal uses different "
                 "parameters than the validated backtest:",
                 "",
             ]
@@ -681,7 +717,7 @@ class ReportGenerator:
             if hyp and not hyp.get("agree", True) and hyp.get("suggested"):
                 blocks += [
                     "",
-                    f"> 🔬 **LLM Alpha Hypothesis:** Disagrees with regime-rule selection. "
+                    f"> **LLM Alpha Hypothesis:** Disagrees with regime-rule selection. "
                     f"Suggests **{hyp['suggested']}** instead."
                     + (f" Reason: _{hyp['reason']}_" if hyp.get("reason") else ""),
                 ]
@@ -689,7 +725,7 @@ class ReportGenerator:
             # Current signal status
             blocks += ["", "#### Current Entry Signal (as of run date)", ""]
             if sig.get("signal_active") is True:
-                blocks.append("**Status: ✅ ACTIVE — entry condition met on latest bar**")
+                blocks.append("**Status: ACTIVE — entry condition met on latest bar**")
             elif sig.get("signal_active") is False:
                 # Show exactly which condition(s) failed — handles all three strategy types
                 failed = []
@@ -708,7 +744,7 @@ class ReportGenerator:
                 if sig.get("bb_breakout") is False:
                     failed.append("close ≤ upper Bollinger Band")
                 reason = " + ".join(failed) if failed else "entry condition"
-                blocks.append(f"**Status: ⏸ INACTIVE — {reason} not met**")
+                blocks.append(f"**Status: INACTIVE — {reason} not met**")
             else:
                 blocks.append("**Status: N/A**")
             if sig.get("details"):
@@ -721,7 +757,7 @@ class ReportGenerator:
             if setup and not ticker_passed:
                 blocks += [
                     "",
-                    "> ⛔ **Trade setup suppressed — this ticker FAILED diagnostic floors.**  ",
+                    "> NOTE: **Trade setup suppressed — this ticker FAILED diagnostic floors.**  ",
                     "> The entry signal fired but the backtest has no demonstrated edge. Do not trade.",
                 ]
             elif setup and ticker_passed:
@@ -766,7 +802,7 @@ class ReportGenerator:
         for d in diagnostics:
             ticker  = d["ticker"]
             passed  = d.get("passed", False)
-            status  = "✅ PASS" if passed else "❌ FAIL"
+            status  = "PASS" if passed else "FAIL"
             reject  = d.get("reject_reason") or "—"
             metrics = d.get("metrics", {})
             bt      = backtests.get(ticker, {})
@@ -813,7 +849,7 @@ class ReportGenerator:
                 "| Metric | Value | Interpretation |",
                 "|--------|-------|----------------|",
                 f"| Permutation p-value (Calmar) | {metrics.get('permutation_p_value', float('nan')):.3f} | < 0.10 = temporal structure present |" if not math.isnan(metrics.get('permutation_p_value', float('nan'))) else "| Permutation p-value (Calmar) | N/A (underpowered) | < 10 trades — test skipped |",
-                f"| Rolling Sharpe (% positive windows) | {metrics.get('rolling_pct_positive', float('nan')):.1%} | {'⚠️ Regime-dependent' if metrics.get('rolling_pct_positive', 1.0) < 0.50 else '✅ Consistent'} |" if not math.isnan(metrics.get('rolling_pct_positive', float('nan'))) else "| Rolling Sharpe (% positive windows) | N/A | Insufficient data |",
+                f"| Rolling Sharpe (% positive windows) | {metrics.get('rolling_pct_positive', float('nan')):.1%} | {'Regime-dependent' if metrics.get('rolling_pct_positive', 1.0) < 0.50 else 'Consistent'} |" if not math.isnan(metrics.get('rolling_pct_positive', float('nan'))) else "| Rolling Sharpe (% positive windows) | N/A | Insufficient data |",
                 f"| Rolling Sharpe Std Dev | {metrics.get('rolling_sharpe_std', float('nan')):.3f} | Lower = more stable |" if not math.isnan(metrics.get('rolling_sharpe_std', float('nan'))) else "| Rolling Sharpe Std Dev | N/A | Insufficient data |",
                 "",
                 "#### Walk-Forward Validation",
@@ -847,7 +883,7 @@ class ReportGenerator:
 
         # Correlation warnings
         if corr_warns:
-            blocks += ["### ⚠️ Concentration Risk Warnings", ""]
+            blocks += ["### Concentration Risk Warnings", ""]
             for w in corr_warns:
                 blocks.append(f"- {w}")
             blocks.append("")
@@ -899,7 +935,7 @@ class ReportGenerator:
             vs_spy = ""
             if spy_exp_adj is not None:
                 diff   = net_ret - spy_exp_adj
-                vs_spy = f"  **vs SPY (exposure-adj): {diff:+.2%}** ({'alpha ✅' if diff >= 0 else 'underperform ❌'})"
+                vs_spy = f"  **vs SPY (exposure-adj): {diff:+.2%}** ({'outperform' if diff >= 0 else 'underperform'})"
             elif spy_bnh is not None:
                 diff   = net_ret - spy_bnh
                 vs_spy = f"  **vs SPY B&H: {diff:+.2%}**"
@@ -1062,8 +1098,8 @@ class ReportGenerator:
             bnh_diff = net_ret - spy_bnh_ret
             ma_diff  = sharpe  - spy_ma_sharpe
 
-            bnh_icon = "✅" if bnh_diff >= 0 else "❌"
-            ma_icon  = "✅" if ma_diff  >= 0 else "❌"
+            bnh_icon = "PASS" if bnh_diff >= 0 else "FAIL"
+            ma_icon  = "PASS" if ma_diff  >= 0 else "FAIL"
 
             lines.append(
                 f"| {t} | {bt['strategy']} | {net_ret:.2%} | {sharpe:.3f}"
@@ -1101,9 +1137,9 @@ class ReportGenerator:
                 ticker = r["ticker"]
                 mom    = r.get("mom_12_1", 0.0)
                 if ticker in alloc_tickers:
-                    status = "✅ Allocated"
+                    status = "Allocated"
                 elif ticker in rej_tickers:
-                    status = "❌ Filtered"
+                    status = "Filtered"
                 else:
                     status = "—"
                 lines.append(f"| {r['rank']} | {ticker} | {mom:+.1%} | {status} |")
@@ -1169,10 +1205,10 @@ class ReportGenerator:
                 p_val  = m.get("p_value", 1)
                 bs_p5  = m.get("bootstrap_sharpe_p5", 0)
                 bs_p95 = m.get("bootstrap_sharpe_p95", 0)
-                sig    = "✅" if p_val < 0.05 else ("⚠️" if p_val < 0.10 else "❌")
+                sig    = "PASS" if p_val < 0.05 else ("WARNING" if p_val < 0.10 else "FAIL")
                 roll_pct = m.get("rolling_pct_positive")
                 perm_p   = m.get("permutation_p_value")
-                roll_str = f"{'✅' if roll_pct >= 0.50 else '⚠️'} {roll_pct:.0%}" if roll_pct is not None and not math.isnan(roll_pct) else "N/A"
+                roll_str = f"{'PASS' if roll_pct >= 0.50 else 'WARNING'} {roll_pct:.0%}" if roll_pct is not None and not math.isnan(roll_pct) else "N/A"
                 perm_str = f"{perm_p:.3f}" if perm_p is not None and not math.isnan(perm_p) else "N/A"
                 lines.append(
                     f"| {ticker} | {sharpe:.3f} | {t_stat:.2f} | {p_val:.3f} | "
@@ -1220,9 +1256,9 @@ class ReportGenerator:
         ]
 
         if warnings:
-            lines += ["### ⚠️ Weak Combinations (historically < 10% pass rate)", ""]
+            lines += ["### Weak Combinations (historically < 10% pass rate)", ""]
             for w in warnings:
-                lines.append(f"> ❌ {w}")
+                lines.append(f"> FAIL {w}")
             lines.append("")
 
         lines += [
@@ -1233,7 +1269,7 @@ class ReportGenerator:
         ]
 
         for key, stats in sorted(insights.items(), key=lambda x: -x[1]["avg_sharpe"]):
-            pr_icon = "✅" if stats["pass_rate"] >= 0.3 else ("⚠️" if stats["pass_rate"] >= 0.1 else "❌")
+            pr_icon = "PASS" if stats["pass_rate"] >= 0.3 else ("WARNING" if stats["pass_rate"] >= 0.1 else "FAIL")
             lines.append(
                 f"| {key} | {stats['n']} | {stats['avg_sharpe']:.3f} | "
                 f"{pr_icon} {stats['pass_rate']:.0%} |"
@@ -1265,10 +1301,10 @@ class ReportGenerator:
         if warnings:
             lines += ["", "**Warnings:**"]
             for w in warnings:
-                lines.append(f"- ⚠️  {w}")
+                lines.append(f"- WARNING: {w}")
 
         def _render_brief(b: dict, active_signal: bool) -> list[str]:
-            status = "✅ ENTER NOW" if active_signal else "⏸ PENDING — conditions not yet met"
+            status = "ENTER NOW" if active_signal else "PENDING — conditions not yet met"
             out = [
                 "",
                 f"### {b['ticker']} — {status}",
@@ -1312,14 +1348,14 @@ class ReportGenerator:
             return out
 
         if active:
-            lines += ["", "### 🚦 Active Signals — Enter at Next Open", ""]
+            lines += ["", "### Active Signals — Enter at Next Open", ""]
             for b in active:
                 lines += _render_brief(b, active_signal=True)
         else:
             lines += ["", "_No active entry signals today._", ""]
 
         if pending:
-            lines += ["", "---", "", "### 👁 Pending Signals — Monitor Daily", ""]
+            lines += ["", "---", "", "### Pending Signals — Monitor Daily", ""]
             lines += [
                 "_These tickers passed all 3 validation stages (backtest → diagnostics → Monte Carlo)_",
                 "_but have not yet triggered their entry signal. The setup below shows what the_",
@@ -1362,7 +1398,7 @@ class ReportGenerator:
                 blocks += [
                     f"### {ticker}",
                     "",
-                    f"⚠️ **Monte Carlo skipped** — only {mc.get('trade_count', '?')} trades in backtest "
+                    f"WARNING: **Monte Carlo skipped** — only {mc.get('trade_count', '?')} trades in backtest "
                     f"(minimum 30 required). Results would be statistically meaningless with this few observations.",
                     "",
                 ]
@@ -1370,7 +1406,7 @@ class ReportGenerator:
 
             trade_count = mc.get("trade_count", 0)
             disclaimer  = (
-                f"\n> ⚠️ **Statistical disclaimer:** This simulation is based on only "
+                f"\n> WARNING: **Statistical disclaimer:** This simulation is based on only "
                 f"**{trade_count} historical trades**. Bootstrap resampling with fewer than 60 trades "
                 f"produces wide, unreliable confidence bands. Treat these figures as directional only."
             ) if trade_count and trade_count < 60 else ""

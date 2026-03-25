@@ -84,7 +84,9 @@
       "Bash(python -c \"import ast; ast.parse\\(open\\(''c:/Users/panal/Downloads/Chequita-LLM-based-alpha-finder-and-evaluator-through-news-and-crypto-betting-data/pipeline_orchestrator.py''\\).read\\(\\)\\); print\\(''pipeline_orchestrator.py: OK''\\)\")",
       "Bash(python test_pipeline.py)",
       "Bash(python -c \"import sys,io; sys.stdout=io.TextIOWrapper\\(sys.stdout.buffer,encoding=''''utf-8''''\\); exec\\(open\\(''''test_pipeline.py''''\\).read\\(\\)\\)\")",
-      "Bash(set PYTHONIOENCODING=utf-8)"
+      "Bash(set PYTHONIOENCODING=utf-8)",
+      "Bash(grep -r \"currency\\\\|forex\\\\|commodity\\\\|futures\\\\|options\" /c/Users/panal/Downloads/Chequita-LLM-based-alpha-finder-and-evaluator-through-news-and-crypto-betting-data --include=*.py --include=*.md)",
+      "Bash(grep -r \"equit\\\\|stock\\\\|share\" /c/Users/panal/Downloads/Chequita-LLM-based-alpha-finder-and-evaluator-through-news-and-crypto-betting-data --include=*.py --include=*.md)"
     ]
   }
 }

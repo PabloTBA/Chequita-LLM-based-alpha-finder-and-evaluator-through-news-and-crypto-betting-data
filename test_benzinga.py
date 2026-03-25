@@ -1,52 +1,46 @@
-# test_benzinga.py
-import os
 import requests
-from dotenv import load_dotenv
+import json
 
-load_dotenv()
+def get_benzinga_news():
+    # Replace with your actual API key
+    api_key = "YOUR_TOKEN_HERE" 
+    
+    # Benzinga News API endpoint
+    url = "https://api.benzinga.com/api/v2/news"
+    
+    # Setup the query parameters
+    params = {
+        "token": api_key,
+        "pageSize": 5,           # Limit the results to 5 articles
+        "displayOutput": "full"  # Get the full data format
+    }
+    
+    # Setup headers as requested by the documentation
+    headers = {
+        "accept": "application/json"
+    }
 
-API_KEY = os.getenv("BENZINGA_API")
-if not API_KEY:
-    print("ERROR: BENZINGA_API not found in .env")
-    exit(1)
+    print("Fetching news from Benzinga...\n")
+    response = requests.get(url, params=params, headers=headers)
 
-BASE_URL = "https://api.benzinga.com/api/v2/news"
-
-# Test 1 — single article fetch (cheapest possible call)
-print("Test 1: Fetching 1 general news article...")
-resp = requests.get(BASE_URL, params={
-    "token":    API_KEY,
-    "pageSize": 1,
-    "channels": "News",
-}, timeout=10)
-print(f"  Status: {resp.status_code}")
-if resp.status_code == 200:
-    data = resp.json()
-    articles = data if isinstance(data, list) else data.get("result", [])
-    if articles:
-        a = articles[0]
-        print(f"  OK — got article: '{a.get('title', 'no title')[:80]}'")
-        print(f"       date: {a.get('created', 'N/A')}")
+    # Check if the request was successful
+    if response.status_code == 200:
+        news_items = response.json()
+        
+        # Iterate through the first 5 articles
+        for index, article in enumerate(news_items[:5], start=1):
+            title = article.get('title', 'No Title')
+            date = article.get('created_at', 'No Date')
+            url = article.get('url', 'No URL')
+            author = article.get('author', 'Unknown Author')
+            
+            print(f"{index}. {title}")
+            print(f"   Author: {author} | Date: {date}")
+            print(f"   Read more: {url}")
+            print("-" * 50)
     else:
-        print("  WARNING: 200 OK but no articles returned")
-else:
-    print(f"  FAIL — response: {resp.text[:300]}")
+        print(f"Failed to fetch data. Status code: {response.status_code}")
+        print("Response:", response.text)
 
-# Test 2 — ticker-specific news
-print("\nTest 2: Fetching AAPL news...")
-resp2 = requests.get(BASE_URL, params={
-    "token":    API_KEY,
-    "pageSize": 3,
-    "tickers":  "AAPL",
-}, timeout=10)
-print(f"  Status: {resp2.status_code}")
-if resp2.status_code == 200:
-    data2 = resp2.json()
-    articles2 = data2 if isinstance(data2, list) else data2.get("result", [])
-    print(f"  OK — {len(articles2)} article(s) returned")
-    for a in articles2:
-        print(f"    - {a.get('title', '')[:70]}")
-else:
-    print(f"  FAIL — response: {resp2.text[:300]}")
-
-print("\nDone.")
+if __name__ == "__main__":
+    get_benzinga_news()
