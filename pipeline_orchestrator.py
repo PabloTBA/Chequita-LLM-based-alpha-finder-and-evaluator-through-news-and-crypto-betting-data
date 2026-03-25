@@ -873,8 +873,6 @@ if __name__ == "__main__":
     parser.add_argument("date",          nargs="?",  default=None,  help="Run date YYYY-MM-DD (default: yesterday UTC+8)")
     parser.add_argument("--days",        type=int,   default=7,     help="News summary window in days (default: 7, max: 14)")
     parser.add_argument("--max-tickers", type=int,   default=15,       help="Max tickers to fully analyse (default: 15)")
-    parser.add_argument("--min-volume",  type=float, default=10_000.0, help="Min prediction market volume in USD (default: 10000)")
-    parser.add_argument("--max-markets", type=int,   default=50,       help="Max prediction markets to store and embed (default: 50)")
     args = parser.parse_args()
 
     def llm(prompt: str) -> str:
@@ -890,8 +888,6 @@ if __name__ == "__main__":
         "initial_portfolio": 100_000.0,
         "window_days":       min(args.days, 14),
         "max_tickers":       args.max_tickers,
-        "market_min_volume":  args.min_volume,
-        "market_max_markets": args.max_markets,
     }
 
     date = args.date
