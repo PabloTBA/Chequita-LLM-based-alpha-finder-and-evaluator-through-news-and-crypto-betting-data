@@ -605,9 +605,21 @@ def test_check_floors_exhaustive() -> None:
     check("floors: Sharpe 0.49 fails", not passed, "")
     check("floors: reject reason mentions Sharpe", "Sharpe" in (reason or ""), reason)
 
-    # Sharpe below floor BUT OOS above → rescue
-    passed, _ = cf(ok(sharpe=0.20, oos_sharpe=0.60))
-    check("floors: OOS Sharpe rescues low IS Sharpe", passed, "OOS rescue failed")
+    # Sharpe below floor — OOS cannot rescue (full-period Sharpe is primary)
+    passed, reason = cf(ok(sharpe=0.20, oos_sharpe=0.60))
+    check("floors: low full-period Sharpe fails even when OOS is strong", not passed,
+          "OOS should NOT rescue a failed full-period Sharpe")
+
+    # Both full-period AND OOS must pass
+    passed, _ = cf(ok(sharpe=0.60, oos_sharpe=0.40))
+    check("floors: passes when both full-period >= 0.5 and OOS >= 0.3", passed, "")
+
+    # OOS below secondary floor (0.30) even when full-period is fine
+    passed, reason = cf(ok(sharpe=0.60, oos_sharpe=0.20))
+    check("floors: fails when OOS < 0.3 even if full-period Sharpe passes", not passed,
+          "OOS secondary floor should reject no-OOS-evidence strategies")
+    check("floors: OOS reject reason mentions OOS",
+          "OOS" in (reason or "") or "out-of-sample" in (reason or "").lower(), reason)
 
     # MaxDD exactly at floor — PASS
     passed, _ = cf(ok(max_drawdown=MAX_DD_FLOOR))

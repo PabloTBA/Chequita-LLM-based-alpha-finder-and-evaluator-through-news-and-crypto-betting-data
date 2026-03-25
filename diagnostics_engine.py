@@ -7,7 +7,8 @@ all floors pass.
 
 Hard floors (checked in order)
 -------------------------------
-  Sharpe ratio              < 0.5   → auto-reject  (OOS rescue: pass if OOS ≥ floor)
+  Sharpe ratio (full-period) < 0.5  → auto-reject  (PRIMARY — no OOS rescue)
+  OOS Sharpe                 < 0.3  → auto-reject  (SECONDARY — must show out-of-sample edge)
   Max drawdown              > 20%   → auto-reject
   Win rate                  < 35%   → auto-reject  (bypass if profit_factor ≥ 1.5)
   Kelly fraction            < 0.0   → auto-reject  (negative expectancy = provably losing)
@@ -123,14 +124,33 @@ class DiagnosticsEngine:
 
     @staticmethod
     def _check_floors(metrics: dict) -> tuple[bool, Optional[str]]:
-        # Use the better of full-period and OOS Sharpe so that a strategy
-        # which degrades in IS but is strong OOS is not wrongly rejected.
+        # ── Sharpe — PRIMARY criterion, no substitution allowed ───────────────
+        # Full-period Sharpe is the single most honest summary of risk-adjusted
+        # return over the entire history.  OOS Sharpe is a SECONDARY check that
+        # must also pass — it cannot rescue a failed full-period Sharpe.
+        #
+        # Previous logic used max(IS, OOS) which let a favorable 3-year OOS
+        # window override a 0.04 full-period Sharpe — effectively passing a
+        # strategy that barely beat cash over 10 years.  That is wrong:
+        #   Full-period Sharpe = primary gate (no rescue)
+        #   OOS Sharpe         = secondary gate (must be >= OOS_SHARPE_FLOOR)
         sharpe     = metrics["sharpe"]
         oos_sharpe = metrics.get("oos_sharpe", sharpe)
-        best_sharpe = max(sharpe, oos_sharpe)
-        if best_sharpe < SHARPE_FLOOR:
-            return False, (f"Sharpe ratio {sharpe:.3f} (OOS {oos_sharpe:.3f}) "
-                           f"both below floor {SHARPE_FLOOR}")
+
+        if sharpe < SHARPE_FLOOR:
+            return False, (f"Sharpe ratio {sharpe:.3f} below floor {SHARPE_FLOOR} "
+                           f"(OOS {oos_sharpe:.3f} cannot rescue a failed full-period Sharpe)")
+
+        # OOS must also show positive edge — prevents IS-only curve-fitting.
+        # Skipped when WF is underpowered (< 100 trades): oos_sharpe is 0.0 by
+        # design in that path (not a real measurement), so applying the floor
+        # would wrongly reject every low-trade-count strategy.
+        OOS_SHARPE_FLOOR = 0.30
+        wf_underpowered  = metrics.get("wf_underpowered", False)
+        if not wf_underpowered and oos_sharpe < OOS_SHARPE_FLOOR:
+            return False, (f"OOS Sharpe {oos_sharpe:.3f} below secondary floor {OOS_SHARPE_FLOOR} "
+                           f"— full-period Sharpe {sharpe:.3f} passes but strategy has no "
+                           f"out-of-sample evidence of edge")
 
         max_dd = metrics["max_drawdown"]
         if max_dd > MAX_DD_FLOOR:
