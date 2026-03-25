@@ -4,6 +4,7 @@ interface SummaryProps {
   onBack: () => void;
 }
 
+//TO BE FIXED
 export const ReportSummary = ({ onBack }: SummaryProps) => {
   return (
     <motion.div 
