@@ -1,0 +1,44 @@
+[
+  {
+    "date": "2026-02-15",
+    "title": "FTC Chairman Writes To Tim Cook, Siri Delay And More: This Week In Appleverse",
+    "url": "https://www.benzinga.com/markets/tech/26/02/50634397/ftc-chairman-writes-to-tim-cook-siri-delay-and-more-this-week-in-appleverse",
+    "publisher": "Mohd Haider",
+    "tickers": "AAPL",
+    "keywords_matched": "",
+    "catalyst_type": "General",
+    "keyword_score": 0,
+    "ticker_score": 1,
+    "publisher_score": 0,
+    "recency_score": 0,
+    "composite_score": 2
+  },
+  {
+    "date": "2026-02-15",
+    "title": "Consumer Tech News (Feb 9-13): AI Energy Push, And Mixed Tech Earnings Dominate Headlines & More",
+    "url": "https://www.benzinga.com/markets/tech/26/02/50634624/consumer-tech-news-feb-9-13-ai-energy-push-and-mixed-tech-earnings-dominate-headlines-more",
+    "publisher": "Lekha Gupta",
+    "tickers": "AAPL, AI, AIIO, AMAT, AMZN, APP, BIDU, CRM, ERIC, F, GOOG, GOOGL, HUBS, INFY, INTC, LYFT, MCD, META, NFLX, NIO, ORCL, QS, RACE, ROKU, SSNLF, TSEM, TSLA, TWLO, UBER, WBD, WRD, XIACF, XIACY, XOM",
+    "keywords_matched": "earnings",
+    "catalyst_type": "Earnings",
+    "keyword_score": 1,
+    "ticker_score": 10,
+    "publisher_score": 0,
+    "recency_score": 0,
+    "composite_score": 23
+  },
+  {
+    "date": "2026-02-15",
+    "title": "Trump Tariffs Backfired, 130,000 Jobs Added In January And More: This Week In Economy",
+    "url": "https://www.benzinga.com/markets/macro-economic-events/26/02/50634313/trump-tariffs-backfired-130000-jobs-added-in-january-and-more-this-week-in-economy",
+    "publisher": "Mohd Haider",
+    "tickers": "GS",
+    "keywords_matched": "tariff, jobs",
+    "catalyst_type": "Macro",
+    "keyword_score": 2,
+    "ticker_score": 1,
+    "publisher_score": 0,
+    "recency_score": 0,
+    "composite_score": 8
+  }
+]

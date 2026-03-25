@@ -1,0 +1,44 @@
+[
+  {
+    "date": "2026-03-22",
+    "title": "Bernie Sanders Warns Jeff Bezos' $100 Billion Robot Push Will 'Replace Working People,' Urges Americans To 'Stand Up And FIGHT BACK'",
+    "url": "https://www.benzinga.com/news/politics/26/03/51396339/bernie-sanders-warns-jeff-bezos-100-billion-robot-push-will-replace-working-people",
+    "publisher": "Snigdha Gairola",
+    "tickers": "AMZN, JPM",
+    "keywords_matched": "war",
+    "catalyst_type": "Macro",
+    "keyword_score": 1,
+    "ticker_score": 2,
+    "publisher_score": 0,
+    "recency_score": 0,
+    "composite_score": 7
+  },
+  {
+    "date": "2026-03-22",
+    "title": "OpenAI Plans To Nearly Double Workforce Amid AI Race With Anthropic, Google",
+    "url": "https://www.benzinga.com/markets/tech/26/03/51396475/openai-to-almost-double-its-workforce",
+    "publisher": "Mohd Haider",
+    "tickers": "AMZN, GOOG, GOOGL, MSFT, NVDA, SFTBY",
+    "keywords_matched": "",
+    "catalyst_type": "General",
+    "keyword_score": 0,
+    "ticker_score": 6,
+    "publisher_score": 0,
+    "recency_score": 0,
+    "composite_score": 12
+  },
+  {
+    "date": "2026-03-22",
+    "title": "Apple's Best-Ever Mac Launch, Google's Gemini On Mac, Amazon's 'Transformer' Project And More: This Week In Appleverse",
+    "url": "https://www.benzinga.com/markets/tech/26/03/51396591/apples-best-ever-mac-launch-googles-gemini-on-mac-amazons-transformer-project-and-more-this-week-in-appleverse",
+    "publisher": "Mohd Haider",
+    "tickers": "AAPL, AMZN, APLY, GOOG, GOOGL",
+    "keywords_matched": "",
+    "catalyst_type": "General",
+    "keyword_score": 0,
+    "ticker_score": 5,
+    "publisher_score": 0,
+    "recency_score": 0,
+    "composite_score": 10
+  }
+]

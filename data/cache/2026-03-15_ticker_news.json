@@ -1,0 +1,72 @@
+[
+  {
+    "date": "2026-03-15",
+    "title": "Gavin Newsom Says Trump's 'Secret Police Are Terrorizing Our Communities,' Cites Disturbing Case Of Abandoned Child",
+    "url": "https://www.benzinga.com/news/politics/26/03/51259125/gavin-newsom-says-trumps-secret-police-are-terrorizing-our-communities-cites-disturbing-case-of-abandoned-child",
+    "publisher": "Snigdha Gairola",
+    "tickers": "CVX",
+    "keywords_matched": "sec",
+    "catalyst_type": "Corporate Event",
+    "keyword_score": 1,
+    "ticker_score": 1,
+    "publisher_score": 0,
+    "recency_score": 0,
+    "composite_score": 5
+  },
+  {
+    "date": "2026-03-15",
+    "title": "China App Store Fee Cut, Musk's Apple Tribute And More: This Week In Appleverse",
+    "url": "https://www.benzinga.com/markets/tech/26/03/51259309/china-app-store-fee-cut-musks-apple-tribute-and-more-this-week-in-appleverse",
+    "publisher": "Mohd Haider",
+    "tickers": "AAPL, IBM",
+    "keywords_matched": "",
+    "catalyst_type": "General",
+    "keyword_score": 0,
+    "ticker_score": 2,
+    "publisher_score": 0,
+    "recency_score": 0,
+    "composite_score": 4
+  },
+  {
+    "date": "2026-03-15",
+    "title": "Consumer Tech News (Mar 9-13): Trump Administration Sues California Over Emissions Targets, Nvidia Announces $26B AI Investment & More",
+    "url": "https://www.benzinga.com/markets/tech/26/03/51259469/consumer-tech-news-mar-9-13-trump-administration-sues-california-over-emissions-targets-nvidia-announces-26b-ai-investment-more",
+    "publisher": "Lekha Gupta",
+    "tickers": "AAPL, ACHR, AMAT, AMD, AMZN, AVGO, BABA, BMBL, CLVT, CRWD, CRWV, DKS, FTEL, GE, GOOG, GOOGL, IBM, JOBY, LCID, META, MRVL, MSFT, MU, NFLX, NOW, NVDA, ORCL, PATH, PLTR, RBRK, RDW, RIVN, ROKU, S, TEAM, TSLA, UBER, WRD",
+    "keywords_matched": "miss",
+    "catalyst_type": "Earnings",
+    "keyword_score": 1,
+    "ticker_score": 10,
+    "publisher_score": 0,
+    "recency_score": 0,
+    "composite_score": 23
+  },
+  {
+    "date": "2026-03-15",
+    "title": "US Oil Companies Poised For $60 Billion Windfall Amid Iran War, Says Energy Research Firm: Report",
+    "url": "https://www.benzinga.com/markets/commodities/26/03/51259673/us-oil-companies-poised-for-60-billion-windfall-amid-iran-war-says-energy-research-firm-report",
+    "publisher": "Rounak Jain",
+    "tickers": "BLK, CVX, XOM",
+    "keywords_matched": "war",
+    "catalyst_type": "Macro",
+    "keyword_score": 1,
+    "ticker_score": 3,
+    "publisher_score": 0,
+    "recency_score": 0,
+    "composite_score": 9
+  },
+  {
+    "date": "2026-03-15",
+    "title": "Oil CEOs Warn of Supply Shock, Morgan Stanley & BlackRock Limit Withdrawals And More: This Week In Economy",
+    "url": "https://www.benzinga.com/markets/macro-economic-events/26/03/51259244/oil-ceos-warn-of-supply-shock-morgan-stanley-blackrock-limit-withdrawals-and-more-this-week-in-economy",
+    "publisher": "Mohd Haider",
+    "tickers": "BLK, GS, MS, USO",
+    "keywords_matched": "ceo, war",
+    "catalyst_type": "Mixed",
+    "keyword_score": 2,
+    "ticker_score": 4,
+    "publisher_score": 0,
+    "recency_score": 0,
+    "composite_score": 14
+  }
+]

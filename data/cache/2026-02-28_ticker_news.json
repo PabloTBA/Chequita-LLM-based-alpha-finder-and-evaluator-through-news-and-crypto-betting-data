@@ -1,0 +1,44 @@
+[
+  {
+    "date": "2026-02-28",
+    "title": "Netflix, Nvidia, AMD And More: 5 Stocks Investors Couldn't Stop Buzzing About This Week",
+    "url": "https://www.benzinga.com/markets/equities/26/02/50951825/netflix-nvidia-amd-and-more-5-stocks-investors-couldnt-stop-buzzing-about-this-week",
+    "publisher": "Rishabh Mishra",
+    "tickers": "AMD, CRM, CSCO, GE, META, NFLX, NVDA, PLTR, PSKY, RXT, WBD",
+    "keywords_matched": "",
+    "catalyst_type": "General",
+    "keyword_score": 0,
+    "ticker_score": 10,
+    "publisher_score": 0,
+    "recency_score": 0,
+    "composite_score": 20
+  },
+  {
+    "date": "2026-02-28",
+    "title": "Berkshire Hathaway Misses Projections As Abel Takes The Helm",
+    "url": "https://www.benzinga.com/markets/earnings/26/02/50951965/berkshire-hathaway-misses-projections-as-abel-takes-the-helm-operating-earnings-down-nearly-25",
+    "publisher": "Bibhu Pattnaik",
+    "tickers": "AAPL, GOOGL, KHC, NYT, SPY, UNH, BRK",
+    "keywords_matched": "miss",
+    "catalyst_type": "Earnings",
+    "keyword_score": 1,
+    "ticker_score": 7,
+    "publisher_score": 0,
+    "recency_score": 0,
+    "composite_score": 17
+  },
+  {
+    "date": "2026-02-28",
+    "title": "Greg Abel as Berkshire Earnings Fall: 'Warren Is Obviously a Very Hard Act To Follow'",
+    "url": "https://www.benzinga.com/markets/equities/26/02/50952147/greg-abel-as-berkshire-earnings-fall-warren-is-obviously-a-very-hard-act-to-follow",
+    "publisher": "Nabaparna Bhattacharya",
+    "tickers": "AAPL, AXP, KO, MCO, BRK",
+    "keywords_matched": "earnings, war",
+    "catalyst_type": "Mixed",
+    "keyword_score": 2,
+    "ticker_score": 5,
+    "publisher_score": 0,
+    "recency_score": 0,
+    "composite_score": 16
+  }
+]

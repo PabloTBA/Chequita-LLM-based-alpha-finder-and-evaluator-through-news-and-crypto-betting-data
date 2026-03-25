@@ -1,0 +1,30 @@
+[
+  {
+    "date": "2026-01-18",
+    "title": "Michael Burry Warns Of AI Bubble, Cites Warren Buffett's Past Retail Misstep",
+    "url": "https://www.benzinga.com/markets/tech/26/01/49984879/michael-burry-warns-of-ai-bubble-cites-warren-buffetts-past-retail-misstep",
+    "publisher": "Rounak Jain",
+    "tickers": "",
+    "keywords_matched": "miss, war",
+    "catalyst_type": "Mixed",
+    "keyword_score": 2,
+    "ticker_score": 0,
+    "publisher_score": 0,
+    "recency_score": 0,
+    "composite_score": 6
+  },
+  {
+    "date": "2026-01-18",
+    "title": "Trump's Tariff Victory, Dimon's Future Plans And More: This Week In Economy",
+    "url": "https://www.benzinga.com/markets/macro-economic-events/26/01/49985028/trumps-tariff-victory-dimons-future-plans-and-more-this-week-in-economy",
+    "publisher": "Mohd Haider",
+    "tickers": "",
+    "keywords_matched": "tariff",
+    "catalyst_type": "Macro",
+    "keyword_score": 1,
+    "ticker_score": 0,
+    "publisher_score": 0,
+    "recency_score": 0,
+    "composite_score": 3
+  }
+]

@@ -1,0 +1,72 @@
+[
+  {
+    "date": "2026-02-01",
+    "title": "Q1 Earnings, Focus On Premium iPhone, Steve Jobs' Signature And More: This Week In Appleverse",
+    "url": "https://www.benzinga.com/markets/tech/26/02/50288537/q1-earnings-focus-on-premium-iphone-steve-jobs-signature-and-more-this-week-in-appleverse",
+    "publisher": "Mohd Haider",
+    "tickers": "AAPL, GOOG, GOOGL",
+    "keywords_matched": "jobs, earnings",
+    "catalyst_type": "Mixed",
+    "keyword_score": 2,
+    "ticker_score": 3,
+    "publisher_score": 0,
+    "recency_score": 0,
+    "composite_score": 12
+  },
+  {
+    "date": "2026-02-01",
+    "title": "Consumer Tech News (Jan 26-30): Meta Faces Lawsuits Over Youth Addiction Claims, IMF Warns AI Could Eliminate Millions Of Jobs & More",
+    "url": "https://www.benzinga.com/markets/tech/26/02/50288634/consumer-tech-news-jan-26-30-meta-faces-lawsuits-over-youth-addiction-claims-imf-warns-ai-could-eliminate-millions-of-jobs-more",
+    "publisher": "Lekha Gupta",
+    "tickers": "AAPL, AGYS, AMZN, BABA, CRWD, CVLT, GIB, GOOG, GOOGL, INTC, IONQ, META, MSFT, MU, NVDA, PINS, SFTBY, SKYT, SNDK, SSNLF, STM, STX, TCEHY, TSLA, TXN",
+    "keywords_matched": "jobs, war, lawsuit",
+    "catalyst_type": "Mixed",
+    "keyword_score": 3,
+    "ticker_score": 10,
+    "publisher_score": 0,
+    "recency_score": 0,
+    "composite_score": 29
+  },
+  {
+    "date": "2026-02-01",
+    "title": "UnitedHealth, Trade Desk, And Unity Are Among Top 10 Large Cap Losers Last Week (Jan. 26-Jan. 30): Are the Others in Your Portfolio?",
+    "url": "https://www.benzinga.com/markets/equities/26/02/50289169/unitedhealth-trade-desk-and-unity-are-among-top-10-large-cap-losers-last-week-jan-26-jan-30-are-the-others-in-your-portfolio",
+    "publisher": "Nabaparna Bhattacharya",
+    "tickers": "AG, AXON, CDE, HL, HUM, ICE, RDDT, RGC, TTD, U, UNH",
+    "keywords_matched": "",
+    "catalyst_type": "General",
+    "keyword_score": 0,
+    "ticker_score": 10,
+    "publisher_score": 0,
+    "recency_score": 0,
+    "composite_score": 20
+  },
+  {
+    "date": "2026-02-01",
+    "title": "Trump's Fed Chair Pick Kevin Warsh Is the 'Right Choice,' Says IBM's Gary Cohn — Elizabeth Warren Warns President Is Installing 'Puppets'",
+    "url": "https://www.benzinga.com/news/politics/26/02/50289891/trumps-fed-chair-pick-kevin-warsh-is-the-right-choice-says-ibms-gary-cohn-elizabeth-warren-warns-president-is-installing-puppets",
+    "publisher": "Ananya Gairola",
+    "tickers": "IBM, MSTR",
+    "keywords_matched": "fed, war",
+    "catalyst_type": "Macro",
+    "keyword_score": 2,
+    "ticker_score": 2,
+    "publisher_score": 0,
+    "recency_score": 0,
+    "composite_score": 10
+  },
+  {
+    "date": "2026-02-01",
+    "title": "Oracle Plans Up To $50 Billion Capital Raise To Supercharge AI Cloud Buildout As Nvidia, OpenAI, Meta Drive Explosive Demand",
+    "url": "https://www.benzinga.com/markets/tech/26/02/50290020/oracle-plans-up-to-50-billion-capital-raise-to-supercharge-ai-cloud-buildout-as-nvidia-openai-meta-drive-explosive-demand",
+    "publisher": "Ananya Gairola",
+    "tickers": "AMD, C, GS, META, NVDA, ORCL",
+    "keywords_matched": "",
+    "catalyst_type": "General",
+    "keyword_score": 0,
+    "ticker_score": 6,
+    "publisher_score": 0,
+    "recency_score": 0,
+    "composite_score": 12
+  }
+]
