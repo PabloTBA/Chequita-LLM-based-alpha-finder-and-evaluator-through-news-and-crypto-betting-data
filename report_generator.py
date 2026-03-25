@@ -510,9 +510,12 @@ class ReportGenerator:
         watches = [v["ticker"] for v in vds if v.get("verdict") == "watch"]
         avoids  = [v["ticker"] for v in vds if v.get("verdict") == "avoid"]
 
-        # Portfolio-level risk from active signals
+        # Portfolio-level risk from active signals — only tickers that PASSED diagnostics
         strategies   = po.get("strategies", [])
-        active_sigs  = [s for s in strategies if s.get("current_signal", {}).get("signal_active")]
+        diag_passed  = {d["ticker"] for d in po.get("diagnostics", []) if d.get("passed", False)}
+        active_sigs  = [s for s in strategies
+                        if s.get("current_signal", {}).get("signal_active")
+                        and s["ticker"] in diag_passed]
         n_active     = len(active_sigs)
         total_risk   = sum(
             s["current_signal"]["setup"].get("dollar_risk", 0.0)
@@ -637,7 +640,8 @@ class ReportGenerator:
 
     @staticmethod
     def _strategy_section(po: dict) -> str:
-        strategies = po.get("strategies", [])
+        strategies  = po.get("strategies", [])
+        diag_passed = {d["ticker"] for d in po.get("diagnostics", []) if d.get("passed", False)}
         blocks = ["## Strategy Parameters", ""]
         for s in strategies:
             params = s.get("adjusted_params", {})
@@ -703,9 +707,18 @@ class ReportGenerator:
                 blocks.append("**Status: N/A**")
             if sig.get("details"):
                 blocks.append(f"```\n{sig['details']}\n```")
-            # Trade setup — only shown when signal is active
+            # Trade setup — only shown when signal is active AND diagnostics passed.
+            # A signal may fire on a failed strategy (backtest has no edge); showing
+            # the setup in that case would invite a trader to enter a losing strategy.
             setup = sig.get("setup")
-            if setup:
+            ticker_passed = s["ticker"] in diag_passed
+            if setup and not ticker_passed:
+                blocks += [
+                    "",
+                    "> ⛔ **Trade setup suppressed — this ticker FAILED diagnostic floors.**  ",
+                    "> The entry signal fired but the backtest has no demonstrated edge. Do not trade.",
+                ]
+            elif setup and ticker_passed:
                 blocks += [
                     "",
                     "#### Trade Setup",
@@ -1575,11 +1588,13 @@ def _advanced_metrics(returns: pd.Series, trade_log: list[dict], metrics: dict) 
         cagr     = float((1 + returns).prod() ** (TRADING_DAYS / max(len(returns), 1)) - 1)
         max_dd   = metrics.get("max_drawdown", 0.0)
 
-        # Sortino (downside deviation) — capped at 10.0 to prevent artifacts from near-zero downside std
+        # Sortino (downside deviation) — uses same RF hurdle as Sharpe (4.5% annual)
+        # so both ratios are directly comparable.  Capped at 10.0 to prevent artifacts.
+        _daily_rf = 0.045 / TRADING_DAYS
         downside = returns[returns < 0]
         down_std = float(downside.std(ddof=1)) if len(downside) > 1 else 0.0
-        sortino  = float(mean_ret / down_std * math.sqrt(TRADING_DAYS)) if down_std > 1e-4 else 0.0
-        sortino  = min(sortino, 10.0)
+        sortino  = float((mean_ret - _daily_rf) / down_std * math.sqrt(TRADING_DAYS)) if down_std > 1e-4 else 0.0
+        sortino  = min(max(sortino, -10.0), 10.0)
 
         # Calmar
         calmar = float(cagr / max_dd) if max_dd > 0 else 0.0

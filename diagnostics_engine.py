@@ -181,13 +181,28 @@ class DiagnosticsEngine:
 
     def _get_llm_commentary(self, ticker: str, strategy: str, metrics: dict) -> str:
         print(f"  [LLM] DiagnosticsEngine: commentary for {ticker} ({strategy})...")
+        wf_splits   = metrics.get("wf_splits", [])
+        # Pick the 70/30 split for the report (most commonly cited)
+        wf_70 = next((s for s in wf_splits if abs(s.get("is_pct", 0) - 0.70) < 0.01), {})
+        is_sharpe  = wf_70.get("is_sharpe",  metrics.get("sharpe", 0.0))
+        oos_sharpe = wf_70.get("oos_sharpe", metrics.get("oos_sharpe", 0.0))
+        wf_note = (
+            f"IS Sharpe={is_sharpe:.3f}, OOS Sharpe={oos_sharpe:.3f} "
+            f"({'OOS better than IS — strategy improved out-of-sample' if oos_sharpe > is_sharpe else 'OOS worse than IS — some degradation' if oos_sharpe < is_sharpe * 0.5 else 'IS and OOS broadly consistent'})"
+        )
         prompt = (
             f"You are a quantitative strategist reviewing a strategy that passed all diagnostic floors.\n"
             f"Ticker: {ticker}\n"
             f"Strategy: {strategy}\n"
-            f"Sharpe={metrics['sharpe']:.2f}, MaxDD={metrics['max_drawdown']:.1%}, "
-            f"WinRate={metrics['win_rate']:.1%}, "
+            f"Full-period Sharpe={metrics['sharpe']:.3f}, MaxDD={metrics['max_drawdown']:.1%}, "
+            f"WinRate={metrics['win_rate']:.1%}, ProfitFactor={metrics.get('profit_factor', 0):.2f}\n"
+            f"Walk-forward (70/30 split): {wf_note}\n"
             f"WalkFwdDegradation={metrics['walk_forward_degradation']:.1%}\n\n"
+            f"Rules:\n"
+            f"- If OOS Sharpe > IS Sharpe, state this explicitly — it means the strategy is NOT overfitted.\n"
+            f"- If IS Sharpe is negative but OOS Sharpe is positive, say 'in-sample underperformed but out-of-sample recovered'.\n"
+            f"- Do NOT call performance 'consistent' unless IS and OOS Sharpe are within 0.2 of each other.\n"
+            f"- Be specific about numbers. Do not give generic praise.\n\n"
             f"Provide 2-3 sentences of qualitative commentary on strengths and weaknesses."
         )
         result = self.llm_client(prompt)
