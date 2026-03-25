@@ -12,13 +12,24 @@ Public interface
 
 Features returned by compute_features
 --------------------------------------
-    return_20d      — 20-day price return
-    rsi_14          — RSI(14) using Wilder smoothing
-    atr_14          — ATR(14) using Wilder smoothing
-    atr_pct         — ATR(14) / last close price
-    52w_high_prox   — last close / 52-week high  (1.0 = at the high)
-    52w_low_prox    — last close / 52-week low   (>1.0 = above the low)
-    volume_ratio_30d— last volume / 30-day average volume
+    return_20d       — 20-day price return
+    rsi_14           — RSI(14) using Wilder smoothing
+    atr_14           — ATR(14) using Wilder smoothing
+    atr_pct          — ATR(14) / last close price
+    52w_high_prox    — last close / 52-week high  (1.0 = at the high)
+    52w_low_prox     — last close / 52-week low   (>1.0 = above the low)
+    volume_ratio_30d — last volume / 30-day average volume
+    pead_signal_recent — most recent post-earnings drift signal (see add_earnings_drift_features)
+
+Columns added by add_earnings_drift_features
+---------------------------------------------
+    earnings_gap  — at each earnings date: close[t+1]/close[t-1]-1; NaN otherwise.
+                    Positive = price gapped up (beat); negative = miss.
+    pead_signal   — sign(gap) × |gap|/0.10, clipped to [-1, +1]; filled forward
+                    for up to 60 trading days after each earnings date so the
+                    alpha engine can combine it as a persistent drift signal.
+    pead_drift_5d — realized 5-day return starting the day after earnings
+                    (research label; not available forward-looking in live mode).
 """
 
 from __future__ import annotations
@@ -90,6 +101,77 @@ class OHLCVFetcher:
             pass
         return df
 
+    def add_earnings_drift_features(
+        self, ticker: str, df: pd.DataFrame, pead_fill_days: int = 60
+    ) -> pd.DataFrame:
+        """
+        Add post-earnings drift columns to the OHLCV dataframe.
+
+        Columns added
+        -------------
+        earnings_gap  : float (NaN off earnings dates)
+            close[t+1] / close[t-1] - 1 at each earnings announcement date.
+            Positive = price gapped up after earnings (beat expectations).
+            Negative = price gapped down (miss).  Uses the actual next-day open
+            proxy (close[t+1]) so the signal is only available after the event.
+
+        pead_signal   : float in [-1, +1], filled forward up to pead_fill_days
+            sign(gap) × |gap|/0.10 clipped to [-1, +1].
+            Filled forward for up to `pead_fill_days` trading days after each
+            earnings date so alpha_engine can use it as a persistent drift signal.
+            Based on Rendleman et al. (1982): post-earnings drift continues ~60 days.
+
+        pead_drift_5d : float (NaN off earnings dates)
+            Realized 5-day cumulative return starting the day after earnings.
+            Research label — useful for measuring PEAD magnitude historically
+            but NOT available forward-looking (only use for diagnostics).
+        """
+        df = df.copy()
+        close = df["Close"].astype(float)
+
+        df["earnings_gap"]  = float("nan")
+        df["pead_signal"]   = float("nan")
+        df["pead_drift_5d"] = float("nan")
+
+        try:
+            ed = yf.Ticker(ticker).earnings_dates
+            if ed is None or ed.empty:
+                return df
+
+            for edate in ed.index:
+                edate_ts = pd.Timestamp(edate).normalize().tz_localize(None)
+                pos = df.index.searchsorted(edate_ts)
+                if pos <= 0 or pos >= len(df) - 1:
+                    continue
+
+                # earnings_gap: next close / prev close - 1
+                gap = float(close.iloc[pos + 1] / close.iloc[pos - 1] - 1)
+                df.at[df.index[pos], "earnings_gap"] = gap
+
+                # pead_signal at announcement date
+                raw_signal = float(np.sign(gap) * min(abs(gap), 0.10) / 0.10)
+                df.at[df.index[pos], "pead_signal"] = raw_signal
+
+                # pead_drift_5d: realized 5-day return starting day after earnings
+                end_pos = min(pos + 6, len(df) - 1)
+                if end_pos > pos + 1:
+                    drift_5d = float(
+                        close.iloc[end_pos] / close.iloc[pos + 1] - 1
+                    )
+                    df.at[df.index[pos], "pead_drift_5d"] = drift_5d
+
+        except Exception:
+            pass
+
+        # Fill pead_signal forward for up to pead_fill_days after each earnings date
+        df["pead_signal"] = df["pead_signal"].ffill(limit=pead_fill_days)
+
+        count = int(df["earnings_gap"].notna().sum())
+        if count > 0:
+            print(f"  [PEAD] {ticker}: {count} earnings events; pead_signal filled forward {pead_fill_days}d")
+
+        return df
+
     def compute_features(self, df: pd.DataFrame) -> dict[str, float]:
         """
         Compute summary features from a raw OHLCV DataFrame.
@@ -99,11 +181,14 @@ class OHLCVFetcher:
         df : pd.DataFrame
             Must have columns: Open, High, Low, Close, Volume.
             Must have at least 30 rows.
+            If 'pead_signal' column is present (from add_earnings_drift_features),
+            pead_signal_recent is included in the output.
 
         Returns
         -------
         dict with keys: return_20d, rsi_14, atr_14, atr_pct,
-                        52w_high_prox, 52w_low_prox, volume_ratio_30d
+                        52w_high_prox, 52w_low_prox, volume_ratio_30d,
+                        adv_20d, pead_signal_recent
         """
         if len(df) < _MIN_ROWS:
             raise ValueError(
@@ -115,7 +200,7 @@ class OHLCVFetcher:
         low    = df["Low"].astype(float).values
         volume = df["Volume"].astype(float).values
 
-        return {
+        feats = {
             "return_20d":       float(self._return_20d(close)),
             "rsi_14":           float(self._rsi(close, period=14)),
             "atr_14":           float(self._atr(high, low, close, period=14)),
@@ -125,6 +210,15 @@ class OHLCVFetcher:
             "volume_ratio_30d": float(self._volume_ratio(volume, window=30)),
             "adv_20d":          float(self._adv_shares(volume, window=20)),
         }
+
+        # Include most-recent PEAD signal if the column is present
+        if "pead_signal" in df.columns:
+            pead_series = df["pead_signal"].dropna()
+            feats["pead_signal_recent"] = float(pead_series.iloc[-1]) if len(pead_series) > 0 else 0.0
+        else:
+            feats["pead_signal_recent"] = 0.0
+
+        return feats
 
     # ── private feature calculators ───────────────────────────────────────────
 

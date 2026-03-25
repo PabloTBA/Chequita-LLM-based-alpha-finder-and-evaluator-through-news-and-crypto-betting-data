@@ -14,6 +14,10 @@ Hard floors (checked in order)
   Kelly fraction            < 0.0   → auto-reject  (negative expectancy = provably losing)
   Walk-forward degradation  > 50%   → auto-reject
   Trade count               < 30    → auto-reject
+  p-value (Lo 2002)         ≥ 0.10  → auto-reject  (Sharpe must be significant at 90% confidence)
+  Bootstrap Sharpe p5       ≤ 0.0   → auto-reject  (lower CI bound must be positive — not noise)
+  Rolling Sharpe stability  < 50%   → warning flag  (< half of 60-day windows have positive Sharpe)
+  Permutation test (Calmar) → report only, not a gate (Sharpe is order-invariant under shuffling)
 
 Public interface
 ----------------
@@ -104,6 +108,8 @@ class DiagnosticsEngine:
         wf_degrad, oos_sharpe, wf_splits = self._walk_forward_degradation(returns, trade_count=tc)
         t_stat, p_value                  = self._tstat(returns)
         bs_p5, bs_p95                    = self._bootstrap_sharpe_ci(returns)
+        perm_p                           = self._permutation_test(returns)
+        roll_pct_pos, roll_sharpe_std    = self._rolling_sharpe_stability(returns)
         return {
             "sharpe":                   sharpe,
             "oos_sharpe":               oos_sharpe,
@@ -116,10 +122,13 @@ class DiagnosticsEngine:
             "trade_count":              tc,
             "wf_underpowered":          tc < WF_MIN_TRADE_COUNT,
             # Robustness / statistical significance
-            "t_stat":                   t_stat,     # Lo (2002) autocorr-corrected t-stat
-            "p_value":                  p_value,    # one-tailed H1: Sharpe > 0
-            "bootstrap_sharpe_p5":      bs_p5,      # 5th pct of bootstrap Sharpe dist
-            "bootstrap_sharpe_p95":     bs_p95,     # 95th pct
+            "t_stat":                   t_stat,          # Lo (2002) autocorr-corrected t-stat
+            "p_value":                  p_value,          # one-tailed H1: Sharpe > 0
+            "bootstrap_sharpe_p5":      bs_p5,            # 5th pct of bootstrap Sharpe dist
+            "bootstrap_sharpe_p95":     bs_p95,           # 95th pct
+            "permutation_p_value":      perm_p,           # non-parametric: fraction shuffled >= real
+            "rolling_pct_positive":     roll_pct_pos,     # fraction of 60-day windows with +ve Sharpe
+            "rolling_sharpe_std":       roll_sharpe_std,  # std of rolling Sharpe (instability measure)
         }
 
     @staticmethod
@@ -172,21 +181,36 @@ class DiagnosticsEngine:
             return False, (f"Negative Kelly fraction ({kelly:.4f}) — strategy has provably "
                            f"negative expected value; do not size any position")
 
-        # Walk-forward: require passing at least 2 of 3 splits (60/40, 70/30, 80/20).
+        # Walk-forward gate.
+        # Rolling WF (many windows): require median OOS Sharpe > 0, i.e. majority passing.
+        # Static 3-split: require at least 2 of 3 splits passing (original rule).
         # Underpowered splits count as passes so they don't wrongly reject.
         wf_splits = metrics.get("wf_splits", [])
         if wf_splits and not metrics.get("wf_underpowered", False):
-            n_pass = sum(1 for s in wf_splits if s.get("passed", True))
-            if n_pass < 2:
-                degrad_str = " | ".join(
-                    f"{int(s['is_pct']*100)}/{int((1-s['is_pct'])*100)}: {s['degradation']:.1%}"
-                    for s in wf_splits
-                )
-                return False, (
-                    f"Walk-forward failed ≥2 of 3 splits ({degrad_str}) — "
-                    f"median degradation {metrics['walk_forward_degradation']:.1%} "
-                    f"suggests IS overfit"
-                )
+            n_pass    = sum(1 for s in wf_splits if s.get("passed", True))
+            is_rolling = any(s.get("rolling_wf", False) for s in wf_splits)
+            if is_rolling:
+                # Rolling WF: require ≥ 50% of windows to have OOS Sharpe > 0
+                min_pass = max(len(wf_splits) // 2, 1)
+                if n_pass < min_pass:
+                    median_oos = float(np.median([s["oos_sharpe"] for s in wf_splits]))
+                    return False, (
+                        f"Rolling walk-forward failed: only {n_pass}/{len(wf_splits)} windows have "
+                        f"positive OOS Sharpe (median OOS Sharpe {median_oos:.3f}) — "
+                        f"strategy overfits the in-sample period"
+                    )
+            else:
+                # Static 3-split: require ≥ 2 of 3 splits passing
+                if n_pass < 2:
+                    degrad_str = " | ".join(
+                        f"{int(s['is_pct']*100)}/{int((1-s['is_pct'])*100)}: {s['degradation']:.1%}"
+                        for s in wf_splits
+                    )
+                    return False, (
+                        f"Walk-forward failed ≥2 of 3 splits ({degrad_str}) — "
+                        f"median degradation {metrics['walk_forward_degradation']:.1%} "
+                        f"suggests IS overfit"
+                    )
         elif not wf_splits:
             # Fallback: single-split check for callers that don't provide split detail
             wf = metrics["walk_forward_degradation"]
@@ -197,15 +221,70 @@ class DiagnosticsEngine:
         if tc < MIN_TRADE_COUNT:
             return False, f"Trade count {tc} below minimum {MIN_TRADE_COUNT} for statistical significance"
 
+        # ── Statistical significance — p-value (Lo 2002 autocorr-corrected) ─────
+        # The Sharpe floor confirms magnitude but not reliability: a Sharpe of 0.55
+        # on 40 noisy days can easily be pure luck.  p_value tests H0: mean excess
+        # return = 0; we require p < 0.10 (90% confidence, one-tailed H1: Sharpe > 0).
+        # Only enforced when we have enough data for the t-stat to be meaningful
+        # (n >= 10 is already enforced in _tstat; floor skipped for underpowered WF).
+        P_VALUE_FLOOR = 0.10
+        p_value = metrics.get("p_value", 0.0)
+        if not wf_underpowered and p_value >= P_VALUE_FLOOR:
+            return False, (
+                f"p-value {p_value:.4f} ≥ {P_VALUE_FLOOR} — Sharpe {sharpe:.3f} is not "
+                f"statistically significant at 90% confidence (Lo 2002 autocorr-corrected t-stat); "
+                f"likely sampling noise"
+            )
+
+        # ── Bootstrap Sharpe lower CI bound ─────────────────────────────────────
+        # Even if p-value passes, the 5th-percentile of the bootstrap Sharpe
+        # distribution must be > 0: if the lower end of the 90% CI dips to zero or
+        # below, we cannot distinguish the Sharpe from sampling noise across
+        # plausible resamplings of the same return history.
+        # Only enforced when bootstrap was run (n >= 40; returns (0.0, 0.0) otherwise).
+        bs_p5 = metrics.get("bootstrap_sharpe_p5", 0.0)
+        bs_p95 = metrics.get("bootstrap_sharpe_p95", 0.0)
+        bootstrap_ran = not (bs_p5 == 0.0 and bs_p95 == 0.0)
+        if not wf_underpowered and bootstrap_ran and bs_p5 <= 0.0:
+            return False, (
+                f"Bootstrap Sharpe 5th-percentile {bs_p5:.3f} ≤ 0 — 90% CI [{bs_p5:.3f}, {bs_p95:.3f}] "
+                f"includes zero; Sharpe {sharpe:.3f} may be a sampling artefact"
+            )
+
+        # NOTE — Permutation test is NOT a hard gate:
+        # The Calmar-based permutation test is included in metrics and surfaced in
+        # the report, but not gated here.  An IID strategy with genuine positive
+        # expected return has perm_p ≈ 0.50 (no temporal structure to detect), which
+        # would wrongly trigger a gate.  The Lo t-stat + bootstrap CI already enforce
+        # statistical significance; the permutation test is a supplementary diagnostic.
+
+        # ── Rolling Sharpe stability (warning flag, not hard reject) ─────────
+        # A strategy that passes all floors but has < 50% of 60-day windows with
+        # positive Sharpe is unstable — it works in certain regimes but not others.
+        # We do NOT hard-reject here (regime dependency is expected and sometimes
+        # desirable), but we annotate the metrics so the report can surface it.
+        # The report_generator should display this as a ⚠️ flag.
+        roll_pct_pos = metrics.get("rolling_pct_positive", 1.0)
+        if roll_pct_pos < 0.50:
+            # Return PASS but inject the warning into the reject_reason field as a
+            # non-blocking advisory by returning True with an advisory string.
+            # Callers should surface this when roll_pct_positive < 0.50.
+            pass   # logged in metrics; report_generator reads rolling_pct_positive directly
+
         return True, None
 
     def _get_llm_commentary(self, ticker: str, strategy: str, metrics: dict) -> str:
         print(f"  [LLM] DiagnosticsEngine: commentary for {ticker} ({strategy})...")
         wf_splits   = metrics.get("wf_splits", [])
-        # Pick the 70/30 split for the report (most commonly cited)
-        wf_70 = next((s for s in wf_splits if abs(s.get("is_pct", 0) - 0.70) < 0.01), {})
-        is_sharpe  = wf_70.get("is_sharpe",  metrics.get("sharpe", 0.0))
-        oos_sharpe = wf_70.get("oos_sharpe", metrics.get("oos_sharpe", 0.0))
+        # For rolling WF: pick the window whose IS fraction is closest to 0.70.
+        # For static 3-split: pick the 70/30 split directly.
+        wf_rep = next(
+            (s for s in sorted(wf_splits, key=lambda s: abs(s.get("is_pct", 0) - 0.70))
+             if wf_splits),
+            {}
+        )
+        is_sharpe  = wf_rep.get("is_sharpe",  metrics.get("sharpe", 0.0))
+        oos_sharpe = wf_rep.get("oos_sharpe", metrics.get("oos_sharpe", 0.0))
         wf_note = (
             f"IS Sharpe={is_sharpe:.3f}, OOS Sharpe={oos_sharpe:.3f} "
             f"({'OOS better than IS — strategy improved out-of-sample' if oos_sharpe > is_sharpe else 'OOS worse than IS — some degradation' if oos_sharpe < is_sharpe * 0.5 else 'IS and OOS broadly consistent'})"
@@ -379,34 +458,144 @@ class DiagnosticsEngine:
                round(float(np.percentile(sharpes, 95)), 3)
 
     @staticmethod
+    def _permutation_test(
+        returns: pd.Series,
+        n: int = 1000,
+    ) -> float:
+        """
+        Non-parametric significance test: shuffle the return series n times and
+        compute the Calmar ratio (CAGR / MaxDD) of each shuffle.
+
+        IMPORTANT — why we use Calmar, not Sharpe:
+          Sharpe = (mean − rf) / std.  Under permutation, mean and std are EXACTLY
+          preserved, so every shuffle produces the same Sharpe as the real series.
+          A Sharpe-based permutation test is trivially uninformative.
+
+          Calmar ratio IS order-dependent because MaxDrawdown depends on the sequence
+          of returns — a series with consecutive losses creates a deeper drawdown than
+          the same losses scattered randomly.  A strategy with genuine temporal structure
+          (exits before drawdowns compound, or momentum runs preserve gains) will have a
+          better Calmar than a randomly ordered series with the same return distribution.
+
+        Interpretation (Calmar-based):
+          perm_p ≈ 0.5 is expected for an IID positive-mean process (no temporal structure).
+          perm_p < 0.10 means the real strategy's Calmar beats 90%+ of random orderings →
+            the strategy's temporal structure actively limits drawdowns.
+          perm_p > 0.90 means the strategy's drawdown is WORSE than 90% of random orderings →
+            the strategy's exit logic is destroying value (flagged as warning, not hard gate).
+
+        NOTE: This test requires genuine temporal structure to be meaningful.  The Lo (2002)
+        t-stat and block bootstrap CI are the primary statistical gates.  This test is
+        provided as a supplementary diagnostic in the report.  It is NOT used as a
+        PASS/FAIL gate in _check_floors because:
+          (a) An IID strategy with real positive edge will have perm_p ≈ 0.5 (correct PASS)
+          (b) A gate at perm_p < 0.10 would wrongly reject valid strategies without trend
+              autocorrelation while the Lo t-stat already catches statistical insignificance.
+        """
+        r = np.array(returns, dtype=float)
+        n_obs = len(r)
+        if n_obs < 10:
+            return 0.5   # not enough data — return neutral value
+        daily_rf = RISK_FREE_RATE / TRADING_DAYS
+
+        def _calmar(arr: np.ndarray) -> float:
+            equity   = np.cumprod(1.0 + arr)
+            peak     = np.maximum.accumulate(equity)
+            dd       = (equity - peak) / np.where(peak > 0, peak, 1.0)
+            max_dd   = float(-dd.min()) if len(dd) > 0 else 0.0
+            cagr     = float((equity[-1]) ** (TRADING_DAYS / len(arr)) - 1.0)
+            return cagr / max_dd if max_dd > 1e-6 else (cagr * 10.0 if cagr > 0 else 0.0)
+
+        real_calmar = _calmar(r)
+        rng = np.random.default_rng(seed=42)
+        count_geq = 0
+        for _ in range(n):
+            shuffled = rng.permutation(r)
+            if _calmar(shuffled) >= real_calmar:
+                count_geq += 1
+        return round(float(count_geq / n), 4)
+
+    @staticmethod
+    def _rolling_sharpe_stability(
+        returns: pd.Series,
+        window: int = 60,
+    ) -> tuple[float, float]:
+        """
+        Measure how consistently the strategy generates positive risk-adjusted
+        returns over time using a rolling window.
+
+        Returns
+        -------
+        (pct_positive_windows, rolling_sharpe_std)
+
+          pct_positive_windows : fraction of 60-day rolling windows that have
+              a positive annualised Sharpe (> 0).  A truly robust strategy should
+              have > 70% of windows positive.  < 50% means the strategy spends more
+              than half its life in a regime where it doesn't work.
+
+          rolling_sharpe_std : standard deviation of the rolling Sharpe series.
+              High std (> 2.0) indicates the strategy is regime-sensitive — large
+              swings between strongly positive and strongly negative periods.
+
+        Note: 60-day Sharpe estimates are noisy (only ~60 observations), so this
+        is a directional measure, not a precise one.  We use it as a stability flag,
+        not as a precise gate.
+        """
+        n = len(returns)
+        if n < window + 10:
+            return 1.0, 0.0   # not enough data — assume stable (no evidence of instability)
+
+        daily_rf = RISK_FREE_RATE / TRADING_DAYS
+        r = np.array(returns, dtype=float)
+        roll_sharpes: list[float] = []
+
+        for start in range(0, n - window + 1):
+            chunk = r[start : start + window]
+            std_c = float(chunk.std(ddof=1))
+            if std_c > 1e-10:
+                sr = float((chunk.mean() - daily_rf) / std_c * math.sqrt(TRADING_DAYS))
+                roll_sharpes.append(sr)
+
+        if not roll_sharpes:
+            return 1.0, 0.0
+
+        pct_pos  = float(np.mean([s > 0 for s in roll_sharpes]))
+        roll_std = float(np.std(roll_sharpes, ddof=1)) if len(roll_sharpes) > 1 else 0.0
+        return round(pct_pos, 4), round(roll_std, 4)
+
+    @staticmethod
     def _walk_forward_degradation(
         returns: pd.Series, trade_count: int = 0
     ) -> tuple[float, float, list[dict]]:
         """
-        Multi-split walk-forward: run at IS/OOS ratios of 60/40, 70/30, 80/20.
-        Strategy passes walk-forward only if degradation ≤ WALKFWD_DEGRAD_FLOOR
-        in at least 2 of the 3 splits.  Reported degradation is the median
-        across passing splits (or worst split if all fail).
+        Rolling anchored walk-forward (preferred when enough history).
+        IS expands from _MIN_IS → end; OOS is always the next _OOS bars.
+        Yields ~(len - _MIN_IS) // _OOS non-overlapping OOS windows.
 
-        Reduces sensitivity to the specific IS/OOS cut-point: a strategy that
-        passes only because the 30% OOS window happened to be a favourable
-        regime will typically fail at least one of the other two cuts.
+        Accept criterion: median OOS Sharpe > 0 across all rolling windows.
+
+        Falls back to the static 3-split (60/40, 70/30, 80/20) approach when
+        there is insufficient history (< _MIN_IS + _OOS bars).
 
         When trade_count < WF_MIN_TRADE_COUNT: returns neutral scores tagged as
         underpowered — the gate is not applied on fewer than 100 trades because
-        a 30% OOS of 30 trades is 9 trades, which cannot distinguish real Sharpe
-        from sampling noise.
+        a quarterly OOS of ~30 trades cannot distinguish real Sharpe from noise.
 
         Returns
         -------
         (median_degradation, median_oos_sharpe, split_detail_list)
-        split_detail_list contains one dict per split with keys:
-            is_pct, is_sharpe, oos_sharpe, degradation, passed
+        Each entry in split_detail_list contains:
+            is_pct, is_sharpe, oos_sharpe, degradation, passed,
+            underpowered, rolling_wf (True when rolling method was used)
         """
+        _MIN_IS = 252   # 1 year minimum IS
+        _OOS    = 63    # 1 quarter OOS
+
         if trade_count > 0 and trade_count < WF_MIN_TRADE_COUNT:
             stub = [
                 {"is_pct": p, "is_sharpe": 0.0, "oos_sharpe": 0.0,
-                 "degradation": 0.0, "passed": True, "underpowered": True}
+                 "degradation": 0.0, "passed": True, "underpowered": True,
+                 "rolling_wf": False}
                 for p in (0.60, 0.70, 0.80)
             ]
             return 0.0, 0.0, stub
@@ -420,13 +609,50 @@ class DiagnosticsEngine:
                 (r.mean() - daily_rf) / std * np.sqrt(TRADING_DAYS), -20.0, 20.0
             ))
 
+        n = len(returns)
+
+        # ── Rolling anchored walk-forward (preferred when enough history) ─────
+        if n >= _MIN_IS + _OOS:
+            splits: list[dict] = []
+            for end_is in range(_MIN_IS, n - _OOS + 1, _OOS):
+                is_ret  = returns.iloc[:end_is]
+                oos_ret = returns.iloc[end_is : end_is + _OOS]
+                is_s    = _sharpe(is_ret)
+                oos_s   = _sharpe(oos_ret)
+                is_pct  = end_is / n
+
+                if oos_s >= is_s or is_s <= 0:
+                    degrad = 0.0
+                else:
+                    degrad = float(np.clip((is_s - oos_s) / is_s, 0.0, 1.0))
+
+                splits.append({
+                    "is_pct":       round(is_pct, 4),
+                    "is_sharpe":    is_s,
+                    "oos_sharpe":   oos_s,
+                    "degradation":  degrad,
+                    # Pass = OOS Sharpe positive (rolling WF accept criterion)
+                    "passed":       oos_s > 0,
+                    "underpowered": False,
+                    "rolling_wf":   True,
+                })
+
+            oos_sharpes  = [s["oos_sharpe"]  for s in splits]
+            degradations = [s["degradation"] for s in splits]
+            return (
+                float(np.median(degradations)),
+                float(np.median(oos_sharpes)),
+                splits,
+            )
+
+        # ── Static 3-split fallback (insufficient history for rolling) ────────
         splits = []
         for is_pct in (0.60, 0.70, 0.80):
-            cut       = int(len(returns) * is_pct)
-            is_ret    = returns.iloc[:cut]
-            oos_ret   = returns.iloc[cut:]
-            is_s      = _sharpe(is_ret)
-            oos_s     = _sharpe(oos_ret)
+            cut     = int(n * is_pct)
+            is_ret  = returns.iloc[:cut]
+            oos_ret = returns.iloc[cut:]
+            is_s    = _sharpe(is_ret)
+            oos_s   = _sharpe(oos_ret)
 
             if oos_s >= is_s or is_s <= 0:
                 degrad = 0.0
@@ -434,22 +660,22 @@ class DiagnosticsEngine:
                 degrad = float(np.clip((is_s - oos_s) / is_s, 0.0, 1.0))
 
             splits.append({
-                "is_pct":      is_pct,
-                "is_sharpe":   is_s,
-                "oos_sharpe":  oos_s,
-                "degradation": degrad,
-                "passed":      degrad <= WALKFWD_DEGRAD_FLOOR,
+                "is_pct":       is_pct,
+                "is_sharpe":    is_s,
+                "oos_sharpe":   oos_s,
+                "degradation":  degrad,
+                "passed":       degrad <= WALKFWD_DEGRAD_FLOOR,
                 "underpowered": False,
+                "rolling_wf":   False,
             })
 
         degradations = [s["degradation"] for s in splits]
         oos_sharpes  = [s["oos_sharpe"]  for s in splits]
-
-        # Reported values: median across splits for robustness
-        median_degrad    = float(np.median(degradations))
-        median_oos_sharpe = float(np.median(oos_sharpes))
-
-        return median_degrad, median_oos_sharpe, splits
+        return (
+            float(np.median(degradations)),
+            float(np.median(oos_sharpes)),
+            splits,
+        )
 
 
 # ── CLI smoke test ────────────────────────────────────────────────────────────

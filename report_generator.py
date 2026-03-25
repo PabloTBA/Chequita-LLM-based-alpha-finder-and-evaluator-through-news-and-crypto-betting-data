@@ -797,8 +797,18 @@ class ReportGenerator:
                 f"| Entry Efficiency (% reaching +1R) | {bt.get('summary', {}).get('entry_efficiency', 0):.1%} |",
                 f"| Avg Win | {adv['avg_win']:.2f} |",
                 f"| Avg Loss | {adv['avg_loss']:.2f} |",
+                f"| Payoff Ratio (avg_win / avg_loss) | {bt.get('summary', {}).get('payoff_ratio', adv['avg_win'] / max(abs(adv['avg_loss']), 1e-6)):.3f} |",
+                f"| Avg Holding Days | {bt.get('summary', {}).get('avg_holding_days', 0):.1f} |",
                 f"| Profit Factor | {adv['profit_factor']:.3f} |",
                 f"| Max Consecutive Losses | {adv['max_consec_losses']} |",
+                "",
+                "#### Alpha Quality Diagnostics",
+                "",
+                "| Metric | Value | Interpretation |",
+                "|--------|-------|----------------|",
+                f"| Permutation p-value (Calmar) | {metrics.get('permutation_p_value', float('nan')):.3f} | < 0.10 = temporal structure present |" if not math.isnan(metrics.get('permutation_p_value', float('nan'))) else "| Permutation p-value (Calmar) | N/A (underpowered) | < 10 trades — test skipped |",
+                f"| Rolling Sharpe (% positive windows) | {metrics.get('rolling_pct_positive', float('nan')):.1%} | {'⚠️ Regime-dependent' if metrics.get('rolling_pct_positive', 1.0) < 0.50 else '✅ Consistent'} |" if not math.isnan(metrics.get('rolling_pct_positive', float('nan'))) else "| Rolling Sharpe (% positive windows) | N/A | Insufficient data |",
+                f"| Rolling Sharpe Std Dev | {metrics.get('rolling_sharpe_std', float('nan')):.3f} | Lower = more stable |" if not math.isnan(metrics.get('rolling_sharpe_std', float('nan'))) else "| Rolling Sharpe Std Dev | N/A | Insufficient data |",
                 "",
                 "#### Walk-Forward Validation",
                 "",
@@ -1139,10 +1149,12 @@ class ReportGenerator:
             lines += ["### Statistical Significance (per Ticker)", ""]
             lines.append("_t-stat uses Lo (2002) autocorrelation correction. "
                           "Bootstrap CI is 90% block-bootstrap (block=20 days). "
-                          "p-val < 0.05 = statistically significant at 95% confidence._")
+                          "p-val < 0.05 = statistically significant at 95% confidence. "
+                          "Rolling stable = % of 60-day windows with positive Sharpe ≥ 50%. "
+                          "Perm p-val = Calmar-based permutation test (lower = more order-dependent return path)._")
             lines.append("")
-            lines.append("| Ticker | Sharpe | t-stat | p-value | Bootstrap 90% CI | Significant? |")
-            lines.append("|--------|--------|--------|---------|------------------|--------------|")
+            lines.append("| Ticker | Sharpe | t-stat | p-value | Bootstrap 90% CI | Rolling Stable? | Perm p-val | Significant? |")
+            lines.append("|--------|--------|--------|---------|------------------|-----------------|------------|--------------|")
             for d in diagnostics:
                 m      = d.get("metrics", {})
                 ticker = d.get("ticker", "?")
@@ -1152,9 +1164,13 @@ class ReportGenerator:
                 bs_p5  = m.get("bootstrap_sharpe_p5", 0)
                 bs_p95 = m.get("bootstrap_sharpe_p95", 0)
                 sig    = "✅" if p_val < 0.05 else ("⚠️" if p_val < 0.10 else "❌")
+                roll_pct = m.get("rolling_pct_positive")
+                perm_p   = m.get("permutation_p_value")
+                roll_str = f"{'✅' if roll_pct >= 0.50 else '⚠️'} {roll_pct:.0%}" if roll_pct is not None and not math.isnan(roll_pct) else "N/A"
+                perm_str = f"{perm_p:.3f}" if perm_p is not None and not math.isnan(perm_p) else "N/A"
                 lines.append(
                     f"| {ticker} | {sharpe:.3f} | {t_stat:.2f} | {p_val:.3f} | "
-                    f"[{bs_p5:.2f}, {bs_p95:.2f}] | {sig} |"
+                    f"[{bs_p5:.2f}, {bs_p95:.2f}] | {roll_str} | {perm_str} | {sig} |"
                 )
             lines.append("")
 

@@ -987,24 +987,55 @@ class Backtester:
     @staticmethod
     def _summarize(trade_log: list[dict], equity_curve: pd.Series) -> dict:
         if not trade_log:
-            return {"total_return": 0.0, "trade_count": 0, "win_rate": 0.0,
-                    "total_slippage_cost": 0.0, "gross_return": 0.0, "entry_efficiency": 0.0}
-        initial           = equity_curve.iloc[0]
-        final             = equity_curve.iloc[-1]
-        total_return      = (final - initial) / initial if initial != 0 else 0.0
-        wins              = sum(1 for t in trade_log if t["pnl"] > 0)
-        total_slip        = sum(t.get("slippage_cost", 0.0) for t in trade_log)
-        gross_pnl_total   = sum(t.get("gross_pnl", t["pnl"]) for t in trade_log)
-        gross_return      = gross_pnl_total / initial if initial != 0 else 0.0
-        reached_count     = sum(1 for t in trade_log if t.get("reached_1r", False))
-        entry_efficiency  = reached_count / len(trade_log)
+            return {
+                "total_return": 0.0, "trade_count": 0, "win_rate": 0.0,
+                "total_slippage_cost": 0.0, "gross_return": 0.0,
+                "entry_efficiency": 0.0, "avg_win": 0.0, "avg_loss": 0.0,
+                "payoff_ratio": 0.0, "exit_reason_breakdown": {},
+                "avg_holding_days": 0.0,
+            }
+        initial   = equity_curve.iloc[0]
+        final     = equity_curve.iloc[-1]
+        total_return    = (final - initial) / initial if initial != 0 else 0.0
+        wins            = [t for t in trade_log if t["pnl"] > 0]
+        losses          = [t for t in trade_log if t["pnl"] < 0]
+        total_slip      = sum(t.get("slippage_cost", 0.0) for t in trade_log)
+        gross_pnl_total = sum(t.get("gross_pnl", t["pnl"]) for t in trade_log)
+        gross_return    = gross_pnl_total / initial if initial != 0 else 0.0
+        reached_count   = sum(1 for t in trade_log if t.get("reached_1r", False))
+
+        # Payoff asymmetry: the core question of whether the strategy has real edge.
+        # avg_win / avg_loss > 1.0 means winners are larger than losers on average.
+        # avg_win ≈ avg_loss with win_rate ~0.55 gives profit_factor ≈ 1.2 —
+        # the "noise trading" signature the quant critique flagged.
+        avg_win  = float(np.mean([t["pnl"] for t in wins]))  if wins   else 0.0
+        avg_loss = float(np.mean([abs(t["pnl"]) for t in losses])) if losses else 0.0
+        payoff_ratio = avg_win / avg_loss if avg_loss > 1e-6 else 0.0
+
+        # Exit reason breakdown: shows *why* the strategy exits.
+        # A healthy strategy has diverse exits; > 60% alpha_reversal means
+        # the signal flips before capturing meaningful profit — enter late, exit early.
+        exit_reasons: dict[str, int] = {}
+        for t in trade_log:
+            reason = t.get("exit_reason", "unknown")
+            exit_reasons[reason] = exit_reasons.get(reason, 0) + 1
+
+        avg_hold = float(np.mean([t.get("holding_days", 0) for t in trade_log]))
+
         return {
-            "total_return":        float(total_return),
-            "gross_return":        float(gross_return),
-            "total_slippage_cost": float(total_slip),
-            "trade_count":         len(trade_log),
-            "win_rate":            wins / len(trade_log),
-            "entry_efficiency":    float(entry_efficiency),
+            "total_return":          float(total_return),
+            "gross_return":          float(gross_return),
+            "total_slippage_cost":   float(total_slip),
+            "trade_count":           len(trade_log),
+            "win_rate":              len(wins) / len(trade_log),
+            "entry_efficiency":      float(reached_count / len(trade_log)),
+            # Payoff asymmetry — the signal quality indicator
+            "avg_win":               round(avg_win,  2),
+            "avg_loss":              round(avg_loss, 2),
+            "payoff_ratio":          round(payoff_ratio, 3),
+            # Exit diagnosis — shows if signal is too short-lived
+            "exit_reason_breakdown": exit_reasons,
+            "avg_holding_days":      round(avg_hold, 1),
         }
 
     # ── indicators ────────────────────────────────────────────────────────────
