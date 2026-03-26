@@ -87,6 +87,9 @@
       "Bash(set PYTHONIOENCODING=utf-8)",
       "Bash(grep -r \"currency\\\\|forex\\\\|commodity\\\\|futures\\\\|options\" /c/Users/panal/Downloads/Chequita-LLM-based-alpha-finder-and-evaluator-through-news-and-crypto-betting-data --include=*.py --include=*.md)",
       "Bash(grep -r \"equit\\\\|stock\\\\|share\" /c/Users/panal/Downloads/Chequita-LLM-based-alpha-finder-and-evaluator-through-news-and-crypto-betting-data --include=*.py --include=*.md)"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\panal\\Downloads\\Chequita-LLM-based-alpha-finder-and-evaluator-through-news-and-crypto-betting-data"
     ]
   }
 }
