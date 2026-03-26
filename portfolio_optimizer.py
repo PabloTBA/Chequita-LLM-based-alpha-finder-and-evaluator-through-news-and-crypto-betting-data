@@ -174,6 +174,9 @@ class PortfolioOptimizer:
             active_returns, np.array(active_weights)
         )
 
+        total = len(allocations) + len(rejected)
+        print(f"[PortfolioOptimizer] {len(allocations)}/{total} tickers passed  "
+              f"({len(rejected)} rejected)")
         print(f"[PortfolioOptimizer] Portfolio Sharpe={port_metrics['sharpe']:.3f}  "
               f"Vol={port_metrics['annual_vol']:.1%}  "
               f"MaxDD={port_metrics['max_drawdown']:.1%}")
