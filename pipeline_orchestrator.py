@@ -917,7 +917,14 @@ if __name__ == "__main__":
     print(f"TraderReport  : {result.get('TraderReport', 'n/a')}")
     print(f"Date    : {result['run_date']}")
     print(f"Bias   : {result['summary'].get('market_bias', 'n/a')}")
+    diag_passed = {d["ticker"] for d in result.get("diagnostics", []) if d.get("passed")}
+    mc_passed   = sum(
+        1 for mc in result.get("monte_carlos", [])
+        if not mc.get("insufficient_sample")
+        and not mc.get("stress_test")
+        and mc["ticker"] in diag_passed
+    )
     print(f"Tickers: {len(result['ticker_verdicts'])} verdicts | "
           f"{len(result['backtests'])} backtests | "
           f"{len(result['diagnostics'])} diagnostics | "
-          f"{len(result['monte_carlos'])} MC sims")
+          f"{len(result['monte_carlos'])} MC sims ({mc_passed} passed)")
