@@ -78,6 +78,7 @@ class RAGStore:
                 uid = str(url)
                 if uid in existing:
                     continue
+                existing.add(uid)  # deduplicate within this batch too
                 ids.append(uid)
                 docs.append(str(row.get("title", "")))
                 metas.append({

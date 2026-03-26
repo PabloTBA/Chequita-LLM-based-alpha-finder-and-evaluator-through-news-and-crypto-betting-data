@@ -1,0 +1,12 @@
+{
+  "NVDA": {
+    "ticker": "NVDA",
+    "entry_date": "2026-03-26",
+    "entry_price": 179.88,
+    "stop_price": 168.97,
+    "atr14": 5.46,
+    "shares": 91,
+    "highest_close": 179.88,
+    "order_id": null
+  }
+}
