@@ -44,6 +44,7 @@ Public interface
 from __future__ import annotations
 
 import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
 import numpy as np
@@ -155,7 +156,7 @@ def _make_lr() -> LogisticRegression:
 def _make_rf() -> RandomForestClassifier:
     return RandomForestClassifier(
         n_estimators=100, max_depth=6, min_samples_leaf=_MIN_LEAF,
-        n_jobs=1, random_state=42,
+        n_jobs=-1, random_state=42,   # use all CPU cores for tree building
     )
 
 def _make_sgd() -> SGDClassifier:
@@ -242,12 +243,16 @@ class MLSignalEngine:
         # ── Model 1: cross-sectional (universe-level, one model for all) ──────
         cs_sigs = self._cs_signal(feat_map, target_map)
 
-        # ── Models 2-4: per-ticker ────────────────────────────────────────────
-        result: dict[str, pd.DataFrame | None] = {}
-        for ticker, df in ohlcv_dict.items():
-            if df is None or df.empty or ticker not in feat_map:
-                result[ticker] = df
-                continue
+        # ── Models 2-4: per-ticker, run in parallel ───────────────────────────
+        # Each ticker's regime/online/ensemble signals are independent so we
+        # dispatch them concurrently.  ThreadPoolExecutor works here because
+        # sklearn/numpy release the GIL during fit/predict.
+        # CS signal (model 1) is already computed above (universe-level).
+        valid_tickers = [t for t, df in ohlcv_dict.items()
+                         if df is not None and not df.empty and t in feat_map]
+
+        def _compute_ticker(ticker: str) -> tuple[str, pd.DataFrame]:
+            df     = ohlcv_dict[ticker]
             feat   = feat_map[ticker]
             target = target_map[ticker]
             try:
@@ -256,7 +261,7 @@ class MLSignalEngine:
                 ens_sig = self._ensemble_signal(feat, target)
                 cs_sig  = cs_sigs.get(ticker)
 
-                parts = [s for s in (cs_sig, reg_sig, onl_sig, ens_sig) if s is not None]
+                parts  = [s for s in (cs_sig, reg_sig, onl_sig, ens_sig) if s is not None]
                 ml_sig = pd.concat(parts, axis=1).mean(axis=1) if parts else pd.Series(np.nan, index=df.index)
 
                 n_valid = int(ml_sig.notna().sum())
@@ -270,7 +275,18 @@ class MLSignalEngine:
                     print(f"  [MLSignal] {ticker}: failed ({exc}), ml_signal=NaN")
                 out = df.copy()
                 out["ml_signal"] = np.nan
-            result[ticker] = out
+            return ticker, out
+
+        result: dict[str, pd.DataFrame | None] = {
+            t: df for t, df in ohlcv_dict.items()
+            if df is None or df.empty or t not in feat_map
+        }
+        n_workers = min(len(valid_tickers), 4)  # cap at 4 to avoid memory pressure
+        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+            futures = {pool.submit(_compute_ticker, t): t for t in valid_tickers}
+            for future in as_completed(futures):
+                ticker, out = future.result()
+                result[ticker] = out
         return result
 
     # ── Model 1: Cross-sectional GBM ─────────────────────────────────────────
