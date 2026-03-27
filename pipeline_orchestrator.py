@@ -394,6 +394,26 @@ class PipelineOrchestrator:
         shortlisted = _enforce_sector_diversity(shortlisted)
         shortlisted = _deduplicate_aliases(shortlisted)
         max_tickers = self._cfg.get("max_tickers", 15)
+
+        # Backfill: if sector cap reduced the list below max_tickers, pull the
+        # next-best candidates from top50 that are not already shortlisted.
+        # Run sector diversity on the combined list so sector counts from the
+        # original shortlist are respected when evaluating candidates.
+        if len(shortlisted) < max_tickers and top50 is not None and not top50.empty:
+            shortlisted_set = set(shortlisted)
+            candidates = [
+                t for t in top50["ticker"].tolist()
+                if t not in shortlisted_set
+            ]
+            combined = _enforce_sector_diversity(
+                _deduplicate_aliases(shortlisted + candidates),
+                max_per_sector=_MAX_PER_SECTOR,
+            )
+            shortlisted = combined[:max_tickers]
+            added = [t for t in shortlisted if t not in shortlisted_set]
+            if added:
+                print(f"  [Backfill] Added {len(added)} ticker(s) from top-50 reserve: {added}")
+
         shortlisted = shortlisted[:max_tickers]
 
         # ── Stage 8: verdicts ─────────────────────────────────────────────────

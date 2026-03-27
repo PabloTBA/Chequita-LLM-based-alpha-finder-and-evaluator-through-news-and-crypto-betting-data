@@ -44,6 +44,11 @@ Macro context:
   Active macro risks: {risks}
   Market bias:        {bias}
 
+Sector diversity rules (MANDATORY):
+  - Include NO MORE THAN 2 tickers from the same GICS sector.
+  - Prefer tickers from favored sectors when scores are similar.
+  - Actively spread selections across different sectors to maximise breadth.
+
 Top-50 tickers by news score:
 {ticker_list}
 
