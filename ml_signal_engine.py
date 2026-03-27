@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from typing import Any, Callable
 
 import numpy as np
@@ -79,6 +80,10 @@ _BASE = [
 _CS   = [f"cs_{c}" for c in _BASE]
 # Regime flags appended for model 2
 _REG  = ["reg_trend", "reg_highvol"]
+
+
+def _ts() -> str:
+    return datetime.now().strftime("%H:%M:%S")
 
 
 # ── Feature helpers ───────────────────────────────────────────────────────────
@@ -171,43 +176,52 @@ def _make_sgd() -> SGDClassifier:
 def _walk_forward(
     X:          pd.DataFrame,
     y:          pd.Series,
-    fit_fn:     Callable[[pd.DataFrame, pd.Series], Any],
-    predict_fn: Callable[[Any, pd.DataFrame], float],
+    fit_fn:     Callable[[np.ndarray, np.ndarray], Any],
+    predict_fn: Callable[[Any, np.ndarray], float],
     min_train:  int = _MIN_TRAIN,
     refit:      int = _REFIT,
 ) -> pd.Series:
     """
     Expanding-window walk-forward: fit on [0 : i-_FORWARD], predict bar i.
     Refits every ``refit`` bars; requires ``min_train`` clean rows to start.
+
+    Uses numpy arrays throughout the hot loop — avoids pandas iloc/notna
+    overhead on every iteration (meaningful for 500-bar × 8-refit loops).
+
+    fit_fn / predict_fn receive plain numpy arrays (no DataFrame wrapping).
     Returns a pd.Series of probabilities (NaN where unavailable).
     """
-    n, sig, model, last = len(X), pd.Series(np.nan, index=X.index, dtype=float), None, -refit
+    idx  = X.index
+    Xarr = X.values.astype(np.float64)
+    yarr = y.values.astype(np.float64)
+    # Precompute per-row NaN mask once — checked O(n) not O(n×features)
+    nan_row = np.isnan(Xarr).any(axis=1)
+    n       = len(Xarr)
+    sig     = np.full(n, np.nan, dtype=np.float64)
+
+    model, last = None, -refit
     for i in range(min_train, n):
         if (i - last) >= refit or model is None:
             end = i - _FORWARD
             if end < min_train:
                 continue
-            Xtr, ytr = X.iloc[:end], y.iloc[:end]
-            ok = Xtr.notna().all(axis=1) & ytr.notna()
+            ok = ~nan_row[:end] & ~np.isnan(yarr[:end])
             if ok.sum() < min_train:
                 continue
             try:
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
-                    model = fit_fn(Xtr.loc[ok], ytr.loc[ok])
+                    model = fit_fn(Xarr[:end][ok], yarr[:end][ok])
                 last = i
             except Exception:
                 pass
-        if model is None:
-            continue
-        row = X.iloc[[i]]
-        if row.isna().any(axis=1).iloc[0]:
+        if model is None or nan_row[i]:
             continue
         try:
-            sig.iloc[i] = predict_fn(model, row)
+            sig[i] = predict_fn(model, Xarr[[i]])
         except Exception:
             pass
-    return sig
+    return pd.Series(sig, index=idx)
 
 
 # ── MLSignalEngine ────────────────────────────────────────────────────────────
@@ -266,13 +280,13 @@ class MLSignalEngine:
 
                 n_valid = int(ml_sig.notna().sum())
                 if self.verbose:
-                    print(f"  [MLSignal] {ticker}: {n_valid}/{len(df)} bars "
+                    print(f"[{_ts()}]  [MLSignal] {ticker}: {n_valid}/{len(df)} bars "
                           f"| CS={cs_sig is not None} Reg=✓ Onl=✓ Ens=✓")
                 out = df.copy()
                 out["ml_signal"] = ml_sig
             except Exception as exc:
                 if self.verbose:
-                    print(f"  [MLSignal] {ticker}: failed ({exc}), ml_signal=NaN")
+                    print(f"[{_ts()}]  [MLSignal] {ticker}: failed ({exc}), ml_signal=NaN")
                 out = df.copy()
                 out["ml_signal"] = np.nan
             return ticker, out
@@ -416,7 +430,7 @@ class MLSignalEngine:
         return _walk_forward(
             X, target,
             fit_fn=lambda Xtr, ytr: _fit(Xtr, ytr, _make_gbm()),
-            predict_fn=lambda m, row: float(m.predict_proba(row.values)[0, 1]),
+            predict_fn=lambda m, row: float(m.predict_proba(row)[0, 1]),
         )
 
     # ── Model 3: Online adaptive SGD ─────────────────────────────────────────
@@ -429,46 +443,48 @@ class MLSignalEngine:
 
         Warm-up: batch fit on the first _MIN_TRAIN - _FORWARD bars.
         Online:  one partial_fit per bar thereafter.
+
+        Uses numpy arrays throughout the hot loop — avoids pandas iloc/isna
+        overhead on every iteration.
         """
-        n   = len(feat)
-        sig = pd.Series(np.nan, index=feat.index, dtype=float)
-        mdl = _make_sgd()
+        idx  = feat.index
+        Xarr = feat[_BASE].values.astype(np.float64)
+        yarr = target.values.astype(np.float64)
+        nan_row = np.isnan(Xarr).any(axis=1)
+        n    = len(Xarr)
+        sig  = np.full(n, np.nan, dtype=np.float64)
+        mdl  = _make_sgd()
 
         # Warm-up batch
-        Xw  = feat.iloc[: _MIN_TRAIN - _FORWARD]
-        yw  = target.iloc[: _MIN_TRAIN - _FORWARD]
-        ok  = Xw.notna().all(axis=1) & yw.notna()
-        if ok.sum() < 32:
-            return sig
+        end_warm = _MIN_TRAIN - _FORWARD
+        ok_warm  = ~nan_row[:end_warm] & ~np.isnan(yarr[:end_warm])
+        if ok_warm.sum() < 32:
+            return pd.Series(sig, index=idx)
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                mdl.fit(Xw.loc[ok].values, yw.loc[ok].values)
+                mdl.fit(Xarr[:end_warm][ok_warm], yarr[:end_warm][ok_warm].astype(int))
         except Exception:
-            return sig
+            return pd.Series(sig, index=idx)
 
         for i in range(_MIN_TRAIN, n):
             # Online update with resolved label (_FORWARD bars ago)
             j = i - _FORWARD
-            xj = feat.iloc[[j]]
-            yj = target.iloc[j]
-            if not xj.isna().any(axis=1).iloc[0] and not pd.isna(yj):
+            if not nan_row[j] and not np.isnan(yarr[j]):
                 try:
                     with warnings.catch_warnings():
                         warnings.simplefilter("ignore")
-                        mdl.partial_fit(xj.values, [int(yj)], classes=[0, 1])
+                        mdl.partial_fit(Xarr[[j]], [int(yarr[j])], classes=[0, 1])
                 except Exception:
                     pass
 
-            row = feat.iloc[[i]]
-            if row.isna().any(axis=1).iloc[0]:
-                continue
-            try:
-                sig.iloc[i] = float(mdl.predict_proba(row.values)[0, 1])
-            except Exception:
-                pass
+            if not nan_row[i]:
+                try:
+                    sig[i] = float(mdl.predict_proba(Xarr[[i]])[0, 1])
+                except Exception:
+                    pass
 
-        return sig
+        return pd.Series(sig, index=idx)
 
     # ── Model 4: Calibrated multi-model ensemble ─────────────────────────────
 
@@ -483,14 +499,15 @@ class MLSignalEngine:
         Averaging diverse model families improves calibration and reduces
         the variance of any single model's predictions.
         """
-        def fit_fn(Xtr: pd.DataFrame, ytr: pd.Series) -> list:
-            fitted = []
-            for factory in (_make_gbm, _make_lr, _make_rf):
-                fitted.append(_fit(Xtr, ytr, factory()))
-            return fitted
+        def fit_fn(Xtr: np.ndarray, ytr: np.ndarray) -> list:
+            # Train GBM, LR, and RF concurrently — each releases the GIL
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                futs = [pool.submit(_fit, Xtr, ytr, factory())
+                        for factory in (_make_gbm, _make_lr, _make_rf)]
+                return [f.result() for f in futs]
 
-        def predict_fn(models: list, row: pd.DataFrame) -> float:
-            probs = [float(m.predict_proba(row.values)[0, 1]) for m in models]
+        def predict_fn(models: list, row: np.ndarray) -> float:
+            probs = [float(m.predict_proba(row)[0, 1]) for m in models]
             return float(np.mean(probs))
 
         return _walk_forward(feat[_BASE], target, fit_fn=fit_fn, predict_fn=predict_fn)
@@ -498,10 +515,13 @@ class MLSignalEngine:
 
 # ── Private helpers ───────────────────────────────────────────────────────────
 
-def _fit(X: pd.DataFrame, y: pd.Series, model: Any) -> Any:
+def _fit(X: Any, y: Any, model: Any) -> Any:
+    """Accepts either numpy arrays or pandas DataFrames/Series."""
+    Xv = X if isinstance(X, np.ndarray) else X.values
+    yv = y if isinstance(y, np.ndarray) else y.values
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        model.fit(X.values, y.values)
+        model.fit(Xv, yv)
     return model
 
 
@@ -510,7 +530,7 @@ def _fit(X: pd.DataFrame, y: pd.Series, model: Any) -> Any:
 if __name__ == "__main__":
     import yfinance as yf
     tickers = ["AAPL", "MSFT", "NVDA"]
-    print(f"Downloading {tickers} ...")
+    print(f"[{_ts()}] Downloading {tickers} ...")
     raw = {t: yf.download(t, period="3y", auto_adjust=True, progress=False) for t in tickers}
     engine = MLSignalEngine(verbose=True)
     out    = engine.compute(raw)

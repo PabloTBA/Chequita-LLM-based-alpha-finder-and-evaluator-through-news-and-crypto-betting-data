@@ -182,6 +182,10 @@ _PARAM_ALTERNATIVES: dict[str, list[dict]] = {
 }
 
 
+def _ts() -> str:
+    """Return current time as HH:MM:SS for progress output."""
+    return datetime.now().strftime("%H:%M:%S")
+
 def _quick_sharpe(returns: pd.Series) -> float:
     """Fast annualised Sharpe estimate (no risk-free rate) for param comparison."""
     std = returns.std(ddof=1)
@@ -239,7 +243,7 @@ class PipelineOrchestrator:
             print("[ERROR] Stage 1: BENZINGA_API is not set — news collection will be empty. "
                   "Set BENZINGA_API in your .env file.")
 
-        print(f"\n[Stage 1] Collecting news {start} → {collect_end} ...")
+        print(f"\n[{_ts()}] [Stage 1] Collecting news {start} → {collect_end} ...")
         articles = self._safe(
             "collector",
             lambda: m["collector"].collect_range(start, collect_end),
@@ -255,10 +259,10 @@ class PipelineOrchestrator:
                   "network access, and cache directory. All downstream stages will "
                   "have no news context.")
         else:
-            print(f"[Stage 1] Collected {total_articles} articles total.")
+            print(f"[{_ts()}] [Stage 1] Collected {total_articles} articles total.")
 
         # ── Stage 1b: RAG insert news ─────────────────────────────────────────
-        print("[Stage 1b] Inserting news into RAG store ...")
+        print(f"[{_ts()}] [Stage 1b] Inserting news into RAG store ...")
         self._safe(
             "rag_store.insert_news",
             lambda: m["rag_store"].insert_news(articles),
@@ -266,7 +270,7 @@ class PipelineOrchestrator:
         )
 
         # ── Stage 2: summarize ────────────────────────────────────────────────
-        print("[Stage 2] Summarizing news ...")
+        print(f"[{_ts()}] [Stage 2] Summarizing news ...")
         summary = self._safe(
             "summarizer",
             lambda: m["summarizer"].summarize(articles, as_of_date=run_date),
@@ -274,7 +278,7 @@ class PipelineOrchestrator:
         )
 
         # ── Stage 3: macro screen ─────────────────────────────────────────────
-        print("[Stage 3] Running macro screen ...")
+        print(f"[{_ts()}] [Stage 3] Running macro screen ...")
         macro = self._safe(
             "macro_screener",
             lambda: m["macro_screener"].screen(summary),
@@ -282,7 +286,7 @@ class PipelineOrchestrator:
         )
 
         # ── Stage 4: prefilter ────────────────────────────────────────────────
-        print("[Stage 4] Prefiltering tickers ...")
+        print(f"[{_ts()}] [Stage 4] Prefiltering tickers ...")
         top50 = self._safe(
             "screener.prefilter",
             lambda: m["screener"].prefilter(articles),
@@ -306,7 +310,7 @@ class PipelineOrchestrator:
         tickers = top50["ticker"].tolist()
 
         # ── Stage 5: fetch OHLCV (tickers + SPY benchmark) ───────────────────
-        print(f"[Stage 5] Fetching OHLCV for {len(tickers)} tickers + SPY benchmark ...")
+        print(f"[{_ts()}] [Stage 5] Fetching OHLCV for {len(tickers)} tickers + SPY benchmark ...")
         all_tickers = list(dict.fromkeys(tickers + ["SPY"]))  # deduplicate, preserve order
         ohlcv_raw = self._safe(
             "fetcher.fetch",
@@ -331,7 +335,7 @@ class PipelineOrchestrator:
                         ohlcv_raw[tb] = None
 
         # ── Stage 5c: earnings blackout dates ────────────────────────────────
-        print(f"[Stage 5c] Fetching earnings blackout dates ...")
+        print(f"[{_ts()}] [Stage 5c] Fetching earnings blackout dates ...")
         for _t in tickers:
             if (ohlcv_raw or {}).get(_t) is not None:
                 ohlcv_raw[_t] = self._safe(
@@ -346,7 +350,7 @@ class PipelineOrchestrator:
         # alpha_signal into each OHLCV DataFrame.  The backtester reads this
         # column when running AlphaCombined strategy — no look-ahead because
         # AlphaEngine uses shift(1) throughout.
-        print("[Stage 5d] Computing cross-sectional alpha signals ...")
+        print(f"[{_ts()}] [Stage 5d] Computing cross-sectional alpha signals ...")
         if ohlcv_raw:
             ohlcv_raw = self._safe(
                 "alpha_engine.compute",
@@ -359,7 +363,7 @@ class PipelineOrchestrator:
         # per ticker and injects ml_signal (P(5d return > 0)) into each OHLCV
         # DataFrame.  Tickers with < 252 bars get ml_signal = NaN and the
         # per-ticker loop below falls back to AlphaCombined for those tickers.
-        print("[Stage 5e] Computing ML signals (walk-forward gradient boosting) ...")
+        print(f"[{_ts()}] [Stage 5e] Computing ML signals (walk-forward gradient boosting) ...")
         if ohlcv_raw:
             ohlcv_raw = self._safe(
                 "ml_signal_engine.compute",
@@ -368,7 +372,7 @@ class PipelineOrchestrator:
             )
 
         # ── Stage 6: compute features ─────────────────────────────────────────
-        print(f"[Stage 6] Computing features ...")
+        print(f"[{_ts()}] [Stage 6] Computing features ...")
         features: dict[str, Any] = {}
         for ticker in tickers:
             df = (ohlcv_raw or {}).get(ticker)
@@ -380,7 +384,7 @@ class PipelineOrchestrator:
                 )
 
         # ── Stage 7: shortlist ────────────────────────────────────────────────
-        print("[Stage 7] Shortlisting tickers ...")
+        print(f"[{_ts()}] [Stage 7] Shortlisting tickers ...")
         shortlisted = self._safe(
             "screener.shortlist",
             lambda: m["screener"].shortlist(top50, macro, features),
@@ -393,7 +397,7 @@ class PipelineOrchestrator:
         shortlisted = shortlisted[:max_tickers]
 
         # ── Stage 8: verdicts ─────────────────────────────────────────────────
-        print(f"[Stage 8] Screening {len(shortlisted)} tickers ...")
+        print(f"[{_ts()}] [Stage 8] Screening {len(shortlisted)} tickers ...")
         ticker_verdicts = self._safe(
             "screener.screen_tickers",
             lambda: m["screener"].screen_tickers(
@@ -406,8 +410,8 @@ class PipelineOrchestrator:
         avoid_set = {v["ticker"] for v in (ticker_verdicts or []) if v.get("verdict", "").lower() == "avoid"}
         actionable = [t for t in shortlisted if t not in avoid_set]
         if avoid_set:
-            print(f"[Stage 9] Skipping {len(avoid_set)} AVOID ticker(s): {', '.join(sorted(avoid_set))}")
-        print(f"[Stage 9] Classifying market regimes for {len(actionable)} ticker(s) ...")
+            print(f"[{_ts()}] [Stage 9] Skipping {len(avoid_set)} AVOID ticker(s): {', '.join(sorted(avoid_set))}")
+        print(f"[{_ts()}] [Stage 9] Classifying market regimes for {len(actionable)} ticker(s) ...")
         ohlcv_shortlisted = {t: (ohlcv_raw or {}).get(t) for t in actionable}
         regimes = self._safe(
             "classifier.classify_all",
@@ -416,7 +420,7 @@ class PipelineOrchestrator:
         )
 
         # ── Stage 10: per-ticker strategy / backtest / diagnostics / MC ─────
-        print(f"[Stage 10] Running per-ticker analysis for {len(regimes or [])} tickers in parallel ...")
+        print(f"[{_ts()}] [Stage 10] Running per-ticker analysis for {len(regimes or [])} tickers in parallel ...")
         strategies:    list[dict] = []
         backtests:     list[dict] = []
         diagnostics:   list[dict] = []
@@ -432,11 +436,11 @@ class PipelineOrchestrator:
             # AVOID gate: skip full analysis if LLM rated this ticker AVOID
             tv = next((v for v in (ticker_verdicts or []) if v["ticker"] == ticker), None)
             if tv and tv.get("verdict", "").lower() == "avoid":
-                print(f"  [Stage 10] {ticker} — skipping strategy/backtest (AVOID verdict)")
+                print(f"[{_ts()}]   [Stage 10] {ticker} — skipping strategy/backtest (AVOID verdict)")
                 return {"ticker": ticker, "strategy": None, "backtest": None,
                         "diagnostic": None, "mc_result": None}
 
-            print(f"  [Stage 10] {ticker} — strategy select / backtest / diagnostics ...")
+            print(f"[{_ts()}]   [Stage 10] {ticker} — strategy select / backtest / diagnostics ...")
 
             strategy = self._safe(
                 f"selector.select({ticker})",
@@ -460,7 +464,7 @@ class PipelineOrchestrator:
                 if no_signal:
                     from strategy_selector import ALPHA_COMBINED_BASE as _AC_BASE
                     import copy as _copy
-                    print(f"  [Fallback] {ticker}: MLSignal → AlphaCombined "
+                    print(f"[{_ts()}]   [Fallback] {ticker}: MLSignal → AlphaCombined "
                           f"(insufficient ML training data)")
                     _ac_params = _copy.deepcopy(_AC_BASE)
                     strategy = {
@@ -543,7 +547,7 @@ class PipelineOrchestrator:
                         if alt_backtest:
                             alt_sharpe = _quick_sharpe(alt_backtest["returns"])
                             if alt_sharpe > current_sharpe:
-                                print(f"  [Stage 10] {ticker} — alt params improved Sharpe {current_sharpe:.3f} → {alt_sharpe:.3f}")
+                                print(f"[{_ts()}]   [Stage 10] {ticker} — alt params improved Sharpe {current_sharpe:.3f} → {alt_sharpe:.3f}")
                                 strategy       = alt_strategy
                                 backtest       = alt_backtest
                                 current_sharpe = alt_sharpe
@@ -570,12 +574,12 @@ class PipelineOrchestrator:
                 if should_run_mc:
                     if trade_count < 30:
                         label = "PASS" if diag_passed else "STRESS"
-                        print(f"  [Stage 10] {ticker} — MC skipped ({label}, only {trade_count} trades, need 30+)")
+                        print(f"[{_ts()}]   [Stage 10] {ticker} — MC skipped ({label}, only {trade_count} trades, need 30+)")
                         mc_result = {"insufficient_sample": True, "trade_count": trade_count,
                                      "stress_test": not diag_passed}
                     else:
                         label = "passed" if diag_passed else f"near-threshold Sharpe={diag_sharpe:.3f}"
-                        print(f"  [Stage 10] {ticker} — running Monte Carlo ({label}, {trade_count} trades) ...")
+                        print(f"[{_ts()}]   [Stage 10] {ticker} — running Monte Carlo ({label}, {trade_count} trades) ...")
                         _ohlcv_yrs = None
                         _odf = (ohlcv_raw or {}).get(ticker)
                         if _odf is not None and not _odf.empty:
@@ -659,7 +663,7 @@ class PipelineOrchestrator:
         ticker_verdicts = reconciled_verdicts
 
         # ── Stage 11: execution brief ─────────────────────────────────────────
-        print("[Stage 11] Building execution brief ...")
+        print(f"[{_ts()}] [Stage 11] Building execution brief ...")
         execution_brief = self._safe(
             "execution_advisor.advise",
             lambda: m["execution_advisor"].advise(strategies),
@@ -671,7 +675,7 @@ class PipelineOrchestrator:
         spy_ohlcv = (ohlcv_raw or {}).get("SPY")
 
         # ── Stage 11b: portfolio optimisation ────────────────────────────────
-        print("[Stage 11b] Running portfolio optimisation ...")
+        print(f"[{_ts()}] [Stage 11b] Running portfolio optimisation ...")
         portfolio_result = self._safe(
             "portfolio_optimizer.optimize",
             lambda: m["portfolio_optimizer"].optimize(
@@ -726,9 +730,9 @@ class PipelineOrchestrator:
         # whether LLM buy/watch/avoid verdicts actually correlate with backtest outcome.
         PipelineOrchestrator._log_verdict_outcomes(run_date, pipeline_output)
 
-        print("[Stage 12] Generating full report ...")
+        print(f"[{_ts()}] [Stage 12] Generating full report ...")
         SummaryReport = m["reporter"].generate(pipeline_output, timestamp=timestamp)
-        print("[Stage 12] Generating trader summary report ...")
+        print(f"[{_ts()}] [Stage 12] Generating trader summary report ...")
         TraderReport  = m["reporter"].generate_summary(pipeline_output, timestamp=timestamp)
         return {
             "SummaryReport": SummaryReport,
