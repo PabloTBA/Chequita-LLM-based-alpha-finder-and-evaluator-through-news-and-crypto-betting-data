@@ -462,10 +462,12 @@ class PipelineOrchestrator:
                     import copy as _copy
                     print(f"  [Fallback] {ticker}: MLSignal → AlphaCombined "
                           f"(insufficient ML training data)")
+                    _ac_params = _copy.deepcopy(_AC_BASE)
                     strategy = {
                         **strategy,
-                        "strategy":       "AlphaCombined",
-                        "adjusted_params": _copy.deepcopy(_AC_BASE),
+                        "strategy":        "AlphaCombined",
+                        "base_params":     _ac_params,
+                        "adjusted_params": _ac_params,
                         "llm_adjustments": strategy.get("llm_adjustments", []) + [
                             "[Auto] MLSignal → AlphaCombined fallback (< 252 bars of history)"
                         ],

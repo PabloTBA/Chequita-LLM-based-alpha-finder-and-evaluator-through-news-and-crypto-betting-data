@@ -1,8 +1,16 @@
 """
 Backtester
 ==========
-Executes Momentum or Mean-Reversion strategy rules on 2-year OHLCV history.
-Returns a trade log, equity curve, daily returns series, and summary stats.
+Executes one of five strategy rules on 2-year OHLCV history and returns a
+trade log, equity curve, daily returns series, and summary stats.
+
+Strategies
+----------
+  Momentum          — N-day high breakout + volume confirmation + 12-1m gate
+  Mean-Reversion    — RSI oversold + below lower Bollinger Band
+  VolatilityBreakout— BB squeeze → expansion breakout + volume confirmation
+  AlphaCombined     — pre-computed cross-sectional multi-factor alpha signal
+  MLSignal          — ensemble ML probability signal (4-model average)
 
 Position sizing (volatility-adjusted)
 --------------------------------------
@@ -24,11 +32,24 @@ Exit priority (Mean-Reversion)
   3. Middle BB        : close ≥ bb_period-day MA
   4. Max holding      : holding_days ≥ max_holding_days
 
+Exit priority (VolatilityBreakout)
+------------------------------------
+  1. Trailing stop    : close < peak  − trailing_stop_atr × ATR
+  2. Hard stop loss   : close < entry − stop_loss_atr × ATR_at_entry
+  3. Max holding      : holding_days ≥ max_holding_days
+
 Exit priority (AlphaCombined)
 ------------------------------
   1. Hard stop loss   : close < entry − stop_loss_atr × ATR_at_entry
   2. Trailing stop    : close < peak  − trailing_stop_atr × ATR
   3. Alpha reversal   : alpha_signal < reversal_threshold  (signal flips negative)
+  4. Max holding      : holding_days ≥ max_holding_days
+
+Exit priority (MLSignal)
+--------------------------
+  1. Hard stop loss   : close < entry − stop_loss_atr × ATR_at_entry
+  2. Trailing stop    : close < peak  − trailing_stop_atr × ATR
+  3. ML reversal      : ml_signal < reversal_threshold  (model loses conviction)
   4. Max holding      : holding_days ≥ max_holding_days
 
 Public interface
