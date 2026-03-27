@@ -101,17 +101,28 @@ ALPHA_COMBINED_BASE: dict = {
     "max_holding_days":   10,
 }
 
+ML_SIGNAL_BASE: dict = {
+    # Gradient-boosting ML probability signal.
+    # ml_threshold: P(5d return > 0) must exceed this to enter (0–1 range).
+    # reversal_threshold: exit when probability drops below this (model lost conviction).
+    "ml_threshold":       0.60,
+    "reversal_threshold": 0.40,
+    "stop_loss_atr":      1.5,
+    "trailing_stop_atr":  2.0,
+    "max_holding_days":   10,
+}
+
 _REGIME_TO_STRATEGY: dict[str, str] = {
     # Directional trend regimes
     "Trending-Up":      "Momentum",            # follow the trend long
     "Trending-Down":    "AlphaCombined",        # multi-signal: idiosyncratic reversion + volume exhaustion
     # Volatility regimes
     "High-Volatility":  "VolatilityBreakout",  # squeeze → expansion alpha
-    "Low-Volatility":   "AlphaCombined",        # cross-sectional MR fires well in quiet markets
+    "Low-Volatility":   "MLSignal",             # quiet markets: ML detects subtle nonlinear patterns
     "Crisis":           "AlphaCombined",        # extreme moves: use alpha signal with tight stops
     # Statistical regimes
     "Mean-Reverting":   "AlphaCombined",        # primary regime for multi-factor MR
-    "Neutral":          "AlphaCombined",        # default: cross-sectional alpha more robust than RSI+BB
+    "Neutral":          "MLSignal",             # no strong structural bias: ML learns from data
     # Exogenous event regime
     "Event-Driven":     "AlphaCombined",        # post-event idiosyncratic drift + volume exhaustion
     # Legacy label — kept for backward compatibility with any cached data
@@ -123,6 +134,7 @@ _STRATEGY_TO_BASE: dict[str, dict] = {
     "Mean-Reversion":     MEAN_REVERSION_BASE,
     "VolatilityBreakout": VOLATILITY_BREAKOUT_BASE,
     "AlphaCombined":      ALPHA_COMBINED_BASE,
+    "MLSignal":           ML_SIGNAL_BASE,
 }
 
 _HYPOTHESIS_PROMPT = """\
@@ -141,6 +153,7 @@ AVAILABLE STRATEGY CLASSES:
 2. Mean-Reversion      — RSI oversold + below lower Bollinger Band. Edge: oscillation in low-Hurst assets.
 3. VolatilityBreakout  — BB squeeze → expansion + ATR surge. Edge: compressed volatility preceding directional move.
 4. AlphaCombined       — Cross-sectional multi-factor signal (CS-MR + residual + vol-spike + momentum). Edge: diversified alpha, higher trade frequency, market-neutral component.
+5. MLSignal            — Gradient-boosting ML probability signal. Edge: learns nonlinear patterns from lagged features in low-structural-bias regimes.
 
 REGIME RULE SELECTED: {regime_rule_strategy}
 
@@ -149,7 +162,7 @@ Do you AGREE or DISAGREE with this selection given the news context and current 
 Respond in EXACTLY this format (one line only):
 VERDICT: AGREE
 or
-VERDICT: DISAGREE | SUGGESTED: [Momentum|Mean-Reversion|VolatilityBreakout|AlphaCombined] | REASON: [one sentence]
+VERDICT: DISAGREE | SUGGESTED: [Momentum|Mean-Reversion|VolatilityBreakout|AlphaCombined|MLSignal] | REASON: [one sentence]
 """
 
 _REASONING_PROMPT = """\
@@ -304,6 +317,43 @@ def _compute_alpha_combined_params(
     return p, rules
 
 
+def _compute_ml_signal_params(
+    atr_pct: float, regime_label: str
+) -> tuple[dict, list[str]]:
+    """Deterministic MLSignal parameter rules. Returns (params, rule_log)."""
+    p = copy.deepcopy(ML_SIGNAL_BASE)
+    rules: list[str] = []
+
+    # Low-Volatility: relax entry threshold — ML signal is more reliable in
+    # quiet, low-noise markets; allow longer hold for slow reversion
+    if regime_label == "Low-Volatility":
+        p["ml_threshold"]     = 0.55
+        p["max_holding_days"] = 15
+        rules.append(
+            "Low-Volatility: ml_threshold=0.55, max_holding_days=15 "
+            "(ML signal more reliable in low-noise environment; slower reversion)"
+        )
+
+    # High ATR: widen stops — larger price swings need more room
+    if atr_pct > 0.03:
+        p["stop_loss_atr"]    += 0.5
+        p["trailing_stop_atr"] += 0.5
+        rules.append(
+            f"High ATR {atr_pct:.2%}: stop_loss_atr={p['stop_loss_atr']}, "
+            f"trailing={p['trailing_stop_atr']} (widen stops in volatile market)"
+        )
+
+    # Very low ATR: extend max hold — slow markets take longer to resolve
+    if atr_pct < 0.015:
+        p["max_holding_days"] = max(p["max_holding_days"], 15)
+        rules.append(
+            f"Low ATR {atr_pct:.2%}: max_holding_days={p['max_holding_days']} "
+            "(slow market — extend hold)"
+        )
+
+    return p, rules
+
+
 class StrategySelector:
     def __init__(self, llm_client: callable, verbose: bool = False):
         self.llm_client = llm_client
@@ -339,6 +389,8 @@ class StrategySelector:
             adjusted_params, rule_log = _compute_volatility_breakout_params(atr_pct, hurst)
         elif strategy == "AlphaCombined":
             adjusted_params, rule_log = _compute_alpha_combined_params(atr_pct, hurst, regime_label)
+        elif strategy == "MLSignal":
+            adjusted_params, rule_log = _compute_ml_signal_params(atr_pct, regime_label)
         else:
             adjusted_params, rule_log = _compute_mean_reversion_params(atr_pct)
 

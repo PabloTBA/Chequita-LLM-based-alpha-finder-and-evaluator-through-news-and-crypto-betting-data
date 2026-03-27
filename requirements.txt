@@ -8,6 +8,8 @@
 numpy>=1.26
 pandas>=2.0
 scipy>=1.11
+scikit-learn>=1.4
+# lightgbm>=4.0   # optional: faster ML signal engine (falls back to scikit-learn)
 
 # ── Market data ───────────────────────────────────────────────────────────────
 yfinance>=0.2.36

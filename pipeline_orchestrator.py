@@ -171,6 +171,14 @@ _PARAM_ALTERNATIVES: dict[str, list[dict]] = {
         {"bb_period": 20, "squeeze_pct": 0.30, "squeeze_lookback": 7,
          "volume_mult": 2.0, "stop_loss_atr": 2.5, "trailing_stop_atr": 3.0, "max_holding_days": 20},
     ],
+    "MLSignal": [
+        # Higher conviction required, wider stops, shorter hold
+        {"ml_threshold": 0.65, "reversal_threshold": 0.45,
+         "stop_loss_atr": 2.0, "trailing_stop_atr": 2.5, "max_holding_days": 7},
+        # Looser entry, tighter stops — higher frequency
+        {"ml_threshold": 0.55, "reversal_threshold": 0.38,
+         "stop_loss_atr": 1.0, "trailing_stop_atr": 1.5, "max_holding_days": 15},
+    ],
 }
 
 
@@ -346,6 +354,19 @@ class PipelineOrchestrator:
                 ohlcv_raw,
             )
 
+        # ── Stage 5e: per-ticker ML signal enrichment ─────────────────────────
+        # MLSignalEngine trains a walk-forward gradient-boosting classifier
+        # per ticker and injects ml_signal (P(5d return > 0)) into each OHLCV
+        # DataFrame.  Tickers with < 252 bars get ml_signal = NaN and the
+        # per-ticker loop below falls back to AlphaCombined for those tickers.
+        print("[Stage 5e] Computing ML signals (walk-forward gradient boosting) ...")
+        if ohlcv_raw:
+            ohlcv_raw = self._safe(
+                "ml_signal_engine.compute",
+                lambda: m["ml_signal_engine"].compute(dict(ohlcv_raw)),
+                ohlcv_raw,
+            )
+
         # ── Stage 6: compute features ─────────────────────────────────────────
         print(f"[Stage 6] Computing features ...")
         features: dict[str, Any] = {}
@@ -424,6 +445,31 @@ class PipelineOrchestrator:
                 ),
                 None,
             )
+
+            # MLSignal fallback: if ml_signal column is absent or all-NaN
+            # (thin history < 252 bars), downgrade to AlphaCombined so the
+            # backtest and live signal check still produce a valid result.
+            if strategy and strategy.get("strategy") == "MLSignal" and ohlcv is not None:
+                ml_col = ohlcv.get("ml_signal") if hasattr(ohlcv, "get") else (
+                    ohlcv["ml_signal"] if "ml_signal" in ohlcv.columns else None
+                )
+                no_signal = (
+                    ml_col is None
+                    or (hasattr(ml_col, "isna") and ml_col.isna().all())
+                )
+                if no_signal:
+                    from strategy_selector import ALPHA_COMBINED_BASE as _AC_BASE
+                    import copy as _copy
+                    print(f"  [Fallback] {ticker}: MLSignal → AlphaCombined "
+                          f"(insufficient ML training data)")
+                    strategy = {
+                        **strategy,
+                        "strategy":       "AlphaCombined",
+                        "adjusted_params": _copy.deepcopy(_AC_BASE),
+                        "llm_adjustments": strategy.get("llm_adjustments", []) + [
+                            "[Auto] MLSignal → AlphaCombined fallback (< 252 bars of history)"
+                        ],
+                    }
 
             if strategy and ohlcv is not None:
                 sig = self._safe(
@@ -840,6 +886,7 @@ class PipelineOrchestrator:
         from rag_store                   import RAGStore
         from alpha_engine                import AlphaEngine
         from portfolio_optimizer         import PortfolioOptimizer
+        from ml_signal_engine            import MLSignalEngine
         rag = RAGStore(persist_dir=cfg.get("chroma_dir", "data/chroma"))
         return {
             "collector":     Stage1DataCollector(
@@ -874,6 +921,7 @@ class PipelineOrchestrator:
                                 initial_portfolio=cfg.get("initial_portfolio", 100_000.0)
                              ),
             "alpha_engine":        AlphaEngine(),
+            "ml_signal_engine":    MLSignalEngine(),
         }
 
 

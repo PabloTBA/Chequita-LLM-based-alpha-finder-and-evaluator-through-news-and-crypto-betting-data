@@ -115,6 +115,8 @@ class Backtester:
             trade_log = self._run_volatility_breakout(ohlcv, params)
         elif strategy_type == "AlphaCombined":
             trade_log = self._run_alpha_combined(ohlcv, params)
+        elif strategy_type == "MLSignal":
+            trade_log = self._run_ml_signal(ohlcv, params)
         else:
             trade_log = self._run_mean_reversion(ohlcv, params)
 
@@ -437,6 +439,116 @@ class Backtester:
 
         return trades
 
+    def _run_ml_signal(self, ohlcv: pd.DataFrame, params: dict) -> list[dict]:
+        """
+        MLSignal strategy engine.
+
+        Alpha source: per-ticker gradient-boosting classifier probability
+        injected by MLSignalEngine as the ``ml_signal`` column.  The signal
+        represents P(5-day forward return > 0) and is fully out-of-sample
+        (walk-forward trained) with all features shift(1)-lagged.
+
+        Entry:  ml_signal > ml_threshold  AND  not in earnings blackout
+        Exit (priority order):
+          1. Hard stop    : close < entry - stop_loss_atr × ATR
+          2. Trailing     : close < peak  - trailing_stop_atr × ATR
+          3. ML reversal  : ml_signal < reversal_threshold (model loses conviction)
+          4. Max hold     : holding_days ≥ max_holding_days
+
+        Falls back gracefully when ``ml_signal`` column is absent (returns []).
+        """
+        close = ohlcv["Close"].astype(float)
+        high  = ohlcv["High"].astype(float)
+        low   = ohlcv["Low"].astype(float)
+
+        ml_th     = float(params.get("ml_threshold",      0.60))
+        rev_th    = float(params.get("reversal_threshold", 0.40))
+        stop_atr  = float(params.get("stop_loss_atr",      1.5))
+        trail_atr = float(params.get("trailing_stop_atr",  2.0))
+        max_hold  = int(params.get("max_holding_days",     10))
+
+        atr = self._atr(high, low, close)
+
+        # ml_signal is pre-computed and shift(1)-lagged by MLSignalEngine
+        if "ml_signal" not in ohlcv.columns:
+            return []  # no signal available — pipeline fallback should have caught this
+        ml_sig = ohlcv["ml_signal"].astype(float)
+
+        blackout = (
+            ohlcv["earnings_blackout"]
+            if "earnings_blackout" in ohlcv.columns
+            else pd.Series(False, index=ohlcv.index)
+        )
+
+        start = max(ATR_PERIOD + 5, 25)
+
+        trades       = []
+        in_position  = False
+        equity       = self.initial_portfolio
+        entry_price  = stop_price = trail_stop = pos_size = peak = 0.0
+        entry_date   = None
+        holding_days = 0
+        target_1r    = 0.0
+        reached_1r   = False
+
+        for i in range(start, len(ohlcv)):
+            c = float(close.iloc[i])
+            a = float(atr.iloc[i])
+            s = float(ml_sig.iloc[i]) if not np.isnan(ml_sig.iloc[i]) else np.nan
+
+            if np.isnan(a) or a <= 0:
+                continue
+
+            if not in_position:
+                # Skip bars where ml_signal is not yet available (early history)
+                if np.isnan(s):
+                    continue
+                if s > ml_th and not bool(blackout.iloc[i]):
+                    in_position  = True
+                    entry_price  = c * (1 + self._slip)
+                    entry_date   = close.index[i]
+                    stop_price   = entry_price - stop_atr * a
+                    trail_stop   = stop_price
+                    pos_size     = (equity * RISK_PER_TRADE) / (stop_atr * a)
+                    peak         = c
+                    holding_days = 0
+                    target_1r    = entry_price + stop_atr * a
+                    reached_1r   = False
+            else:
+                holding_days += 1
+                peak          = max(peak, c)
+                trail_stop    = max(peak - trail_atr * a, stop_price)
+                h_bar         = float(high.iloc[i])
+                if h_bar >= target_1r:
+                    reached_1r = True
+
+                exit_reason: str | None = None
+                if c < trail_stop:
+                    exit_reason = (
+                        "stop_loss" if trail_stop <= stop_price + 1e-6
+                        else "trailing_stop"
+                    )
+                elif not np.isnan(s) and s < rev_th:
+                    exit_reason = "ml_reversal"
+                elif holding_days >= max_hold:
+                    exit_reason = "max_holding"
+
+                if exit_reason:
+                    exit_price = c * (1 - self._slip)
+                    gross_pnl  = (c - (entry_price / (1 + self._slip))) * pos_size
+                    pnl        = (exit_price - entry_price) * pos_size
+                    equity    += pnl
+                    trades.append(_make_trade(
+                        entry_date, entry_price, close.index[i], exit_price,
+                        holding_days, pos_size, pnl, exit_reason,
+                        gross_pnl=gross_pnl,
+                        slippage_cost=abs(gross_pnl - pnl),
+                        reached_1r=reached_1r,
+                    ))
+                    in_position = False
+
+        return trades
+
     def _run_volatility_breakout(self, ohlcv: pd.DataFrame, params: dict) -> list[dict]:
         """
         VolatilityBreakout strategy engine.
@@ -577,6 +689,8 @@ class Backtester:
                 return self._volatility_breakout_signal(ohlcv, params, initial_portfolio)
             if strategy_type == "AlphaCombined":
                 return self._alpha_combined_signal(ohlcv, params, initial_portfolio)
+            if strategy_type == "MLSignal":
+                return self._ml_signal_signal(ohlcv, params, initial_portfolio)
             return self._mean_rev_signal(ohlcv, params, initial_portfolio)
         except Exception as e:
             return {"signal_active": None, "details": f"Signal check failed: {e}", "setup": None}
@@ -819,6 +933,75 @@ class Backtester:
             "projected_setup":  projected_setup,
             "details": (
                 f"alpha_signal {s:.3f} {'>' if active else '<='} threshold {alpha_th:.2f}"
+            ),
+        }
+
+    def _ml_signal_signal(
+        self, ohlcv: pd.DataFrame, params: dict, portfolio: float
+    ) -> dict:
+        """Current-bar signal check for MLSignal strategy."""
+        close = ohlcv["Close"].astype(float)
+        high  = ohlcv["High"].astype(float)
+        low   = ohlcv["Low"].astype(float)
+
+        ml_th    = float(params.get("ml_threshold",  0.60))
+        stop_atr = float(params.get("stop_loss_atr", 1.5))
+
+        atr = self._atr(high, low, close)
+
+        if "ml_signal" in ohlcv.columns:
+            ml_sig = ohlcv["ml_signal"].astype(float)
+        else:
+            ml_sig = pd.Series(np.nan, index=ohlcv.index)
+
+        c = float(close.iloc[-1])
+        a = float(atr.iloc[-1])    if not pd.isna(atr.iloc[-1])    else 0.0
+        s = float(ml_sig.iloc[-1]) if not pd.isna(ml_sig.iloc[-1]) else np.nan
+
+        active = (not np.isnan(s)) and s > ml_th
+
+        setup = None
+        if active and a > 0:
+            stop_dist   = stop_atr * a
+            pos_size    = int((portfolio * RISK_PER_TRADE) / stop_dist)
+            stop_price  = c - stop_dist
+            setup = {
+                "entry_price":   c,
+                "stop_price":    stop_price,
+                "stop_dist":     stop_dist,
+                "position_size": pos_size,
+                "dollar_risk":   portfolio * RISK_PER_TRADE,
+                "current_atr":   a,
+                "target":        None,
+            }
+
+        projected_setup = None
+        if a > 0:
+            stop_dist  = stop_atr * a
+            proj_entry = c * (1 + self._slip)
+            proj_stop  = proj_entry - stop_dist
+            proj_size  = int((portfolio * RISK_PER_TRADE) / stop_dist)
+            projected_setup = {
+                "entry_price":   proj_entry,
+                "stop_price":    proj_stop,
+                "stop_dist":     stop_dist,
+                "position_size": proj_size,
+                "dollar_risk":   portfolio * RISK_PER_TRADE,
+                "current_atr":   a,
+                "target":        None,
+                "entry_trigger": f"ml_signal > {ml_th:.2f}",
+            }
+
+        s_display = f"{s:.3f}" if not np.isnan(s) else "N/A"
+        return {
+            "signal_active":   active,
+            "close":           c,
+            "ml_signal":       s if not np.isnan(s) else None,
+            "ml_threshold":    ml_th,
+            "setup":           setup,
+            "projected_setup": projected_setup,
+            "details": (
+                f"ml_signal {s_display} {'>' if active else '<='} threshold {ml_th:.2f}"
             ),
         }
 
