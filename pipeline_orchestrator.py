@@ -575,6 +575,121 @@ class PipelineOrchestrator:
                                 backtest       = alt_backtest
                                 current_sharpe = alt_sharpe
 
+            # ── LLM challenger backtest ───────────────────────────────────────
+            # When the LLM disagreed with the algo's regime-rule strategy,
+            # build the suggested strategy using the same deterministic param
+            # rules, backtest it, and keep whichever Sharpe is higher.
+            # MC then runs naturally on the winning backtest below.
+            hypothesis = (strategy or {}).get("llm_hypothesis", {})
+            if (
+                strategy and backtest and ohlcv is not None
+                and not hypothesis.get("agree", True)
+                and hypothesis.get("suggested")
+                and hypothesis["suggested"] != strategy["strategy"]
+            ):
+                from strategy_selector import (
+                    _STRATEGY_TO_BASE as _S2B,
+                    _compute_momentum_params,
+                    _compute_mean_reversion_params,
+                    _compute_volatility_breakout_params,
+                    _compute_alpha_combined_params,
+                    _compute_ml_signal_params,
+                )
+                import copy as _copy
+                ch_name      = hypothesis["suggested"]
+                ch_reason    = hypothesis.get("reason", "")
+                hurst_       = float(regime.get("hurst", 0.5))
+                atr_pct_     = float(regime.get("atr_pct", 0.02))
+                vol_ratio_   = float(feats.get("volume_ratio_30d", 1.0))
+                regime_lbl_  = regime.get("regime", "Neutral")
+
+                # Guard: MLSignal challenger needs ml_signal column
+                if ch_name == "MLSignal":
+                    _mc_col = ohlcv.get("ml_signal") if hasattr(ohlcv, "get") else (
+                        ohlcv["ml_signal"] if "ml_signal" in ohlcv.columns else None
+                    )
+                    if _mc_col is None or (hasattr(_mc_col, "isna") and _mc_col.isna().all()):
+                        print(f"[{_ts()}]   [LLM Challenger] {ticker} — MLSignal challenger skipped (no ml_signal data)")
+                        ch_name = None
+
+                if ch_name and ch_name not in _S2B:
+                    print(f"[{_ts()}]   [LLM Challenger] {ticker} — unknown strategy '{ch_name}', skipping challenger")
+                    ch_name = None
+
+                if ch_name:
+                    if ch_name == "Momentum":
+                        ch_params, ch_rules = _compute_momentum_params(hurst_, atr_pct_, vol_ratio_)
+                    elif ch_name == "VolatilityBreakout":
+                        ch_params, ch_rules = _compute_volatility_breakout_params(atr_pct_, hurst_)
+                    elif ch_name == "AlphaCombined":
+                        ch_params, ch_rules = _compute_alpha_combined_params(atr_pct_, hurst_, regime_lbl_)
+                    elif ch_name == "MLSignal":
+                        ch_params, ch_rules = _compute_ml_signal_params(atr_pct_, regime_lbl_)
+                    else:
+                        ch_params, ch_rules = _compute_mean_reversion_params(atr_pct_)
+
+                    ch_strategy = {
+                        **strategy,
+                        "strategy":        ch_name,
+                        "base_params":     _copy.deepcopy(_S2B[ch_name]),
+                        "adjusted_params": ch_params,
+                        "llm_adjustments": ch_rules + [
+                            f"[LLM Challenger] suggested {ch_name} — {ch_reason}"
+                        ],
+                    }
+                    ch_backtest = self._safe(
+                        f"backtester.run({ticker})[llm_challenger]",
+                        lambda _t=ticker, _s=ch_strategy, _o=ohlcv: m["backtester"].run(
+                            _t,
+                            {**_s, "adjusted_params": _s["base_params"]},
+                            _o,
+                        ),
+                        None,
+                    )
+                    if not ch_backtest:
+                        print(f"[{_ts()}]   [LLM Challenger] {ticker} — challenger backtest failed, keeping {strategy['strategy']}")
+                    if ch_backtest:
+                        algo_sharpe = _quick_sharpe(backtest["returns"])
+                        ch_sharpe   = _quick_sharpe(ch_backtest["returns"])
+                        print(
+                            f"[{_ts()}]   [LLM Challenger] {ticker}: "
+                            f"{strategy['strategy']} Sharpe={algo_sharpe:.3f} vs "
+                            f"{ch_name} Sharpe={ch_sharpe:.3f}"
+                        )
+                        if ch_sharpe > algo_sharpe:
+                            print(f"[{_ts()}]   [LLM Challenger] {ticker} — LLM wins, switching to {ch_name}")
+                            # Re-run signal_status for the winning strategy
+                            ch_sig = self._safe(
+                                f"backtester.signal_status({ticker})[llm_challenger]",
+                                lambda _s=ch_strategy, _o=ohlcv, _p=portfolio: m["backtester"].signal_status(
+                                    _s["strategy"], _o, _s["adjusted_params"], _p
+                                ),
+                                strategy.get("current_signal"),
+                            )
+                            strategy = {
+                                **ch_strategy,
+                                "current_signal": ch_sig,
+                                "_adv":           strategy.get("_adv"),
+                                "llm_adjustments": ch_strategy["llm_adjustments"] + [
+                                    f"[LLM Challenger] beat algo — "
+                                    f"{ch_name} Sharpe={ch_sharpe:.3f} > "
+                                    f"{strategy['strategy']} Sharpe={algo_sharpe:.3f}"
+                                ],
+                            }
+                            backtest = ch_backtest
+                        else:
+                            print(f"[{_ts()}]   [LLM Challenger] {ticker} — algo wins, keeping {strategy['strategy']}")
+                            strategy = {
+                                **strategy,
+                                "llm_challenger": {
+                                    "strategy":    ch_name,
+                                    "sharpe":      ch_sharpe,
+                                    "algo_sharpe": algo_sharpe,
+                                    "reason":      ch_reason,
+                                    "verdict":     "algo_wins",
+                                },
+                            }
+
             diagnostic = self._safe(
                 f"diagnostics.run({ticker})",
                 lambda _t=ticker, _s=strategy, _bt=backtest: m["diagnostics"].run(
