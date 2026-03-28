@@ -165,6 +165,223 @@ class Backtester:
             "slippage_bps": used_slip_bps,   # surfaced in report for transparency
         }
 
+    # ── portfolio backtest (cross-sectional) ──────────────────────────────────
+
+    def run_alpha_combined_portfolio(
+        self,
+        ohlcv_dict: dict[str, pd.DataFrame],
+        params: dict,
+    ) -> dict:
+        """
+        Cross-sectional portfolio backtest for AlphaCombined.
+
+        AlphaCombined signals are z-scored across the universe, so a single
+        ticker's signal has no meaning in isolation — the market-neutral property
+        requires simultaneous long positions across multiple tickers ranked by
+        their cross-sectional alpha_signal.
+
+        Simulation rules
+        ----------------
+        - Each day: enter equally-weighted long positions in every ticker where
+          alpha_signal > alpha_threshold (and not in earnings blackout).
+        - Each position sizes by 1% portfolio risk / (stop_loss_atr × ATR).
+        - Portfolio equity curve = running sum of all active position PnL.
+        - Exit per-position: same rules as per-ticker AlphaCombined
+          (stop, trailing stop, alpha reversal, max hold).
+
+        Returns
+        -------
+        dict with keys: ticker ("AlphaCombined_Portfolio"), tickers (list),
+                        strategy, trade_log, equity_curve, returns, summary
+        """
+        alpha_th  = float(params.get("alpha_threshold",   0.40))
+        rev_th    = float(params.get("reversal_threshold", -0.50))
+        stop_atr  = float(params.get("stop_loss_atr",     1.5))
+        trail_atr = float(params.get("trailing_stop_atr", 2.0))
+        max_hold  = int(params.get("max_holding_days",    10))
+
+        # Precompute per-ticker series on their native indices
+        close_map:    dict[str, pd.Series] = {}
+        alpha_map:    dict[str, pd.Series] = {}
+        atr_map:      dict[str, pd.Series] = {}
+        blackout_map: dict[str, pd.Series] = {}
+
+        for ticker, ohlcv in ohlcv_dict.items():
+            if ohlcv is None or ohlcv.empty:
+                continue
+            close_s = ohlcv["Close"].astype(float)
+            high_s  = ohlcv["High"].astype(float)
+            low_s   = ohlcv["Low"].astype(float)
+            atr_s   = self._atr(high_s, low_s, close_s)
+            alpha_s = (
+                ohlcv["alpha_signal"].astype(float)
+                if "alpha_signal" in ohlcv.columns
+                else pd.Series(0.0, index=ohlcv.index)
+            )
+            bl_s = (
+                ohlcv["earnings_blackout"].astype(bool)
+                if "earnings_blackout" in ohlcv.columns
+                else pd.Series(False, index=ohlcv.index)
+            )
+            close_map[ticker]    = close_s
+            alpha_map[ticker]    = alpha_s
+            atr_map[ticker]      = atr_s
+            blackout_map[ticker] = bl_s
+
+        if not close_map:
+            empty = pd.Series(dtype=float)
+            return {
+                "ticker": "AlphaCombined_Portfolio", "tickers": [],
+                "strategy": "AlphaCombined", "trade_log": [],
+                "equity_curve": empty, "returns": empty,
+                "summary": {}, "slippage_bps": round(self._slip * 10_000, 1),
+            }
+
+        # Build a common date index (union so no ticker data is silently dropped)
+        all_indices = [s.index for s in close_map.values()]
+        common_idx  = all_indices[0]
+        for idx in all_indices[1:]:
+            common_idx = common_idx.union(idx)
+        common_idx = common_idx.sort_values()
+
+        tickers = list(close_map.keys())
+        warmup  = 30   # ATR + alpha warmup bars
+
+        # Per-ticker open-position state
+        positions: dict[str, dict] = {}
+
+        equity      = self.initial_portfolio
+        all_trades: list[dict]          = []
+        equity_pts: list[tuple]         = []   # (date, equity)
+
+        for i, date in enumerate(common_idx):
+            if i < warmup:
+                equity_pts.append((date, equity))
+                continue
+
+            for ticker in tickers:
+                c_s  = close_map[ticker]
+                a_s  = atr_map[ticker]
+                al_s = alpha_map[ticker]
+                bl_s = blackout_map[ticker]
+
+                if date not in c_s.index:
+                    continue
+
+                c  = float(c_s.loc[date])
+                a  = float(a_s.loc[date]) if date in a_s.index else float("nan")
+                s  = float(al_s.loc[date]) if date in al_s.index else 0.0
+                bl = bool(bl_s.loc[date])  if date in bl_s.index else False
+
+                if np.isnan(c) or np.isnan(a) or a <= 0:
+                    continue
+                if np.isnan(s):
+                    s = 0.0
+
+                if ticker not in positions:
+                    # Entry: cross-sectional signal exceeds threshold
+                    if s > alpha_th and not bl:
+                        entry_px = c * (1 + self._slip)
+                        stop_px  = entry_px - stop_atr * a
+                        pos_size = (equity * RISK_PER_TRADE) / (stop_atr * a)
+                        positions[ticker] = {
+                            "entry_price":  entry_px,
+                            "stop_price":   stop_px,
+                            "trail_stop":   stop_px,
+                            "pos_size":     pos_size,
+                            "peak":         c,
+                            "entry_date":   date,
+                            "holding_days": 0,
+                            "target_1r":    entry_px + stop_atr * a,
+                            "reached_1r":   False,
+                        }
+                else:
+                    pos = positions[ticker]
+                    pos["holding_days"] += 1
+                    pos["peak"]          = max(pos["peak"], c)
+                    pos["trail_stop"]    = max(
+                        pos["peak"] - trail_atr * a, pos["stop_price"]
+                    )
+                    if c >= pos["target_1r"]:
+                        pos["reached_1r"] = True
+
+                    exit_reason: str | None = None
+                    if c < pos["trail_stop"]:
+                        exit_reason = (
+                            "stop_loss"
+                            if pos["trail_stop"] <= pos["stop_price"] + 1e-6
+                            else "trailing_stop"
+                        )
+                    elif s < rev_th:
+                        exit_reason = "alpha_reversal"
+                    elif pos["holding_days"] >= max_hold:
+                        exit_reason = "max_holding"
+
+                    if exit_reason:
+                        exit_px   = c * (1 - self._slip)
+                        gross_pnl = (c - (pos["entry_price"] / (1 + self._slip))) * pos["pos_size"]
+                        pnl       = (exit_px - pos["entry_price"]) * pos["pos_size"]
+                        equity   += pnl
+                        all_trades.append(_make_trade(
+                            pos["entry_date"], pos["entry_price"],
+                            date, exit_px,
+                            pos["holding_days"], pos["pos_size"], pnl, exit_reason,
+                            gross_pnl=gross_pnl,
+                            slippage_cost=abs(gross_pnl - pnl),
+                            reached_1r=pos["reached_1r"],
+                        ))
+                        del positions[ticker]
+
+            equity_pts.append((date, equity))
+
+        # Force-close any remaining open positions at last known price
+        for ticker, pos in list(positions.items()):
+            c_s = close_map[ticker]
+            if len(c_s) == 0:
+                continue
+            c        = float(c_s.iloc[-1])
+            exit_px  = c * (1 - self._slip)
+            gross_pnl = (c - (pos["entry_price"] / (1 + self._slip))) * pos["pos_size"]
+            pnl      = (exit_px - pos["entry_price"]) * pos["pos_size"]
+            equity  += pnl
+            all_trades.append(_make_trade(
+                pos["entry_date"], pos["entry_price"],
+                c_s.index[-1], exit_px,
+                pos["holding_days"], pos["pos_size"], pnl, "end_of_backtest",
+                gross_pnl=gross_pnl,
+                slippage_cost=abs(gross_pnl - pnl),
+                reached_1r=pos["reached_1r"],
+            ))
+
+        equity_curve = pd.Series(
+            [v for _, v in equity_pts],
+            index=pd.DatetimeIndex([d for d, _ in equity_pts]),
+            name="equity",
+        )
+
+        # Daily returns: flat days earn DAILY_RF (idle cash)
+        raw_returns  = equity_curve.pct_change().fillna(0.0)
+        in_position  = pd.Series(False, index=equity_curve.index)
+        for trade in all_trades:
+            try:
+                in_position.loc[trade["entry_date"]:trade["exit_date"]] = True
+            except Exception:
+                pass
+        raw_returns[~in_position] = DAILY_RF
+
+        summary = self._summarize(all_trades, equity_curve)
+
+        return {
+            "ticker":       "AlphaCombined_Portfolio",
+            "tickers":      tickers,
+            "strategy":     "AlphaCombined",
+            "trade_log":    all_trades,
+            "equity_curve": equity_curve,
+            "returns":      raw_returns,
+            "summary":      summary,
+            "slippage_bps": round(self._slip * 10_000, 1),
+        }
+
     # ── strategy engines ──────────────────────────────────────────────────────
 
     def _run_momentum(self, ohlcv: pd.DataFrame, params: dict) -> list[dict]:

@@ -10,15 +10,25 @@ Regime labels (priority order)
     ATR/price > 6%                             → "Crisis"
                                                  (extreme vol — all strategies
                                                   use tight params / skip entry)
-    earnings_blackout within last 5 bars       → "Event-Driven"
-                                                 (imminent catalyst — fade gaps)
     Hurst > 0.55  AND  20d return > 0          → "Trending-Up"
     Hurst > 0.55  AND  20d return ≤ 0          → "Trending-Down"
     Hurst < 0.45                               → "Mean-Reverting"
     0.45 ≤ Hurst ≤ 0.55:
         ATR/price > 3%                         → "High-Volatility"
         ATR/price < 1.5%                       → "Low-Volatility"
+        earnings_blackout within last 5 bars   → "Event-Driven"
+                                                 (only in neutral Hurst zone —
+                                                  catalyst overlaid on ambiguous
+                                                  structural regime)
         else                                   → "Neutral"
+
+Design rationale
+----------------
+    Event-Driven is intentionally the LOWEST-priority regime. A trending stock
+    near earnings is still trending — its Hurst signal is the primary information.
+    Overriding with Event-Driven before Hurst analysis was checked discarded all
+    structural regime information for any ticker with an upcoming earnings date,
+    routing everything into AlphaCombined regardless of actual market structure.
 
 Strategy mapping
 ----------------
@@ -222,20 +232,25 @@ class RegimeClassifier:
         # 1. Crisis — extreme volatility takes priority over all other signals
         if atr_pct > ATR_CRISIS:
             return "Crisis"
-        # 2. Event-Driven — imminent earnings catalyst overrides statistical regime
-        if near_earnings:
-            return "Event-Driven"
-        # 3. Trending — split by 20-day price direction
+        # 2. Trending — split by 20-day price direction
+        #    Hurst > 0.55 means persistent trend; checked BEFORE earnings so a
+        #    trending stock near earnings remains "Trending-Up/Down", not
+        #    force-routed to AlphaCombined.
         if hurst > HURST_TRENDING:
             return "Trending-Up" if ret_20d >= 0 else "Trending-Down"
-        # 4. Mean-Reverting
+        # 3. Mean-Reverting
         if hurst < HURST_MEAN_REVERTING:
             return "Mean-Reverting"
-        # 5. Neutral Hurst zone — fall back to ATR/price
+        # 4. Neutral Hurst zone (0.45–0.55) — fall back to ATR/price
         if atr_pct > ATR_HIGH_VOL:
             return "High-Volatility"
         if atr_pct < ATR_LOW_VOL:
             return "Low-Volatility"
+        # 5. Event-Driven — earnings overlay, only when no structural regime found.
+        #    Stock is in the ambiguous Hurst zone AND normal ATR range; an
+        #    upcoming catalyst is then the dominant information.
+        if near_earnings:
+            return "Event-Driven"
         return "Neutral"
 
 

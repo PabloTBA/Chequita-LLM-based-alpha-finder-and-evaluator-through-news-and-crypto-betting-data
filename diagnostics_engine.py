@@ -36,13 +36,15 @@ import scipy.stats as _stats
 
 # ── Hard floor constants (PRD defaults — Neutral / Low-Vol regime) ────────────
 
-WF_MIN_TRADE_COUNT    = 100    # minimum trades for walk-forward to have statistical power
+WF_MIN_TRADE_COUNT    = 30     # minimum trades for walk-forward OOS split to be meaningful
 SHARPE_FLOOR          = 0.50
 MAX_DD_FLOOR          = 0.20   # tightened from 30% → 20% (institutional standard)
 WIN_RATE_FLOOR        = 0.35
 PROFIT_FACTOR_FLOOR   = 1.5    # bypass win-rate floor when profit_factor >= this (high-payoff strategies)
 WALKFWD_DEGRAD_FLOOR  = 0.50
-MIN_TRADE_COUNT       = 30     # raised from 10 → 30 (minimum for statistical significance)
+MIN_TRADE_COUNT       = 10     # hard floor: strategies with < 10 trades have insufficient data
+                               # Statistical significance for 10–29 trade strategies is enforced
+                               # by the p-value and bootstrap CI checks, not this floor.
 TRADING_DAYS          = 252
 RISK_FREE_RATE        = 0.045  # annualised risk-free rate (~current Fed funds); subtract from Sharpe
 
@@ -261,9 +263,14 @@ class DiagnosticsEngine:
         # return = 0.  Crisis/high-vol regimes get a relaxed p-value floor because
         # higher noise requires more data to reach the same confidence level —
         # rejecting everything at 90% CI in a panic market throws away real alpha.
+        #
+        # NOTE: this check runs regardless of wf_underpowered. For low-trade-count
+        # strategies (10–29 trades), the p-value IS the correct significance gate —
+        # the Lo t-stat accounts for the sample size. A hard trade-count floor is a
+        # proxy for significance; the actual t-stat is the direct measurement.
         p_value_floor = floors["p_value"]
         p_value = metrics.get("p_value", 0.0)
-        if not wf_underpowered and p_value >= p_value_floor:
+        if p_value >= p_value_floor:
             return False, (
                 f"p-value {p_value:.4f} ≥ regime floor {p_value_floor} — Sharpe {sharpe:.3f} is not "
                 f"statistically significant (Lo 2002 autocorr-corrected t-stat); "
@@ -276,10 +283,13 @@ class DiagnosticsEngine:
         # below, we cannot distinguish the Sharpe from sampling noise across
         # plausible resamplings of the same return history.
         # Only enforced when bootstrap was run (n >= 40; returns (0.0, 0.0) otherwise).
+        #
+        # NOTE: runs regardless of wf_underpowered — bootstrap resampling works on
+        # any return series with >= 40 observations (set in _bootstrap_sharpe_ci).
         bs_p5 = metrics.get("bootstrap_sharpe_p5", 0.0)
         bs_p95 = metrics.get("bootstrap_sharpe_p95", 0.0)
         bootstrap_ran = not (bs_p5 == 0.0 and bs_p95 == 0.0)
-        if not wf_underpowered and bootstrap_ran and bs_p5 <= 0.0:
+        if bootstrap_ran and bs_p5 <= 0.0:
             return False, (
                 f"Bootstrap Sharpe 5th-percentile {bs_p5:.3f} ≤ 0 — 90% CI [{bs_p5:.3f}, {bs_p95:.3f}] "
                 f"includes zero; Sharpe {sharpe:.3f} may be a sampling artefact"
