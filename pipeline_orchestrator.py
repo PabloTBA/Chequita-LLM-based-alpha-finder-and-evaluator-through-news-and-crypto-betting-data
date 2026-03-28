@@ -358,19 +358,6 @@ class PipelineOrchestrator:
                 ohlcv_raw,
             )
 
-        # ── Stage 5e: per-ticker ML signal enrichment ─────────────────────────
-        # MLSignalEngine trains a walk-forward gradient-boosting classifier
-        # per ticker and injects ml_signal (P(5d return > 0)) into each OHLCV
-        # DataFrame.  Tickers with < 252 bars get ml_signal = NaN and the
-        # per-ticker loop below falls back to AlphaCombined for those tickers.
-        print(f"[{_ts()}] [Stage 5e] Computing ML signals (walk-forward gradient boosting) ...")
-        if ohlcv_raw:
-            ohlcv_raw = self._safe(
-                "ml_signal_engine.compute",
-                lambda: m["ml_signal_engine"].compute(dict(ohlcv_raw)),
-                ohlcv_raw,
-            )
-
         # ── Stage 6: compute features ─────────────────────────────────────────
         print(f"[{_ts()}] [Stage 6] Computing features ...")
         features: dict[str, Any] = {}
@@ -415,6 +402,22 @@ class PipelineOrchestrator:
                 print(f"  [Backfill] Added {len(added)} ticker(s) from top-50 reserve: {added}")
 
         shortlisted = shortlisted[:max_tickers]
+
+        # ── Stage 7b: ML signal enrichment (shortlisted tickers only) ────────
+        # Run after shortlisting so the cross-sectional GBM (Model 1) gets
+        # meaningful z-scores across the ~15 shortlisted tickers rather than
+        # all 50 raw candidates.  Only Low-Volatility and Neutral regime tickers
+        # will actually consume ml_signal, but we need all shortlisted tickers
+        # in the panel now so cross-sectional features are well-calibrated.
+        if ohlcv_raw and shortlisted:
+            ml_subset = {t: ohlcv_raw[t] for t in shortlisted if t in ohlcv_raw}
+            print(f"[{_ts()}] [Stage 7b] Computing ML signals for {len(ml_subset)} shortlisted ticker(s) ...")
+            enriched = self._safe(
+                "ml_signal_engine.compute",
+                lambda: m["ml_signal_engine"].compute(ml_subset),
+                ml_subset,
+            )
+            ohlcv_raw.update(enriched)
 
         # ── Stage 8: verdicts ─────────────────────────────────────────────────
         print(f"[{_ts()}] [Stage 8] Screening {len(shortlisted)} tickers ...")
