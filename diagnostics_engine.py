@@ -34,7 +34,7 @@ import numpy as np
 import pandas as pd
 import scipy.stats as _stats
 
-# ── Hard floor constants (PRD defaults) ───────────────────────────────────────
+# ── Hard floor constants (PRD defaults — Neutral / Low-Vol regime) ────────────
 
 WF_MIN_TRADE_COUNT    = 100    # minimum trades for walk-forward to have statistical power
 SHARPE_FLOOR          = 0.50
@@ -45,6 +45,34 @@ WALKFWD_DEGRAD_FLOOR  = 0.50
 MIN_TRADE_COUNT       = 30     # raised from 10 → 30 (minimum for statistical significance)
 TRADING_DAYS          = 252
 RISK_FREE_RATE        = 0.045  # annualised risk-free rate (~current Fed funds); subtract from Sharpe
+
+# ── Regime-conditional floor overrides ───────────────────────────────────────
+# High-vol / crisis markets inflate return std, suppressing Sharpe, and produce
+# larger intra-strategy drawdowns even for genuinely profitable strategies.
+# Floors are relaxed proportionally to regime severity so the pipeline can
+# surface real alpha instead of systematically rejecting everything in a sell-off.
+#
+# Sharpe relaxation rationale:
+#   Sharpe = mean_excess / std.  In a crisis std can double vs normal markets.
+#   A strategy earning the same dollar alpha will show Sharpe ~0.25 instead of 0.50.
+#   Keeping the floor at 0.50 would reject all crisis alpha by construction.
+#
+# MaxDD relaxation rationale:
+#   20% DD floor is calibrated for low-vol regimes.  High-vol regimes have larger
+#   normal drawdowns even for strategies with positive edge.  Tightening the floor
+#   in a VIX spike would reject valid strategies for noise, not real weakness.
+_REGIME_FLOORS: dict[str, dict] = {
+    # regime_label       sharpe  max_dd  win_rate  oos_sharpe  p_value
+    "Crisis":         {"sharpe": 0.25, "max_dd": 0.35, "win_rate": 0.30, "oos_sharpe": 0.15, "p_value": 0.15},
+    "High-Volatility":{"sharpe": 0.35, "max_dd": 0.28, "win_rate": 0.32, "oos_sharpe": 0.20, "p_value": 0.12},
+    "Event-Driven":   {"sharpe": 0.30, "max_dd": 0.30, "win_rate": 0.30, "oos_sharpe": 0.15, "p_value": 0.15},
+    "Trending-Down":  {"sharpe": 0.40, "max_dd": 0.25, "win_rate": 0.33, "oos_sharpe": 0.25, "p_value": 0.12},
+    "Trending-Up":    {"sharpe": 0.45, "max_dd": 0.22, "win_rate": 0.34, "oos_sharpe": 0.28, "p_value": 0.10},
+    "Mean-Reverting": {"sharpe": 0.50, "max_dd": 0.20, "win_rate": 0.35, "oos_sharpe": 0.30, "p_value": 0.10},
+    "Low-Volatility": {"sharpe": 0.50, "max_dd": 0.20, "win_rate": 0.35, "oos_sharpe": 0.30, "p_value": 0.10},
+    "Neutral":        {"sharpe": 0.50, "max_dd": 0.20, "win_rate": 0.35, "oos_sharpe": 0.30, "p_value": 0.10},
+}
+_DEFAULT_FLOORS = _REGIME_FLOORS["Neutral"]
 
 
 class DiagnosticsEngine:
@@ -58,32 +86,37 @@ class DiagnosticsEngine:
 
     def run(
         self,
-        ticker:     str,
-        strategy:   str,
-        trade_log:  list[dict],
-        returns:    pd.Series,
+        ticker:       str,
+        strategy:     str,
+        trade_log:    list[dict],
+        returns:      pd.Series,
+        regime_label: str = "Neutral",
     ) -> dict:
         """
         Run all diagnostic checks on a strategy.
 
         Parameters
         ----------
-        ticker    : str
-        strategy  : str  (e.g. "Momentum", "Mean-Reversion")
-        trade_log : list of dicts, each with at least {"pnl": float}
-        returns   : pd.Series of daily returns (decimal), DatetimeIndex preferred
+        ticker       : str
+        strategy     : str  (e.g. "Momentum", "Mean-Reversion")
+        trade_log    : list of dicts, each with at least {"pnl": float}
+        returns      : pd.Series of daily returns (decimal), DatetimeIndex preferred
+        regime_label : str  market regime — used to select floor thresholds
 
         Returns
         -------
         dict with keys: ticker, strategy, passed, reject_reason, metrics, llm_commentary
         """
+        floors  = _REGIME_FLOORS.get(regime_label, _DEFAULT_FLOORS)
         metrics = self._compute_metrics(trade_log, returns)
         self._log(f"[DiagnosticsEngine] {ticker}: {metrics}")
 
-        passed, reject_reason = self._check_floors(metrics)
+        passed, reject_reason = self._check_floors(metrics, floors)
         status = "PASS" if passed else f"FAIL -- {reject_reason}"
-        print(f"  [Diag] {ticker}: Sharpe={metrics['sharpe']:.3f}  OOS_Sharpe={metrics['oos_sharpe']:.3f}  "
-              f"MaxDD={metrics['max_drawdown']:.1%}  WinRate={metrics['win_rate']:.1%}  "
+        print(f"  [Diag] {ticker} [{regime_label}]: Sharpe={metrics['sharpe']:.3f} "
+              f"(floor={floors['sharpe']})  OOS_Sharpe={metrics['oos_sharpe']:.3f}  "
+              f"MaxDD={metrics['max_drawdown']:.1%} (floor={floors['max_dd']:.0%})  "
+              f"WinRate={metrics['win_rate']:.1%}  "
               f"WFDegrad={metrics['walk_forward_degradation']:.1%}  "
               f"Trades={metrics['trade_count']}  -> {status}")
 
@@ -132,45 +165,46 @@ class DiagnosticsEngine:
         }
 
     @staticmethod
-    def _check_floors(metrics: dict) -> tuple[bool, Optional[str]]:
+    def _check_floors(metrics: dict, floors: dict) -> tuple[bool, Optional[str]]:
         # ── Sharpe — PRIMARY criterion, no substitution allowed ───────────────
         # Full-period Sharpe is the single most honest summary of risk-adjusted
         # return over the entire history.  OOS Sharpe is a SECONDARY check that
         # must also pass — it cannot rescue a failed full-period Sharpe.
         #
-        # Previous logic used max(IS, OOS) which let a favorable 3-year OOS
-        # window override a 0.04 full-period Sharpe — effectively passing a
-        # strategy that barely beat cash over 10 years.  That is wrong:
-        #   Full-period Sharpe = primary gate (no rescue)
-        #   OOS Sharpe         = secondary gate (must be >= OOS_SHARPE_FLOOR)
-        sharpe     = metrics["sharpe"]
-        oos_sharpe = metrics.get("oos_sharpe", sharpe)
+        # Floors are regime-conditional: crisis/high-vol markets inflate return
+        # std, so the same dollar alpha produces a lower Sharpe.  See
+        # _REGIME_FLOORS for per-regime calibration rationale.
+        sharpe_floor = floors["sharpe"]
+        sharpe       = metrics["sharpe"]
+        oos_sharpe   = metrics.get("oos_sharpe", sharpe)
 
-        if sharpe < SHARPE_FLOOR:
-            return False, (f"Sharpe ratio {sharpe:.3f} below floor {SHARPE_FLOOR} "
+        if sharpe < sharpe_floor:
+            return False, (f"Sharpe ratio {sharpe:.3f} below regime floor {sharpe_floor} "
                            f"(OOS {oos_sharpe:.3f} cannot rescue a failed full-period Sharpe)")
 
         # OOS must also show positive edge — prevents IS-only curve-fitting.
         # Skipped when WF is underpowered (< 100 trades): oos_sharpe is 0.0 by
         # design in that path (not a real measurement), so applying the floor
         # would wrongly reject every low-trade-count strategy.
-        OOS_SHARPE_FLOOR = 0.30
+        oos_sharpe_floor = floors["oos_sharpe"]
         wf_underpowered  = metrics.get("wf_underpowered", False)
-        if not wf_underpowered and oos_sharpe < OOS_SHARPE_FLOOR:
-            return False, (f"OOS Sharpe {oos_sharpe:.3f} below secondary floor {OOS_SHARPE_FLOOR} "
+        if not wf_underpowered and oos_sharpe < oos_sharpe_floor:
+            return False, (f"OOS Sharpe {oos_sharpe:.3f} below regime secondary floor {oos_sharpe_floor} "
                            f"— full-period Sharpe {sharpe:.3f} passes but strategy has no "
                            f"out-of-sample evidence of edge")
 
-        max_dd = metrics["max_drawdown"]
-        if max_dd > MAX_DD_FLOOR:
-            return False, f"Max drawdown {max_dd:.1%} exceeds floor {MAX_DD_FLOOR:.0%}"
+        max_dd       = metrics["max_drawdown"]
+        max_dd_floor = floors["max_dd"]
+        if max_dd > max_dd_floor:
+            return False, f"Max drawdown {max_dd:.1%} exceeds regime floor {max_dd_floor:.0%}"
 
         win_rate      = metrics["win_rate"]
+        win_rate_floor = floors["win_rate"]
         profit_factor = metrics.get("profit_factor", 0.0)
         # Low win rate bypassed when profit factor is strong (high-payoff strategies such as
         # trend-following with 30% wins but 3:1 payoff ratio are valid and should not be rejected)
-        if win_rate < WIN_RATE_FLOOR and profit_factor < PROFIT_FACTOR_FLOOR:
-            return False, (f"Win rate {win_rate:.1%} below floor {WIN_RATE_FLOOR:.0%} "
+        if win_rate < win_rate_floor and profit_factor < PROFIT_FACTOR_FLOOR:
+            return False, (f"Win rate {win_rate:.1%} below regime floor {win_rate_floor:.0%} "
                            f"and profit factor {profit_factor:.2f} below {PROFIT_FACTOR_FLOOR:.1f}")
 
         # Kelly fraction: negative Kelly means the strategy has provably negative expected value
@@ -224,15 +258,15 @@ class DiagnosticsEngine:
         # ── Statistical significance — p-value (Lo 2002 autocorr-corrected) ─────
         # The Sharpe floor confirms magnitude but not reliability: a Sharpe of 0.55
         # on 40 noisy days can easily be pure luck.  p_value tests H0: mean excess
-        # return = 0; we require p < 0.10 (90% confidence, one-tailed H1: Sharpe > 0).
-        # Only enforced when we have enough data for the t-stat to be meaningful
-        # (n >= 10 is already enforced in _tstat; floor skipped for underpowered WF).
-        P_VALUE_FLOOR = 0.10
+        # return = 0.  Crisis/high-vol regimes get a relaxed p-value floor because
+        # higher noise requires more data to reach the same confidence level —
+        # rejecting everything at 90% CI in a panic market throws away real alpha.
+        p_value_floor = floors["p_value"]
         p_value = metrics.get("p_value", 0.0)
-        if not wf_underpowered and p_value >= P_VALUE_FLOOR:
+        if not wf_underpowered and p_value >= p_value_floor:
             return False, (
-                f"p-value {p_value:.4f} ≥ {P_VALUE_FLOOR} — Sharpe {sharpe:.3f} is not "
-                f"statistically significant at 90% confidence (Lo 2002 autocorr-corrected t-stat); "
+                f"p-value {p_value:.4f} ≥ regime floor {p_value_floor} — Sharpe {sharpe:.3f} is not "
+                f"statistically significant (Lo 2002 autocorr-corrected t-stat); "
                 f"likely sampling noise"
             )
 

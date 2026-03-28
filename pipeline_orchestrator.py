@@ -692,11 +692,12 @@ class PipelineOrchestrator:
 
             diagnostic = self._safe(
                 f"diagnostics.run({ticker})",
-                lambda _t=ticker, _s=strategy, _bt=backtest: m["diagnostics"].run(
+                lambda _t=ticker, _s=strategy, _bt=backtest, _rl=regime.get("regime", "Neutral"): m["diagnostics"].run(
                     _t,
                     _s["strategy"] if isinstance(_s, dict) else _s,
                     _bt["trade_log"],
                     _bt["returns"],
+                    regime_label=_rl,
                 ) if _bt else None,
                 None,
             )
