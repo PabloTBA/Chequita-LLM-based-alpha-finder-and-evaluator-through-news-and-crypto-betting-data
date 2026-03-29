@@ -112,6 +112,68 @@ ML_SIGNAL_BASE: dict = {
     "max_holding_days":   10,
 }
 
+PAIR_TRADING_BASE: dict = {
+    # Relative Value / Pair Trading (Engle-Granger cointegration).
+    # Alpha source: cointegrated pairs share a long-run equilibrium; when the
+    # spread (log P_A - beta * log P_B) deviates beyond entry_z standard
+    # deviations, it reverts toward zero — the trade captures that reversion.
+    #
+    # entry_z           : z-score threshold to open a position (spread ≥ 2σ from mean).
+    #                     Standard academic value (Gatev et al. 2006): 2.0.
+    # exit_z            : z-score at which to close (spread converged to mean ≈ 0).
+    #                     Slightly above 0 to avoid noise at the mean line.
+    # stop_z            : z-score beyond which the spread is diverging, not converging.
+    #                     Stop losses are rare in mean-reverting strategies but
+    #                     necessary to prevent "it will revert eventually" blow-ups.
+    # beta_window        : rolling OLS window for hedge ratio estimation (days).
+    #                     60 days: adapts to slow regime shifts without over-fitting.
+    # z_window           : rolling mean/std window for z-score normalisation.
+    #                     Must match beta_window so the spread distribution is stable.
+    # max_holding_days   : hard time stop — if spread hasn't converged in 15 days
+    #                      something structural has changed; cut the trade.
+    # borrow_rate_annual : annual stock borrow cost on the short leg.
+    #                      50 bps is typical for large-cap S&P 500 names.
+    "entry_z":           2.0,
+    "exit_z":            0.25,
+    "stop_z":            3.5,
+    "beta_window":       60,
+    "z_window":          60,
+    "max_holding_days":  15,
+    "borrow_rate_annual": 0.005,
+}
+
+EVENT_DRIVEN_BASE: dict = {
+    # Post-Earnings Announcement Drift (PEAD) strategy.
+    # Alpha source: after a positive earnings surprise, prices drift higher for
+    # 5–60 days (Rendleman et al. 1982, Bernard & Thomas 1989).  The strategy
+    # enters AFTER the earnings blackout window lifts and rides the drift.
+    #
+    # gap_threshold     : minimum earnings gap to qualify (2% = modest beat).
+    # pead_min_signal   : minimum PEAD z-score to enter (scale −1 to +1;
+    #                     0.20 corresponds to a 2% gap — same as gap_threshold).
+    # pead_exit_threshold: exit when pead_signal drops below this; negative
+    #                     means the drift has reversed (earnings re-rated lower).
+    # entry_window_bars : look for an earnings gap within this many recent bars.
+    #                     Must be > blackout window (±3) so entry is possible
+    #                     after the blackout lifts; default 10 = bars t+4…t+13.
+    # volume_mult       : volume confirmation — post-earnings institutional flow
+    #                     should keep volume elevated above the 20-bar average.
+    # ma_filter_period  : close must be above this short MA to confirm upward drift.
+    # stop_loss_atr     : hard stop in ATR multiples (wider than MR — earnings
+    #                     reactions are noisy; 1.5 gives room for initial volatility).
+    # trailing_stop_atr : trailing stop to lock in drift profits as price moves up.
+    # max_holding_days  : PEAD drift typically resolves in 5–15 days; cap at 7.
+    "gap_threshold":        0.02,
+    "pead_min_signal":      0.20,
+    "pead_exit_threshold": -0.10,
+    "entry_window_bars":   10,
+    "volume_mult":          1.3,
+    "ma_filter_period":     5,
+    "stop_loss_atr":        1.5,
+    "trailing_stop_atr":    2.0,
+    "max_holding_days":     7,
+}
+
 _REGIME_TO_STRATEGY: dict[str, str] = {
     # Directional trend regimes
     "Trending-Up":      "Momentum",            # follow the trend long
@@ -123,8 +185,8 @@ _REGIME_TO_STRATEGY: dict[str, str] = {
     # Statistical regimes
     "Mean-Reverting":   "AlphaCombined",        # primary regime for multi-factor MR
     "Neutral":          "MLSignal",             # no strong structural bias: ML learns from data
-    # Exogenous event regime
-    "Event-Driven":     "AlphaCombined",        # post-event idiosyncratic drift + volume exhaustion
+    # Exogenous event regime — dedicated PEAD strategy
+    "Event-Driven":     "EventDriven",          # post-earnings drift: enter after blackout, ride PEAD
     # Legacy label — kept for backward compatibility with any cached data
     "Trending":         "Momentum",
 }
@@ -135,6 +197,8 @@ _STRATEGY_TO_BASE: dict[str, dict] = {
     "VolatilityBreakout": VOLATILITY_BREAKOUT_BASE,
     "AlphaCombined":      ALPHA_COMBINED_BASE,
     "MLSignal":           ML_SIGNAL_BASE,
+    "EventDriven":        EVENT_DRIVEN_BASE,
+    "PairTrading":        PAIR_TRADING_BASE,
 }
 
 _HYPOTHESIS_PROMPT = """\
@@ -154,6 +218,7 @@ AVAILABLE STRATEGY CLASSES:
 3. VolatilityBreakout  — BB squeeze → expansion + ATR surge. Edge: compressed volatility preceding directional move.
 4. AlphaCombined       — Cross-sectional multi-factor signal (CS-MR + residual + vol-spike + momentum). Edge: diversified alpha, higher trade frequency, market-neutral component.
 5. MLSignal            — Gradient-boosting ML probability signal. Edge: learns nonlinear patterns from lagged features in low-structural-bias regimes.
+6. EventDriven         — Post-Earnings Announcement Drift (PEAD): enter after blackout, ride earnings gap drift. Edge: systematic under-reaction to earnings surprises (Bernard & Thomas 1989).
 
 REGIME RULE SELECTED: {regime_rule_strategy}
 
@@ -354,6 +419,124 @@ def _compute_ml_signal_params(
     return p, rules
 
 
+def _compute_event_driven_params(
+    atr_pct: float, pead_signal_recent: float
+) -> tuple[dict, list[str]]:
+    """
+    Deterministic EventDriven (PEAD) parameter rules.  Returns (params, rule_log).
+
+    Parameter adjustment logic
+    --------------------------
+    pead_signal_recent > 0.50  (gap ≥ 5%):
+        Large earnings surprise → stronger, longer drift expected.
+        Loosen pead_min_signal to 0.10 (don't require signal to stay high),
+        extend max_holding_days to 10 (drift lasts longer on big beats).
+
+    atr_pct > 0.025:
+        High post-earnings volatility — widen both stops so we are not
+        stopped out by the normal noise following an announcement.
+
+    atr_pct < 0.015:
+        Very low volatility — drift resolves slowly; extend max hold to 10.
+        Require tighter volume confirmation (1.5×) since low-vol names have
+        less liquidity expansion post-earnings.
+    """
+    p = copy.deepcopy(EVENT_DRIVEN_BASE)
+    rules: list[str] = []
+
+    if pead_signal_recent > 0.50:
+        p["pead_min_signal"]  = 0.10
+        p["max_holding_days"] = 10
+        rules.append(
+            f"Large PEAD signal {pead_signal_recent:.2f} > 0.50 (gap ≥ 5%): "
+            "pead_min_signal=0.10, max_holding_days=10 "
+            "(strong beat — drift expected to persist longer)"
+        )
+
+    if atr_pct > 0.025:
+        p["stop_loss_atr"]    += 0.5
+        p["trailing_stop_atr"] += 0.5
+        rules.append(
+            f"High ATR {atr_pct:.2%} > 2.5%: "
+            f"stop_loss_atr={p['stop_loss_atr']}, trailing={p['trailing_stop_atr']} "
+            "(high post-earnings noise — widen stops)"
+        )
+
+    if atr_pct < 0.015:
+        p["max_holding_days"] = max(p["max_holding_days"], 10)
+        p["volume_mult"]      = 1.5
+        rules.append(
+            f"Low ATR {atr_pct:.2%} < 1.5%: "
+            f"max_holding_days={p['max_holding_days']}, volume_mult=1.5 "
+            "(slow drift in low-vol — extend hold, tighten volume confirmation)"
+        )
+
+    return p, rules
+
+
+def _compute_pair_trading_params(
+    hurst: float, atr_pct: float
+) -> tuple[dict, list[str]]:
+    """
+    Deterministic PairTrading parameter rules.  Returns (params, rule_log).
+
+    Parameter adjustment logic
+    --------------------------
+    hurst < 0.45  (strong mean-reversion regime):
+        High-conviction convergence environment — tighten entry_z slightly (1.8)
+        to enter more frequently when regime structure favors reversion.
+
+    hurst > 0.55  (trending regime):
+        Pairs spreads are more likely to trend/diverge; widen entry threshold
+        to 2.3 and tighten stop to 3.0 — only trade the most extreme dislocations
+        and cut quickly if they continue diverging.
+
+    atr_pct > 0.025  (high volatility):
+        Larger daily price swings inflate z-scores spuriously.  Widen stop_z
+        to 4.0 so we don't stop out on noise, and extend max holding to 20 days
+        as convergence takes longer in volatile markets.
+
+    atr_pct < 0.015  (low volatility):
+        Quiet markets have very stable spreads; tighten entry_z to 1.8 to capture
+        the smaller but more reliable dislocations.
+    """
+    p     = copy.deepcopy(PAIR_TRADING_BASE)
+    rules: list[str] = []
+
+    if hurst < 0.45:
+        p["entry_z"] = 1.8
+        rules.append(
+            f"Hurst {hurst:.3f} < 0.45 (strong mean-reversion): "
+            "entry_z=1.8 — tighter threshold in high-conviction reversion regime"
+        )
+
+    if hurst > 0.55:
+        p["entry_z"] = 2.3
+        p["stop_z"]  = 3.0
+        rules.append(
+            f"Hurst {hurst:.3f} > 0.55 (trending market): "
+            "entry_z=2.3, stop_z=3.0 — only extreme dislocations; cut divergers quickly"
+        )
+
+    if atr_pct > 0.025:
+        p["stop_z"]           = 4.0
+        p["max_holding_days"] = 20
+        rules.append(
+            f"High ATR {atr_pct:.2%} > 2.5%: "
+            "stop_z=4.0, max_holding_days=20 — wider stop in volatile market; "
+            "convergence takes longer"
+        )
+
+    if atr_pct < 0.015:
+        p["entry_z"] = min(p["entry_z"], 1.8)
+        rules.append(
+            f"Low ATR {atr_pct:.2%} < 1.5%: "
+            f"entry_z={p['entry_z']:.1f} — smaller dislocations are reliable in quiet market"
+        )
+
+    return p, rules
+
+
 class StrategySelector:
     def __init__(self, llm_client: callable, verbose: bool = False):
         self.llm_client = llm_client
@@ -376,11 +559,12 @@ class StrategySelector:
         strategy     = _REGIME_TO_STRATEGY.get(regime_label, "Momentum")
         base_params  = copy.deepcopy(_STRATEGY_TO_BASE[strategy])
 
-        hurst     = float(regime.get("hurst", 0.5))
-        atr_pct   = float(regime.get("atr_pct", 0.02))
-        vol_ratio = float((ohlcv_features or {}).get("volume_ratio_30d", 1.0))
-        rsi       = float((ohlcv_features or {}).get("rsi_14", 50.0))
-        ret_20d   = float((ohlcv_features or {}).get("return_20d", 0.0))
+        hurst              = float(regime.get("hurst", 0.5))
+        atr_pct            = float(regime.get("atr_pct", 0.02))
+        vol_ratio          = float((ohlcv_features or {}).get("volume_ratio_30d", 1.0))
+        rsi                = float((ohlcv_features or {}).get("rsi_14", 50.0))
+        ret_20d            = float((ohlcv_features or {}).get("return_20d", 0.0))
+        pead_signal_recent = float((ohlcv_features or {}).get("pead_signal_recent", 0.0))
 
         # ── Deterministic parameter computation ───────────────────────────────
         if strategy == "Momentum":
@@ -391,21 +575,17 @@ class StrategySelector:
             adjusted_params, rule_log = _compute_alpha_combined_params(atr_pct, hurst, regime_label)
         elif strategy == "MLSignal":
             adjusted_params, rule_log = _compute_ml_signal_params(atr_pct, regime_label)
+        elif strategy == "EventDriven":
+            adjusted_params, rule_log = _compute_event_driven_params(atr_pct, pead_signal_recent)
         else:
             adjusted_params, rule_log = _compute_mean_reversion_params(atr_pct)
 
-        # ── Regime-specific overrides (Momentum only — AlphaCombined handles its own) ──
+        # ── Regime-specific overrides ─────────────────────────────────────────
         # Crisis: tighten stops and shorten max hold to reduce exposure in panic conditions
         if regime_label == "Crisis" and strategy == "Momentum":
             adjusted_params["stop_loss_atr"]    = min(adjusted_params.get("stop_loss_atr", 1.5), 1.0)
             adjusted_params["max_holding_days"] = min(adjusted_params.get("max_holding_days", 10), 5)
             rule_log.append("Crisis override: stop_loss_atr <= 1.0, max_holding_days <= 5")
-
-        # Event-Driven: target short gap-fill window (5–7 days post-earnings)
-        if regime_label == "Event-Driven" and strategy == "Mean-Reversion":
-            adjusted_params["max_holding_days"]      = min(adjusted_params.get("max_holding_days", 10), 7)
-            adjusted_params["rsi_entry_threshold"]   = max(adjusted_params.get("rsi_entry_threshold", 30), 35)
-            rule_log.append("Event-Driven override: max_holding_days <= 7 (gap-fill window)")
 
         # Trending-Down: tighten entry to only buy deep oversold, reduce hold
         if regime_label == "Trending-Down" and strategy == "Mean-Reversion":

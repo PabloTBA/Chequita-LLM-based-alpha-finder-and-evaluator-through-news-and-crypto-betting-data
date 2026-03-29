@@ -5,10 +5,10 @@ Three-step screener that goes from raw news articles to 20 per-ticker verdicts.
 
 Step 1 — prefilter  (no LLM)
     Combine all article sources, group by ticker, sum composite_scores,
-    return top-50 as a DataFrame.
+    return top-100 as a DataFrame.
 
 Step 2 — shortlist  (1 LLM call)
-    Feed top-50 tickers + macro filter + OHLCV features to LLM.
+    Feed top-100 tickers + macro filter + OHLCV features to LLM.
     LLM returns exactly 20 tickers.  Falls back to top-20 by score on parse failure.
 
 Step 3 — screen_tickers  (1 LLM call per ticker)
@@ -30,11 +30,11 @@ import json
 import pandas as pd
 
 VALID_VERDICTS  = {"buy", "watch", "avoid"}
-PREFILTER_LIMIT = 50
-SHORTLIST_LIMIT = 20
+PREFILTER_LIMIT = 100
+SHORTLIST_LIMIT = 50
 
 _SHORTLIST_PROMPT = """\
-You are a stock screener. Given the top-50 tickers ranked by news score, \
+You are a stock screener. Given the top-100 tickers ranked by news score, \
 the current macro environment, and OHLCV summaries, select exactly {n} tickers \
 that represent the highest-conviction opportunities.
 
@@ -94,7 +94,7 @@ class TickerScreener:
     def prefilter(self, articles: dict[str, pd.DataFrame]) -> pd.DataFrame:
         """
         Combine all article sources, group by ticker, aggregate scores,
-        return top-50 as DataFrame with columns [ticker, composite_score].
+        return top-100 as DataFrame with columns [ticker, composite_score].
 
         Scoring aggregation — hybrid of max and normalised sum:
           per_ticker_score = 0.7 × max_article_score

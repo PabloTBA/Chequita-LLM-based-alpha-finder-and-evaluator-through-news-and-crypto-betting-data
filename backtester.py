@@ -11,6 +11,8 @@ Strategies
   VolatilityBreakout— BB squeeze → expansion breakout + volume confirmation
   AlphaCombined     — pre-computed cross-sectional multi-factor alpha signal
   MLSignal          — ensemble ML probability signal (4-model average)
+  EventDriven       — Post-Earnings Announcement Drift (PEAD): enter after blackout,
+                      ride earnings gap drift; exit on PEAD fade or max hold
 
 Position sizing (volatility-adjusted)
 --------------------------------------
@@ -52,6 +54,21 @@ Exit priority (MLSignal)
   3. ML reversal      : ml_signal < reversal_threshold  (model loses conviction)
   4. Max holding      : holding_days ≥ max_holding_days
 
+Entry conditions (EventDriven)
+--------------------------------
+  1. Positive earnings gap > gap_threshold occurred within last entry_window_bars
+  2. pead_signal > pead_min_signal  (PEAD drift still active; filled forward 60d)
+  3. Close > ma_filter_period-day MA  (confirms upward drift continuation)
+  4. Volume > volume_mult × 20-bar average  (elevated post-announcement flow)
+  5. NOT inside earnings blackout window  (trade the drift, not the announcement)
+
+Exit priority (EventDriven)
+-----------------------------
+  1. Hard stop loss   : close < entry − stop_loss_atr × ATR_at_entry
+  2. Trailing stop    : close < peak  − trailing_stop_atr × ATR
+  3. PEAD fade        : pead_signal < pead_exit_threshold  (drift reversed)
+  4. Max holding      : holding_days ≥ max_holding_days
+
 Public interface
 ----------------
   bt     = Backtester(initial_portfolio=100_000.0)
@@ -69,6 +86,7 @@ RSI_PERIOD        = 14
 DEFAULT_SLIP_BPS  = 10     # 10 basis points (0.10%) per side — fallback only
 ANNUAL_RF         = 0.045  # risk-free rate — must match diagnostics_engine.py
 DAILY_RF          = ANNUAL_RF / 252  # T-bill daily return earned on idle (flat) days
+BORROW_RATE_DAILY = 0.005 / 252      # 50 bps/yr short-leg stock borrow cost (liquid large caps)
 
 # ADV-tiered slippage (basis points per side).
 # Mega-caps trade inside the spread; small-caps incur significant market impact.
@@ -138,6 +156,8 @@ class Backtester:
             trade_log = self._run_alpha_combined(ohlcv, params)
         elif strategy_type == "MLSignal":
             trade_log = self._run_ml_signal(ohlcv, params)
+        elif strategy_type == "EventDriven":
+            trade_log = self._run_event_driven(ohlcv, params)
         else:
             trade_log = self._run_mean_reversion(ohlcv, params)
 
@@ -380,6 +400,499 @@ class Backtester:
             "returns":      raw_returns,
             "summary":      summary,
             "slippage_bps": round(self._slip * 10_000, 1),
+        }
+
+    # ── pair trading ─────────────────────────────────────────────────────────
+
+    def run_pair(
+        self,
+        ticker_a:    str,
+        ticker_b:    str,
+        ohlcv_a:     pd.DataFrame,
+        ohlcv_b:     pd.DataFrame,
+        params:      dict,
+        hedge_ratio: float = 1.0,
+        adv_a:       float = 0.0,
+        adv_b:       float = 0.0,
+    ) -> dict:
+        """
+        Back-test Relative Value / Pair Trading on two cointegrated tickers.
+
+        Strategy mechanics (simulated long/short, no real broker required)
+        ------------------------------------------------------------------
+        The spread is defined as:
+            spread[t] = log(P_A[t]) - beta * log(P_B[t])
+
+        where beta (hedge_ratio) is estimated via rolling OLS over beta_window days
+        so it adapts to slow structural shifts without overfitting.
+
+        The spread is then z-scored over the same z_window:
+            z[t] = (spread[t] - mean(spread, z_window)) / std(spread, z_window)
+
+        Entry signals:
+            z > entry_z  → short spread: SHORT A (overvalued), LONG B (undervalued)
+            z < -entry_z → long spread:  LONG A (undervalued), SHORT B (overvalued)
+
+        Position sizing (dollar-neutral per leg):
+            risk_per_trade = 1% of portfolio on a (stop_z - entry_z) spread move
+            notional_a     = portfolio × 0.01 / (stop_z - entry_z)
+            size_a (shares)= notional_a / close_a
+            size_b (shares)= size_a × beta  (dollar neutrality via hedge ratio)
+
+        Short-leg simulation:
+            LONG  leg PnL  = (exit_px - entry_px) × size     (buy low, sell high)
+            SHORT leg PnL  = (entry_px - exit_px) × size - borrow_cost
+            borrow_cost    = entry_px × size × BORROW_RATE_DAILY × holding_days
+
+        Slippage applied to all four executions (entry A, entry B, exit A, exit B).
+
+        Exit conditions (priority order):
+            1. Stop loss     : |z| > stop_z   (spread diverging — thesis failed)
+            2. Target        : |z| < exit_z   (spread converged to mean)
+            3. Max hold      : holding_days ≥ max_holding_days
+
+        Returns
+        -------
+        dict with keys:
+            ticker_a, ticker_b, strategy ("PairTrading"),
+            trade_log, equity_curve, returns, summary,
+            hedge_ratio, slippage_bps
+        """
+        if adv_a > 0 or adv_b > 0:
+            avg_adv   = (adv_a + adv_b) / max(int(adv_a > 0) + int(adv_b > 0), 1)
+            self._slip = _slip_bps_for_adv(avg_adv) / 10_000
+        else:
+            self._slip = self._default_slip_bps / 10_000
+
+        trade_log    = self._run_pair_trading(ohlcv_a, ohlcv_b, params, hedge_ratio)
+        equity_curve = self._build_pair_equity_curve(ohlcv_a, ohlcv_b, trade_log)
+        returns      = self._build_pair_returns(equity_curve, trade_log)
+        summary      = self._summarize_pair(trade_log, equity_curve)
+
+        return {
+            "ticker_a":     ticker_a,
+            "ticker_b":     ticker_b,
+            "strategy":     "PairTrading",
+            "trade_log":    trade_log,
+            "equity_curve": equity_curve,
+            "returns":      returns,
+            "summary":      summary,
+            "hedge_ratio":  round(hedge_ratio, 4),
+            "slippage_bps": round(self._slip * 10_000, 1),
+        }
+
+    def _run_pair_trading(
+        self, ohlcv_a: pd.DataFrame, ohlcv_b: pd.DataFrame,
+        params: dict, initial_hedge: float,
+    ) -> list[dict]:
+        """
+        Core pair trading simulation engine.
+
+        Uses a rolling hedge ratio (60-day OLS) so the spread remains
+        stationary even as the fundamental relationship slowly drifts.
+        The z-score is computed over the same window with shift(1) throughout
+        to prevent look-ahead bias.
+        """
+        entry_z       = float(params.get("entry_z",           2.0))
+        exit_z        = float(params.get("exit_z",            0.25))
+        stop_z        = float(params.get("stop_z",            3.5))
+        beta_window   = int(params.get("beta_window",         60))
+        z_window      = int(params.get("z_window",            60))
+        max_hold      = int(params.get("max_holding_days",    15))
+        borrow_rate   = float(params.get("borrow_rate_annual", 0.005)) / 252
+
+        # Align close series on common trading dates
+        close_a = ohlcv_a["Close"].astype(float)
+        close_b = ohlcv_b["Close"].astype(float)
+        close_a, close_b = close_a.align(close_b, join="inner")
+
+        if len(close_a) < beta_window + z_window + 5:
+            return []
+
+        log_a = np.log(close_a.values.astype(float))
+        log_b = np.log(close_b.values.astype(float))
+
+        # ── Rolling OLS hedge ratio ───────────────────────────────────────────
+        # beta[t] estimated from (t - beta_window) to (t-1) — shift(1) via
+        # indexing [i-beta_window : i] where i is the current bar.
+        beta_vals = np.full(len(log_a), np.nan)
+        for i in range(beta_window, len(log_a)):
+            y_w = log_a[i - beta_window: i]
+            x_w = log_b[i - beta_window: i]
+            x_dm = x_w - x_w.mean()
+            y_dm = y_w - y_w.mean()
+            var_x = float((x_dm ** 2).sum())
+            if var_x > 1e-12:
+                beta_vals[i] = float((x_dm * y_dm).sum() / var_x)
+            else:
+                beta_vals[i] = initial_hedge
+
+        beta_series = pd.Series(beta_vals, index=close_a.index)
+
+        # ── Spread = log(P_A) - beta * log(P_B) ──────────────────────────────
+        spread_vals = log_a - beta_vals * log_b
+        spread      = pd.Series(spread_vals, index=close_a.index)
+
+        # ── Rolling z-score of spread (shift(1) to prevent look-ahead) ───────
+        # The rolling mean/std use windows ending at t-1, so z-score on bar t
+        # is based purely on history before bar t.
+        spread_mean = spread.rolling(z_window).mean().shift(1)
+        spread_std  = spread.rolling(z_window).std(ddof=1).shift(1)
+        z_raw       = (spread - spread_mean) / spread_std.replace(0, np.nan)
+
+        start = beta_window + z_window + 1
+
+        trades       = []
+        in_position  = False
+        equity       = self.initial_portfolio
+        direction    = ""    # "long_spread" or "short_spread"
+        entry_date   = None
+        holding_days = 0
+        entry_ca = entry_cb = size_a = size_b = 0.0
+        entry_z_val = 0.0
+
+        for i in range(start, len(close_a)):
+            date = close_a.index[i]
+            ca   = float(close_a.iloc[i])
+            cb   = float(close_b.iloc[i])
+            z    = float(z_raw.iloc[i]) if not np.isnan(z_raw.iloc[i]) else np.nan
+            beta = float(beta_series.iloc[i]) if not np.isnan(beta_series.iloc[i]) else initial_hedge
+
+            if np.isnan(z):
+                continue
+
+            if not in_position:
+                if abs(z) < entry_z:
+                    continue
+
+                # Dollar-neutral sizing: risk 1% portfolio on (stop_z - entry_z) spread move
+                # notional_a = portfolio × 0.01 / (stop_z - entry_z)
+                # This ensures a stop-out at stop_z costs at most 1% per trade.
+                denom = max(stop_z - abs(z), 0.5)   # floor at 0.5z to avoid gigantic sizing
+                notional_a = (equity * RISK_PER_TRADE) / denom
+                size_a     = notional_a / (ca * (1 + self._slip))
+                size_b     = size_a * abs(beta)
+
+                in_position  = True
+                holding_days = 0
+                entry_date   = date
+                entry_z_val  = z
+                direction    = "short_spread" if z > 0 else "long_spread"
+
+                if direction == "short_spread":
+                    # Short A (entry: sell at ca with slip credit lost)
+                    # Long  B (entry: buy  at cb with slip paid)
+                    entry_ca = ca * (1 - self._slip)   # received for short
+                    entry_cb = cb * (1 + self._slip)   # paid for long
+                else:
+                    # Long  A (entry: buy  at ca)
+                    # Short B (entry: sell at cb)
+                    entry_ca = ca * (1 + self._slip)
+                    entry_cb = cb * (1 - self._slip)
+            else:
+                holding_days += 1
+
+                exit_reason: str | None = None
+
+                if direction == "short_spread":
+                    if z < -stop_z:            # spread blew out in wrong direction
+                        exit_reason = "stop_loss"
+                    elif z > stop_z:           # also stop-out: spread diverged further
+                        exit_reason = "stop_loss"
+                    elif z < exit_z:           # converged toward mean — target reached
+                        exit_reason = "z_cross"
+                else:  # long_spread
+                    if z > stop_z:
+                        exit_reason = "stop_loss"
+                    elif z < -stop_z:
+                        exit_reason = "stop_loss"
+                    elif z > -exit_z:
+                        exit_reason = "z_cross"
+
+                if exit_reason is None and holding_days >= max_hold:
+                    exit_reason = "max_holding"
+
+                if exit_reason:
+                    if direction == "short_spread":
+                        # Cover short A (buy back at ca), sell long B (at cb)
+                        exit_ca = ca * (1 + self._slip)   # pay slip to cover
+                        exit_cb = cb * (1 - self._slip)   # receive minus slip
+                        pnl_a   = (entry_ca - exit_ca) * size_a   # short A: sold high, buy back
+                        pnl_b   = (exit_cb  - entry_cb) * size_b  # long  B: buy low, sold high
+                    else:
+                        # Sell long A, cover short B
+                        exit_ca = ca * (1 - self._slip)
+                        exit_cb = cb * (1 + self._slip)
+                        pnl_a   = (exit_ca  - entry_ca) * size_a  # long  A
+                        pnl_b   = (entry_cb - exit_cb) * size_b   # short B: sold high, buy back
+
+                    # Borrow cost: charged on the notional of the short leg
+                    short_notional = (
+                        entry_ca * size_a if direction == "short_spread"
+                        else entry_cb * size_b
+                    )
+                    borrow_cost = short_notional * borrow_rate * holding_days
+
+                    gross_pnl = pnl_a + pnl_b
+                    slip_cost = abs(gross_pnl - (
+                        (entry_ca - exit_ca) * size_a + (exit_cb - entry_cb) * size_b
+                        if direction == "short_spread"
+                        else (exit_ca - entry_ca) * size_a + (entry_cb - exit_cb) * size_b
+                    ))
+                    net_pnl   = gross_pnl - borrow_cost
+                    equity   += net_pnl
+
+                    trades.append({
+                        "entry_date":   entry_date,
+                        "exit_date":    date,
+                        "holding_days": int(holding_days),
+                        "direction":    direction,
+                        "entry_z":      round(float(entry_z_val), 4),
+                        "exit_z":       round(float(z), 4),
+                        "entry_price_a": round(float(entry_ca), 4),
+                        "entry_price_b": round(float(entry_cb), 4),
+                        "exit_price_a":  round(float(exit_ca), 4),
+                        "exit_price_b":  round(float(exit_cb), 4),
+                        "size_a":        round(float(size_a), 4),
+                        "size_b":        round(float(size_b), 4),
+                        "pnl_a":         round(float(pnl_a), 2),
+                        "pnl_b":         round(float(pnl_b), 2),
+                        "borrow_cost":   round(float(borrow_cost), 2),
+                        "pnl":           round(float(net_pnl), 2),
+                        "gross_pnl":     round(float(gross_pnl), 2),
+                        "slippage_cost": round(float(slip_cost), 2),
+                        "exit_reason":   exit_reason,
+                        "reached_1r":    abs(z) > stop_z - 0.5 if exit_reason == "z_cross" else False,
+                    })
+                    in_position = False
+
+        return trades
+
+    def _build_pair_equity_curve(
+        self,
+        ohlcv_a: pd.DataFrame,
+        ohlcv_b: pd.DataFrame,
+        trade_log: list[dict],
+    ) -> pd.Series:
+        """
+        Daily mark-to-market equity for a pair trade.
+
+        For an open trade, unrealised P&L on each day is:
+            long leg:  (close_today - entry_price) × size
+            short leg: (entry_price - close_today) × size  (inverted for short)
+        Combined unrealised = pnl_long + pnl_short at today's close.
+        """
+        close_a = ohlcv_a["Close"].astype(float)
+        close_b = ohlcv_b["Close"].astype(float)
+        close_a, close_b = close_a.align(close_b, join="inner")
+
+        equity = pd.Series(self.initial_portfolio, index=close_a.index, dtype=float)
+        if not trade_log:
+            return equity
+
+        date_to_idx = {d: i for i, d in enumerate(close_a.index)}
+        cash        = self.initial_portfolio
+
+        for trade in sorted(trade_log, key=lambda t: t["entry_date"]):
+            ei = date_to_idx.get(trade["entry_date"])
+            xi = date_to_idx.get(trade["exit_date"])
+            if ei is None or xi is None:
+                cash += trade["pnl"]
+                continue
+
+            direction  = trade["direction"]
+            ea, eb     = trade["entry_price_a"], trade["entry_price_b"]
+            sa, sb     = trade["size_a"],         trade["size_b"]
+
+            hold_ca = close_a.iloc[ei: xi + 1].values
+            hold_cb = close_b.iloc[ei: xi + 1].values
+
+            if direction == "short_spread":
+                # Short A: profit when price drops; Long B: profit when price rises
+                unrealised = (ea - hold_ca) * sa + (hold_cb - eb) * sb
+            else:
+                # Long A: profit when price rises; Short B: profit when price drops
+                unrealised = (hold_ca - ea) * sa + (eb - hold_cb) * sb
+
+            equity.iloc[ei: xi + 1] = cash + unrealised
+
+            cash += trade["pnl"]
+            equity.iloc[xi + 1:] = cash
+
+        return equity
+
+    def _build_pair_returns(
+        self, equity_curve: pd.Series, trade_log: list[dict]
+    ) -> pd.Series:
+        """Daily returns; flat days earn DAILY_RF (idle cash earns T-bill rate)."""
+        returns     = equity_curve.pct_change().fillna(0.0)
+        in_position = pd.Series(False, index=equity_curve.index)
+        for trade in trade_log:
+            try:
+                in_position.loc[trade["entry_date"]: trade["exit_date"]] = True
+            except Exception:
+                pass
+        returns[~in_position] = DAILY_RF
+        return returns
+
+    @staticmethod
+    def _summarize_pair(trade_log: list[dict], equity_curve: pd.Series) -> dict:
+        """
+        Extended summary for pair trades — includes leg-level breakdown and
+        direction analysis on top of the standard per-strategy metrics.
+        """
+        if not trade_log:
+            return {
+                "total_return": 0.0, "trade_count": 0, "win_rate": 0.0,
+                "total_slippage_cost": 0.0, "gross_return": 0.0,
+                "entry_efficiency": 0.0, "avg_win": 0.0, "avg_loss": 0.0,
+                "payoff_ratio": 0.0, "exit_reason_breakdown": {},
+                "avg_holding_days": 0.0,
+                # Pair-specific
+                "total_borrow_cost": 0.0,
+                "direction_breakdown": {},
+                "avg_entry_z": 0.0,
+                "avg_exit_z":  0.0,
+            }
+
+        initial      = equity_curve.iloc[0]
+        final        = equity_curve.iloc[-1]
+        total_return = (final - initial) / initial if initial != 0 else 0.0
+
+        wins   = [t for t in trade_log if t["pnl"] > 0]
+        losses = [t for t in trade_log if t["pnl"] < 0]
+
+        total_slip   = sum(t.get("slippage_cost", 0.0) for t in trade_log)
+        total_borrow = sum(t.get("borrow_cost",   0.0) for t in trade_log)
+        gross_total  = sum(t.get("gross_pnl",     t["pnl"]) for t in trade_log)
+        gross_return = gross_total / initial if initial != 0 else 0.0
+
+        avg_win  = float(np.mean([t["pnl"] for t in wins]))      if wins   else 0.0
+        avg_loss = float(np.mean([abs(t["pnl"]) for t in losses])) if losses else 0.0
+        payoff_ratio = avg_win / avg_loss if avg_loss > 1e-6 else 0.0
+
+        exit_reasons: dict[str, int] = {}
+        for t in trade_log:
+            r = t.get("exit_reason", "unknown")
+            exit_reasons[r] = exit_reasons.get(r, 0) + 1
+
+        direction_breakdown: dict[str, int] = {}
+        for t in trade_log:
+            d = t.get("direction", "unknown")
+            direction_breakdown[d] = direction_breakdown.get(d, 0) + 1
+
+        avg_hold    = float(np.mean([t.get("holding_days", 0) for t in trade_log]))
+        avg_entry_z = float(np.mean([abs(t.get("entry_z", 0)) for t in trade_log]))
+        avg_exit_z  = float(np.mean([abs(t.get("exit_z",  0)) for t in trade_log]))
+
+        return {
+            "total_return":          round(float(total_return), 6),
+            "gross_return":          round(float(gross_return), 6),
+            "total_slippage_cost":   round(float(total_slip),   2),
+            "total_borrow_cost":     round(float(total_borrow), 2),
+            "trade_count":           len(trade_log),
+            "win_rate":              round(len(wins) / len(trade_log), 4),
+            "entry_efficiency":      round(sum(1 for t in trade_log if t.get("reached_1r")) / len(trade_log), 4),
+            "avg_win":               round(avg_win,        2),
+            "avg_loss":              round(avg_loss,        2),
+            "payoff_ratio":          round(payoff_ratio,    3),
+            "exit_reason_breakdown": exit_reasons,
+            "direction_breakdown":   direction_breakdown,
+            "avg_holding_days":      round(avg_hold,        1),
+            "avg_entry_z":           round(avg_entry_z,     3),
+            "avg_exit_z":            round(avg_exit_z,      3),
+        }
+
+    # ── pair signal status ────────────────────────────────────────────────────
+
+    def _pair_trading_signal(
+        self, ohlcv_a: pd.DataFrame, ohlcv_b: pd.DataFrame,
+        params: dict, portfolio: float, hedge_ratio: float,
+    ) -> dict:
+        """
+        Current-bar signal check for a pair.
+
+        Computes the live z-score on the most recent bar and returns whether
+        entry conditions are met, plus the full projected trade setup.
+        """
+        close_a = ohlcv_a["Close"].astype(float)
+        close_b = ohlcv_b["Close"].astype(float)
+        close_a, close_b = close_a.align(close_b, join="inner")
+
+        if len(close_a) < 62:
+            return {
+                "signal_active": False,
+                "details": "Insufficient history for pair z-score (<62 bars after alignment).",
+                "setup": None, "projected_setup": None,
+            }
+
+        entry_z   = float(params.get("entry_z",        2.0))
+        stop_z    = float(params.get("stop_z",         3.5))
+        beta_w    = int(params.get("beta_window",      60))
+        z_w       = int(params.get("z_window",         60))
+
+        log_a     = np.log(close_a.values.astype(float))
+        log_b     = np.log(close_b.values.astype(float))
+
+        # Compute hedge ratio from last beta_window bars
+        y_w, x_w  = log_a[-beta_w:], log_b[-beta_w:]
+        x_dm      = x_w - x_w.mean()
+        y_dm      = y_w - y_w.mean()
+        var_x     = float((x_dm ** 2).sum())
+        beta_live = float((x_dm * y_dm).sum() / var_x) if var_x > 1e-12 else hedge_ratio
+
+        spread    = log_a - beta_live * log_b
+        sp_series = pd.Series(spread, index=close_a.index)
+        sp_mean   = float(sp_series.iloc[-z_w:-1].mean())
+        sp_std    = float(sp_series.iloc[-z_w:-1].std(ddof=1))
+
+        ca_last   = float(close_a.iloc[-1])
+        cb_last   = float(close_b.iloc[-1])
+        sp_last   = spread[-1]
+
+        if sp_std < 1e-10:
+            return {"signal_active": False, "details": "Spread std ≈ 0 — no signal.", "setup": None, "projected_setup": None}
+
+        z_live    = (sp_last - sp_mean) / sp_std
+        active    = abs(z_live) > entry_z
+        direction = "short_spread" if z_live > 0 else "long_spread"
+
+        setup = None
+        if active:
+            denom       = max(stop_z - abs(z_live), 0.5)
+            notional_a  = (portfolio * RISK_PER_TRADE) / denom
+            s_a         = notional_a / ca_last
+            s_b         = s_a * abs(beta_live)
+            setup = {
+                "direction":     direction,
+                "z_score":       round(z_live, 3),
+                "entry_z":       entry_z,
+                "stop_z":        stop_z,
+                "size_a":        round(s_a, 2),
+                "size_b":        round(s_b, 2),
+                "notional_a":    round(s_a * ca_last, 2),
+                "notional_b":    round(s_b * cb_last, 2),
+                "dollar_risk":   round(portfolio * RISK_PER_TRADE, 2),
+                "beta_live":     round(beta_live, 4),
+                "spread_std":    round(sp_std, 6),
+            }
+
+        return {
+            "signal_active":  active,
+            "z_score":        round(float(z_live), 3),
+            "entry_z":        entry_z,
+            "direction":      direction if active else None,
+            "close_a":        ca_last,
+            "close_b":        cb_last,
+            "beta_live":      round(beta_live, 4),
+            "spread_std":     round(sp_std, 6),
+            "setup":          setup,
+            "projected_setup": setup,
+            "details": (
+                f"Pair z={z_live:.3f} {'>' if z_live > 0 else '<'} "
+                f"±{entry_z:.1f} → {direction.replace('_', ' ').upper() if active else 'NO SIGNAL'}"
+                f" | beta={beta_live:.3f}  spread_std={sp_std:.5f}"
+            ),
         }
 
     # ── strategy engines ──────────────────────────────────────────────────────
@@ -903,6 +1416,161 @@ class Backtester:
 
         return trades
 
+    def _run_event_driven(self, ohlcv: pd.DataFrame, params: dict) -> list[dict]:
+        """
+        EventDriven (PEAD) strategy engine.
+
+        Alpha source: Post-Earnings Announcement Drift (PEAD).
+        After a positive earnings surprise the market systematically under-reacts
+        (Bernard & Thomas 1989, 1990): prices drift higher for 5–60 days in
+        proportion to the gap magnitude.  This strategy enters AFTER the earnings
+        blackout window lifts and rides the drift, exiting when the signal fades.
+
+        Entry conditions (ALL required):
+          1. A positive earnings gap > gap_threshold occurred within the last
+             entry_window_bars bars — detected via rolling max of earnings_gap.
+             Default 10 bars ensures entry is possible after the ±3-bar blackout.
+          2. pead_signal > pead_min_signal — PEAD drift signal is still active.
+             Filled forward for up to 60 days by OHLCVFetcher; scale is −1 to +1
+             where +1 = maximum drift (gap ≥ 10%).
+          3. Close > ma_filter_period-day MA — confirms upward drift continuation
+             and filters out gap-and-trap patterns that quickly reverse.
+          4. Volume > volume_mult × 20-bar average — elevated post-announcement
+             institutional participation confirms continued market attention.
+          5. NOT inside earnings blackout window — we trade the drift, not the
+             announcement itself (avoids straddling the uncertainty window).
+
+        Exit (priority order):
+          1. Hard stop  : close < entry − stop_loss_atr × ATR_at_entry
+          2. Trailing   : close < peak  − trailing_stop_atr × ATR
+          3. PEAD fade  : pead_signal < pead_exit_threshold (drift has reversed;
+                          default −0.10 gives a small buffer before exiting)
+          4. Max hold   : holding_days ≥ max_holding_days (7 default; 10 for large gaps)
+
+        Fall-back: returns [] if pead_signal or earnings_gap columns are absent
+        (OHLCVFetcher.add_earnings_drift_features() was not called).
+        """
+        if "pead_signal" not in ohlcv.columns or "earnings_gap" not in ohlcv.columns:
+            return []   # PEAD features absent — pipeline should have added them
+
+        close  = ohlcv["Close"].astype(float)
+        high   = ohlcv["High"].astype(float)
+        low    = ohlcv["Low"].astype(float)
+        volume = ohlcv["Volume"].astype(float)
+
+        gap_threshold  = float(params.get("gap_threshold",        0.02))
+        pead_min_sig   = float(params.get("pead_min_signal",       0.20))
+        pead_exit_th   = float(params.get("pead_exit_threshold",  -0.10))
+        entry_window   = int(params.get("entry_window_bars",       10))
+        vol_mult       = float(params.get("volume_mult",           1.3))
+        ma_period      = int(params.get("ma_filter_period",        5))
+        stop_atr       = float(params.get("stop_loss_atr",         1.5))
+        trail_atr      = float(params.get("trailing_stop_atr",     2.0))
+        max_hold       = int(params.get("max_holding_days",        7))
+
+        atr      = self._atr(high, low, close)
+        pead_sig = ohlcv["pead_signal"].fillna(0.0).astype(float)
+        earn_gap = ohlcv["earnings_gap"].fillna(0.0).astype(float)
+
+        # Short MA to confirm upward drift continuation after the gap.
+        # shift(1) prevents same-bar look-ahead.
+        ma_short = close.rolling(ma_period).mean().shift(1)
+        vol_ma   = volume.rolling(20).mean().shift(1)
+
+        blackout = (
+            ohlcv["earnings_blackout"]
+            if "earnings_blackout" in ohlcv.columns
+            else pd.Series(False, index=ohlcv.index)
+        )
+
+        # Recent positive gap flag: True if a gap > gap_threshold occurred within
+        # the last entry_window bars.  shift(1) prevents same-bar look-ahead.
+        # With a ±3-bar blackout and entry_window=10, the strategy can enter on
+        # bars t+4 through t+13 after an earnings event at bar t.
+        recent_gap_flag = (
+            earn_gap.gt(gap_threshold)
+            .rolling(entry_window)
+            .max()
+            .shift(1)
+            .fillna(0)
+            .astype(bool)
+        )
+
+        start = max(ATR_PERIOD + 5, ma_period + 5, 25)
+
+        trades       = []
+        in_position  = False
+        equity       = self.initial_portfolio
+        entry_price  = stop_price = trail_stop = pos_size = peak = 0.0
+        entry_date   = None
+        holding_days = 0
+        target_1r    = 0.0
+        reached_1r   = False
+
+        for i in range(start, len(ohlcv)):
+            c  = float(close.iloc[i])
+            a  = float(atr.iloc[i])
+            ps = float(pead_sig.iloc[i])
+            v  = float(volume.iloc[i])
+            vm = float(vol_ma.iloc[i])   if not np.isnan(vol_ma.iloc[i])   else 0.0
+            m5 = float(ma_short.iloc[i]) if not np.isnan(ma_short.iloc[i]) else 0.0
+
+            if np.isnan(a) or a <= 0:
+                continue
+
+            if not in_position:
+                gap_ok     = bool(recent_gap_flag.iloc[i])
+                pead_ok    = ps > pead_min_sig
+                ma_ok      = c > m5 and m5 > 0
+                vol_ok     = v > vol_mult * vm and vm > 0
+                no_blackout = not bool(blackout.iloc[i])
+
+                if gap_ok and pead_ok and ma_ok and vol_ok and no_blackout:
+                    in_position  = True
+                    entry_price  = c * (1 + self._slip)
+                    entry_date   = close.index[i]
+                    stop_price   = entry_price - stop_atr * a
+                    trail_stop   = stop_price
+                    pos_size     = (equity * RISK_PER_TRADE) / (stop_atr * a)
+                    peak         = c
+                    holding_days = 0
+                    target_1r    = entry_price + stop_atr * a
+                    reached_1r   = False
+            else:
+                holding_days += 1
+                peak          = max(peak, c)
+                trail_stop    = max(peak - trail_atr * a, stop_price)
+                h_bar         = float(high.iloc[i])
+                if h_bar >= target_1r:
+                    reached_1r = True
+
+                exit_reason: str | None = None
+                if c < trail_stop:
+                    exit_reason = (
+                        "stop_loss" if trail_stop <= stop_price + 1e-6
+                        else "trailing_stop"
+                    )
+                elif ps < pead_exit_th:
+                    exit_reason = "pead_fade"
+                elif holding_days >= max_hold:
+                    exit_reason = "max_holding"
+
+                if exit_reason:
+                    exit_price  = c * (1 - self._slip)
+                    gross_pnl   = (c - (entry_price / (1 + self._slip))) * pos_size
+                    pnl         = (exit_price - entry_price) * pos_size
+                    equity     += pnl
+                    trades.append(_make_trade(
+                        entry_date, entry_price, close.index[i], exit_price,
+                        holding_days, pos_size, pnl, exit_reason,
+                        gross_pnl=gross_pnl,
+                        slippage_cost=abs(gross_pnl - pnl),
+                        reached_1r=reached_1r,
+                    ))
+                    in_position = False
+
+        return trades
+
     # ── current signal ────────────────────────────────────────────────────────
 
     def signal_status(
@@ -929,6 +1597,8 @@ class Backtester:
                 return self._alpha_combined_signal(ohlcv, params, initial_portfolio)
             if strategy_type == "MLSignal":
                 return self._ml_signal_signal(ohlcv, params, initial_portfolio)
+            if strategy_type == "EventDriven":
+                return self._event_driven_signal(ohlcv, params, initial_portfolio)
             return self._mean_rev_signal(ohlcv, params, initial_portfolio)
         except Exception as e:
             return {"signal_active": None, "details": f"Signal check failed: {e}", "setup": None}
@@ -1330,6 +2000,135 @@ class Backtester:
                 f" | Close {c:.2f} vs Upper BB {ub:.2f}"
                 f" | Volume {v:,.0f} vs {volume_mult}x avg {vm:,.0f}"
             ),
+        }
+
+    def _event_driven_signal(
+        self, ohlcv: pd.DataFrame, params: dict, portfolio: float
+    ) -> dict:
+        """Current-bar signal check for EventDriven (PEAD) strategy."""
+        if "pead_signal" not in ohlcv.columns or "earnings_gap" not in ohlcv.columns:
+            return {
+                "signal_active": False,
+                "details": (
+                    "EventDriven: PEAD features absent — call "
+                    "OHLCVFetcher.add_earnings_drift_features() first."
+                ),
+                "setup": None,
+                "projected_setup": None,
+            }
+
+        close  = ohlcv["Close"].astype(float)
+        high   = ohlcv["High"].astype(float)
+        low    = ohlcv["Low"].astype(float)
+        volume = ohlcv["Volume"].astype(float)
+
+        gap_threshold  = float(params.get("gap_threshold",        0.02))
+        pead_min_sig   = float(params.get("pead_min_signal",       0.20))
+        entry_window   = int(params.get("entry_window_bars",       10))
+        vol_mult       = float(params.get("volume_mult",           1.3))
+        ma_period      = int(params.get("ma_filter_period",        5))
+        stop_atr       = float(params.get("stop_loss_atr",         1.5))
+
+        atr      = self._atr(high, low, close)
+        pead_sig = ohlcv["pead_signal"].fillna(0.0).astype(float)
+        earn_gap = ohlcv["earnings_gap"].fillna(0.0).astype(float)
+        ma_short = close.rolling(ma_period).mean()
+        vol_ma   = volume.rolling(20).mean().shift(1)
+        blackout = (
+            ohlcv["earnings_blackout"]
+            if "earnings_blackout" in ohlcv.columns
+            else pd.Series(False, index=ohlcv.index)
+        )
+
+        recent_gap_flag = (
+            earn_gap.gt(gap_threshold)
+            .rolling(entry_window)
+            .max()
+            .shift(1)
+            .fillna(0)
+            .astype(bool)
+        )
+
+        c  = float(close.iloc[-1])
+        a  = float(atr.iloc[-1])   if not pd.isna(atr.iloc[-1])   else 0.0
+        ps = float(pead_sig.iloc[-1])
+        v  = float(volume.iloc[-1])
+        vm = float(vol_ma.iloc[-1]) if not pd.isna(vol_ma.iloc[-1]) else 0.0
+        m5 = float(ma_short.iloc[-1]) if not pd.isna(ma_short.iloc[-1]) else 0.0
+
+        gap_ok     = bool(recent_gap_flag.iloc[-1])
+        pead_ok    = ps > pead_min_sig
+        ma_ok      = c > m5 and m5 > 0
+        vol_ok     = v > vol_mult * vm and vm > 0
+        no_blackout = not bool(blackout.iloc[-1])
+        active     = gap_ok and pead_ok and ma_ok and vol_ok and no_blackout
+
+        setup = None
+        if active and a > 0:
+            stop_dist   = stop_atr * a
+            pos_size    = int((portfolio * RISK_PER_TRADE) / stop_dist)
+            stop_price  = c - stop_dist
+            setup = {
+                "entry_price":   c,
+                "stop_price":    stop_price,
+                "stop_dist":     stop_dist,
+                "position_size": pos_size,
+                "dollar_risk":   portfolio * RISK_PER_TRADE,
+                "current_atr":   a,
+                "pead_signal":   ps,
+                "target":        c + stop_dist,   # 1R minimum target
+            }
+
+        projected_setup = None
+        if a > 0:
+            stop_dist  = stop_atr * a
+            proj_entry = c * (1 + self._slip)
+            proj_stop  = proj_entry - stop_dist
+            proj_size  = int((portfolio * RISK_PER_TRADE) / stop_dist)
+            projected_setup = {
+                "entry_price":   proj_entry,
+                "stop_price":    proj_stop,
+                "stop_dist":     stop_dist,
+                "position_size": proj_size,
+                "dollar_risk":   portfolio * RISK_PER_TRADE,
+                "current_atr":   a,
+                "pead_signal":   ps,
+                "target":        proj_entry + stop_dist,
+                "entry_trigger": (
+                    f"pead_signal > {pead_min_sig:.2f} AND "
+                    f"positive gap > {gap_threshold:.0%} within last {entry_window} bars"
+                ),
+                "volume_needed": vol_mult * vm,
+            }
+
+        # Detail string breaks down each condition so the report shows exactly
+        # which gate is blocking or passing — mirrors the structure of other strategies.
+        condition_parts = [
+            f"gap>{gap_threshold:.0%} in {entry_window}d: {'YES' if gap_ok else 'NO'}",
+            f"PEAD {ps:.2f}>={pead_min_sig:.2f}: {'YES' if pead_ok else 'NO'}",
+            f"above MA({ma_period}) {m5:.2f}: {'YES' if ma_ok else 'NO'}",
+            f"vol {v:,.0f} vs {vol_mult}x avg {vm:,.0f}: {'YES' if vol_ok else 'NO'}",
+            f"outside blackout: {'YES' if no_blackout else 'NO'}",
+        ]
+        details = (
+            f"EventDriven ACTIVE — PEAD drift firing | "
+            + " | ".join(condition_parts)
+            if active
+            else "EventDriven: waiting — " + " | ".join(condition_parts)
+        )
+
+        return {
+            "signal_active":    active,
+            "close":            c,
+            "pead_signal":      ps,
+            "pead_threshold":   pead_min_sig,
+            "recent_gap":       gap_ok,
+            "above_ma":         ma_ok,
+            "volume_confirmed": vol_ok,
+            "outside_blackout": no_blackout,
+            "setup":            setup,
+            "projected_setup":  projected_setup,
+            "details":          details,
         }
 
     # ── equity curve & summary ────────────────────────────────────────────────

@@ -442,6 +442,88 @@ class PipelineOrchestrator:
             [],
         )
 
+        # ── Stage 9b: pair trading analysis ──────────────────────────────────
+        # Runs after regime classification so we have the full shortlisted
+        # universe available.  Pair analysis is cross-sectional — it needs
+        # all tickers' OHLCV simultaneously to find cointegrated pairs.
+        pair_analyses: list[dict] = []
+        if ohlcv_raw and len(actionable) >= 2:
+            print(f"[{_ts()}] [Stage 9b] Scanning for cointegrated pairs in {len(actionable)} tickers ...")
+            try:
+                from pair_selector import PairSelector
+                from strategy_selector import PAIR_TRADING_BASE, _compute_pair_trading_params
+                import copy as _copy
+
+                _pair_ohlcv = {t: ohlcv_raw[t] for t in actionable if ohlcv_raw.get(t) is not None}
+                _selector   = PairSelector(min_corr=0.70, max_coint_pv=0.10, max_pairs=5)
+                _pairs      = self._safe("pair_selector.find_pairs",
+                                         lambda: _selector.find_pairs(_pair_ohlcv), [])
+
+                for _pair in (_pairs or []):
+                    _ta, _tb     = _pair["ticker_a"], _pair["ticker_b"]
+                    _oa          = ohlcv_raw.get(_ta)
+                    _ob          = ohlcv_raw.get(_tb)
+                    if _oa is None or _ob is None:
+                        continue
+
+                    # Use average Hurst and ATR of the two tickers for param tuning
+                    _ra = next((r for r in (regimes or []) if r["ticker"] == _ta), {})
+                    _rb = next((r for r in (regimes or []) if r["ticker"] == _tb), {})
+                    _avg_hurst   = (_ra.get("hurst", 0.5) + _rb.get("hurst", 0.5)) / 2.0
+                    _avg_atr_pct = (_ra.get("atr_pct", 0.02) + _rb.get("atr_pct", 0.02)) / 2.0
+                    _params, _rule_log = _compute_pair_trading_params(_avg_hurst, _avg_atr_pct)
+
+                    print(f"[{_ts()}]   [Stage 9b] Backtesting pair {_ta}/{_tb} "
+                          f"(corr={_pair['correlation']:.3f}  coint_p={_pair['coint_pvalue']:.4f}  "
+                          f"half_life={_pair['halflife_days']:.1f}d) ...")
+
+                    _adv_a = float(features.get(_ta, {}).get("adv_20d", 0))
+                    _adv_b = float(features.get(_tb, {}).get("adv_20d", 0))
+                    _bt_pair = self._safe(
+                        f"backtester.run_pair({_ta}/{_tb})",
+                        lambda _a=_ta, _b=_tb, _oa2=_oa, _ob2=_ob, _p=_params, _hr=_pair["hedge_ratio"]: m["backtester"].run_pair(
+                            _a, _b, _oa2, _ob2, _p,
+                            hedge_ratio=_hr, adv_a=_adv_a, adv_b=_adv_b,
+                        ),
+                        None,
+                    )
+
+                    if _bt_pair and len(_bt_pair.get("trade_log", [])) >= 5:
+                        _diag_pair = self._safe(
+                            f"diagnostics.run({_ta}/{_tb})",
+                            lambda _ta2=_ta, _bt2=_bt_pair: m["diagnostics"].run(
+                                f"{_ta2}/{_tb}",
+                                "PairTrading",
+                                _bt2["trade_log"],
+                                _bt2["returns"],
+                                regime_label="Mean-Reverting",
+                            ),
+                            None,
+                        )
+                        pair_analyses.append({
+                            "pair":        f"{_ta}/{_tb}",
+                            "ticker_a":    _ta,
+                            "ticker_b":    _tb,
+                            "pair_stats":  _pair,
+                            "params":      _params,
+                            "rule_log":    _rule_log,
+                            "backtest":    _bt_pair,
+                            "diagnostic":  _diag_pair,
+                        })
+                        status = "PASS" if (_diag_pair or {}).get("passed") else "FAIL"
+                        sharpe = (_diag_pair or {}).get("metrics", {}).get("sharpe", float("nan"))
+                        print(f"[{_ts()}]   [Stage 9b] {_ta}/{_tb}: {status}  "
+                              f"Sharpe={sharpe:.3f}  trades={len(_bt_pair['trade_log'])}")
+                    else:
+                        print(f"[{_ts()}]   [Stage 9b] {_ta}/{_tb}: skipped — "
+                              f"insufficient trades ({len((_bt_pair or {}).get('trade_log', []))})")
+
+            except Exception as _e:
+                print(f"[{_ts()}] [Stage 9b] Pair analysis error: {_e}")
+
+        if pair_analyses:
+            print(f"[{_ts()}] [Stage 9b] Found {len(pair_analyses)} pair(s) with sufficient trade history.")
+
         # ── Stage 10: per-ticker strategy / backtest / diagnostics / MC ─────
         print(f"[{_ts()}] [Stage 10] Running per-ticker analysis for {len(regimes or [])} tickers in parallel ...")
         strategies:    list[dict] = []
@@ -831,6 +913,7 @@ class PipelineOrchestrator:
             features=features,
             meta_insights=meta_insights,
             portfolio_result=portfolio_result,
+            pair_analyses=pair_analyses,
         )
 
     # ── internal helpers ──────────────────────────────────────────────────────
