@@ -163,7 +163,10 @@ class Backtester:
 
         equity_curve = self._build_equity_curve(ohlcv, trade_log)
         returns      = self._build_returns(ohlcv, trade_log, equity_curve)
-        summary      = self._summarize(trade_log, equity_curve)
+        if strategy_type == "EventDriven":
+            summary = self._summarize_event_driven(trade_log, equity_curve)
+        else:
+            summary = self._summarize(trade_log, equity_curve)
 
         # in_position series — used for exposure-adjusted benchmark
         in_pos = pd.Series(False, index=ohlcv.index)
@@ -577,6 +580,7 @@ class Backtester:
                 holding_days = 0
                 entry_date   = date
                 entry_z_val  = z
+                beta_at_entry = beta   # rolling hedge ratio used for this trade
                 direction    = "short_spread" if z > 0 else "long_spread"
 
                 if direction == "short_spread":
@@ -633,13 +637,18 @@ class Backtester:
                     )
                     borrow_cost = short_notional * borrow_rate * holding_days
 
-                    gross_pnl = pnl_a + pnl_b
-                    slip_cost = abs(gross_pnl - (
-                        (entry_ca - exit_ca) * size_a + (exit_cb - entry_cb) * size_b
-                        if direction == "short_spread"
-                        else (exit_ca - entry_ca) * size_a + (entry_cb - exit_cb) * size_b
-                    ))
-                    net_pnl   = gross_pnl - borrow_cost
+                    # Gross PnL: computed without slippage (using raw entry/exit prices
+                    # before the slip adjustment was applied at execution time)
+                    raw_entry_ca = ca if direction == "short_spread" else ca   # pre-slip entry
+                    raw_entry_cb = cb if direction == "short_spread" else cb
+                    if direction == "short_spread":
+                        gross_pnl = (entry_ca / (1 - self._slip) - exit_ca / (1 + self._slip)) * size_a \
+                                  + (exit_cb  / (1 - self._slip) - entry_cb / (1 + self._slip)) * size_b
+                    else:
+                        gross_pnl = (exit_ca  / (1 - self._slip) - entry_ca / (1 + self._slip)) * size_a \
+                                  + (entry_cb / (1 - self._slip) - exit_cb  / (1 + self._slip)) * size_b
+                    net_pnl   = pnl_a + pnl_b - borrow_cost
+                    slip_cost = abs(gross_pnl - (pnl_a + pnl_b))
                     equity   += net_pnl
 
                     trades.append({
@@ -649,6 +658,7 @@ class Backtester:
                         "direction":    direction,
                         "entry_z":      round(float(entry_z_val), 4),
                         "exit_z":       round(float(z), 4),
+                        "beta_at_entry": round(float(beta_at_entry), 4),
                         "entry_price_a": round(float(entry_ca), 4),
                         "entry_price_b": round(float(entry_cb), 4),
                         "exit_price_a":  round(float(exit_ca), 4),
@@ -785,22 +795,31 @@ class Backtester:
         avg_entry_z = float(np.mean([abs(t.get("entry_z", 0)) for t in trade_log]))
         avg_exit_z  = float(np.mean([abs(t.get("exit_z",  0)) for t in trade_log]))
 
+        beta_vals = [t["beta_at_entry"] for t in trade_log if t.get("beta_at_entry") is not None]
+        avg_beta  = float(np.mean(beta_vals)) if beta_vals else 0.0
+
+        n = len(trade_log)
         return {
-            "total_return":          round(float(total_return), 6),
-            "gross_return":          round(float(gross_return), 6),
-            "total_slippage_cost":   round(float(total_slip),   2),
-            "total_borrow_cost":     round(float(total_borrow), 2),
-            "trade_count":           len(trade_log),
-            "win_rate":              round(len(wins) / len(trade_log), 4),
-            "entry_efficiency":      round(sum(1 for t in trade_log if t.get("reached_1r")) / len(trade_log), 4),
-            "avg_win":               round(avg_win,        2),
-            "avg_loss":              round(avg_loss,        2),
-            "payoff_ratio":          round(payoff_ratio,    3),
-            "exit_reason_breakdown": exit_reasons,
-            "direction_breakdown":   direction_breakdown,
-            "avg_holding_days":      round(avg_hold,        1),
-            "avg_entry_z":           round(avg_entry_z,     3),
-            "avg_exit_z":            round(avg_exit_z,      3),
+            "total_return":              round(float(total_return), 6),
+            "gross_return":              round(float(gross_return), 6),
+            "total_slippage_cost":       round(float(total_slip),   2),
+            "total_borrow_cost":         round(float(total_borrow), 2),
+            "avg_borrow_cost_per_trade": round(float(total_borrow) / n, 2),
+            "trade_count":               n,
+            "win_rate":                  round(len(wins) / n, 4),
+            "entry_efficiency":          round(sum(1 for t in trade_log if t.get("reached_1r")) / n, 4),
+            "avg_win":                   round(avg_win,       2),
+            "avg_loss":                  round(avg_loss,       2),
+            "payoff_ratio":              round(payoff_ratio,   3),
+            "exit_reason_breakdown":     exit_reasons,
+            "direction_breakdown":       direction_breakdown,
+            "avg_holding_days":          round(avg_hold,       1),
+            "avg_entry_z":               round(avg_entry_z,    3),
+            "avg_exit_z":                round(avg_exit_z,     3),
+            # Hedge ratio audit: avg_beta_at_entry should match the static hedge_ratio
+            # from PairSelector.  Large deviations mean the relationship has drifted
+            # and dollar-neutrality may have been temporarily compromised.
+            "avg_beta_at_entry":         round(avg_beta,       4),
         }
 
     # ── pair signal status ────────────────────────────────────────────────────
@@ -1453,6 +1472,12 @@ class Backtester:
         if "pead_signal" not in ohlcv.columns or "earnings_gap" not in ohlcv.columns:
             return []   # PEAD features absent — pipeline should have added them
 
+        # If no earnings events exist at all for this ticker, PEAD has no signal to trade.
+        # fillna(0.0) would make pead_signal always 0, which is below pead_min_signal (0.20),
+        # so no entries would ever fire — but we return [] explicitly for clarity.
+        if ohlcv["earnings_gap"].notna().sum() == 0:
+            return []
+
         close  = ohlcv["Close"].astype(float)
         high   = ohlcv["High"].astype(float)
         low    = ohlcv["Low"].astype(float)
@@ -1469,7 +1494,9 @@ class Backtester:
         max_hold       = int(params.get("max_holding_days",        7))
 
         atr      = self._atr(high, low, close)
-        pead_sig = ohlcv["pead_signal"].fillna(0.0).astype(float)
+        # NaN pead_signal means no active PEAD drift — keep as NaN so the pead_ok
+        # check (ps > pead_min_sig) correctly rejects bars with no drift signal.
+        pead_sig = ohlcv["pead_signal"].astype(float)
         earn_gap = ohlcv["earnings_gap"].fillna(0.0).astype(float)
 
         # Short MA to confirm upward drift continuation after the gap.
@@ -1510,7 +1537,8 @@ class Backtester:
         for i in range(start, len(ohlcv)):
             c  = float(close.iloc[i])
             a  = float(atr.iloc[i])
-            ps = float(pead_sig.iloc[i])
+            ps_raw = pead_sig.iloc[i]
+            ps = float(ps_raw) if not np.isnan(ps_raw) else float("nan")
             v  = float(volume.iloc[i])
             vm = float(vol_ma.iloc[i])   if not np.isnan(vol_ma.iloc[i])   else 0.0
             m5 = float(ma_short.iloc[i]) if not np.isnan(ma_short.iloc[i]) else 0.0
@@ -1520,7 +1548,7 @@ class Backtester:
 
             if not in_position:
                 gap_ok     = bool(recent_gap_flag.iloc[i])
-                pead_ok    = ps > pead_min_sig
+                pead_ok    = (not np.isnan(ps)) and ps > pead_min_sig
                 ma_ok      = c > m5 and m5 > 0
                 vol_ok     = v > vol_mult * vm and vm > 0
                 no_blackout = not bool(blackout.iloc[i])
@@ -1536,6 +1564,9 @@ class Backtester:
                     holding_days = 0
                     target_1r    = entry_price + stop_atr * a
                     reached_1r   = False
+                    # Capture PEAD context at entry for per-trade diagnostics
+                    _pead_at_entry = ps
+                    _gap_at_entry  = float(earn_gap.iloc[max(0, i - entry_window): i].max())
             else:
                 holding_days += 1
                 peak          = max(peak, c)
@@ -1550,7 +1581,7 @@ class Backtester:
                         "stop_loss" if trail_stop <= stop_price + 1e-6
                         else "trailing_stop"
                     )
-                elif ps < pead_exit_th:
+                elif (not np.isnan(ps)) and ps < pead_exit_th:
                     exit_reason = "pead_fade"
                 elif holding_days >= max_hold:
                     exit_reason = "max_holding"
@@ -1560,13 +1591,19 @@ class Backtester:
                     gross_pnl   = (c - (entry_price / (1 + self._slip))) * pos_size
                     pnl         = (exit_price - entry_price) * pos_size
                     equity     += pnl
-                    trades.append(_make_trade(
+                    trade = _make_trade(
                         entry_date, entry_price, close.index[i], exit_price,
                         holding_days, pos_size, pnl, exit_reason,
                         gross_pnl=gross_pnl,
                         slippage_cost=abs(gross_pnl - pnl),
                         reached_1r=reached_1r,
-                    ))
+                    )
+                    # PEAD-specific context: required to audit whether signal strength
+                    # at entry predicts outcome (core thesis of the strategy).
+                    trade["pead_signal_at_entry"] = round(float(_pead_at_entry), 4)
+                    trade["earnings_gap_size"]    = round(float(_gap_at_entry), 4)
+                    trade["pead_signal_at_exit"]  = round(float(ps), 4) if not np.isnan(ps) else None
+                    trades.append(trade)
                     in_position = False
 
         return trades
@@ -2257,6 +2294,43 @@ class Backtester:
             "exit_reason_breakdown": exit_reasons,
             "avg_holding_days":      round(avg_hold, 1),
         }
+
+    @staticmethod
+    def _summarize_event_driven(trade_log: list[dict], equity_curve: pd.Series) -> dict:
+        """
+        Extended summary for EventDriven (PEAD) trades — adds PEAD signal
+        diagnostics on top of the standard per-strategy metrics.
+
+        Extra fields over _summarize():
+          avg_pead_signal_at_entry — mean PEAD drift signal at entry.
+            A healthy strategy should show avg > pead_min_signal (default 0.20).
+            If avg is only slightly above the threshold, the edge is thin.
+          avg_earnings_gap_size — mean earnings gap that triggered each trade.
+            Larger gaps (e.g., 0.05+) are associated with stronger PEAD drift
+            (Bernard & Thomas 1989).
+          pead_fade_rate — fraction of trades that exited because the PEAD
+            signal faded (pead_fade exit), not because of stop or max hold.
+            A high rate (> 30%) means the drift is short-lived.
+        """
+        base = Backtester._summarize(trade_log, equity_curve)
+        if not trade_log:
+            base.update({
+                "avg_pead_signal_at_entry": 0.0,
+                "avg_earnings_gap_size":    0.0,
+                "pead_fade_rate":           0.0,
+            })
+            return base
+
+        pead_sigs = [t["pead_signal_at_entry"] for t in trade_log
+                     if t.get("pead_signal_at_entry") is not None]
+        gap_sizes = [t["earnings_gap_size"] for t in trade_log
+                     if t.get("earnings_gap_size") is not None]
+        pead_fade_count = sum(1 for t in trade_log if t.get("exit_reason") == "pead_fade")
+
+        base["avg_pead_signal_at_entry"] = round(float(np.mean(pead_sigs)), 4) if pead_sigs else 0.0
+        base["avg_earnings_gap_size"]    = round(float(np.mean(gap_sizes)), 4) if gap_sizes else 0.0
+        base["pead_fade_rate"]           = round(pead_fade_count / len(trade_log), 4)
+        return base
 
     # ── indicators ────────────────────────────────────────────────────────────
 
