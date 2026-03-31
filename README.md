@@ -8,19 +8,18 @@ After identifying candidates, it assembles deep context, generates realistic str
 
 ![Chiquita](https://static.wikia.nocookie.net/jormungand/images/b/b2/S2_16_Chiquita.jpg/revision/latest/scale-to-width-down/250?cb=20121101181804)
 
-##  Frontend Demo
+## Frontend Demo
 
 A timelapse showcasing the user interface, interaction flow, and how insights are presented to the user:
 
-![Frontend Demo](frontend_timelapse.gif)
+<video src="frontend_timelapse.mp4" controls width="700"></video>
 
----
-
-##  Backend Demo
+## Backend Demo
 
 A timelapse demonstrating the pipeline execution, including data ingestion, RAG processing, alpha generation, and evaluation workflow:
 
-![Backend Demo](backend_timelapse.gif)
+<video src="backend_timelapse.mp4" controls width="700"></video>
+
 # System Overview
 Data Sources
 Global financial and macro news (3 months)
