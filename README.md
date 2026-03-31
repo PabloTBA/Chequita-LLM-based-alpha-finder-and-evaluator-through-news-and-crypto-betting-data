@@ -97,14 +97,14 @@ The Benzinga API key is required for news ingestion (Stages 1–4 of the pipelin
 You need two terminals running simultaneously.
 
 Terminal 1 — Backend (FastAPI)
-cd "c:\Users\panal\Downloads\Chequita-LLM-based-alpha-finder-and-evaluator-through-news-and-crypto-betting-data"
+cd "Chequita-LLM-based-alpha-finder-and-evaluator-through-news-and-crypto-betting-data"
 uvicorn api_server:app --host 0.0.0.0 --port 8000 --reload
 
 Expected output:
 
 Uvicorn running on http://0.0.0.0:8000
 Terminal 2 — Frontend (Vite/React)
-cd "c:\Users\panal\Downloads\Chequita-LLM-based-alpha-finder-and-evaluator-through-news-and-crypto-betting-data\front-end"
+cd "Chequita-LLM-based-alpha-finder-and-evaluator-through-news-and-crypto-betting-data\front-end"
 npm run dev
 
 Open the local URL shown (typically):
