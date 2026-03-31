@@ -69,7 +69,7 @@ Pull the required model (~8GB):
 ollama pull qwen3:14b
 # Installation
 Step 1 — Clone / Navigate to Project
-cd "c:\Users\panal\Downloads\Chequita-LLM-based-alpha-finder-and-evaluator-through-news-and-crypto-betting-data"
+cd "Chequita-LLM-based-alpha-finder-and-evaluator-through-news-and-crypto-betting-data"
 Step 2 — Install Python Dependencies
 pip install -r requirements.txt
 
