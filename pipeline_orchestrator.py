@@ -352,9 +352,10 @@ class PipelineOrchestrator:
         # AlphaEngine uses shift(1) throughout.
         print(f"[{_ts()}] [Stage 5d] Computing cross-sectional alpha signals ...")
         if ohlcv_raw:
+            _bias = (macro or {}).get("market_bias", "neutral")
             ohlcv_raw = self._safe(
                 "alpha_engine.compute",
-                lambda: m["alpha_engine"].compute(dict(ohlcv_raw)),
+                lambda: m["alpha_engine"].compute(dict(ohlcv_raw), market_bias=_bias),
                 ohlcv_raw,
             )
 
@@ -441,14 +442,20 @@ class PipelineOrchestrator:
         # universe available.  Pair analysis is cross-sectional — it needs
         # all tickers' OHLCV simultaneously to find cointegrated pairs.
         pair_analyses: list[dict] = []
-        if ohlcv_raw and len(actionable) >= 2:
-            print(f"[{_ts()}] [Stage 9b] Scanning for cointegrated pairs in {len(actionable)} tickers ...")
+        # Use the full shortlisted universe for pair discovery — AVOID tickers are
+        # excluded from directional single-leg strategies but can still form valid
+        # market-neutral spreads.  A cointegrated pair is evaluated on the spread's
+        # own backtest and diagnostic, not on either leg's individual verdict.
+        _pair_universe = [t for t in shortlisted if (ohlcv_raw or {}).get(t) is not None]
+        if ohlcv_raw and len(_pair_universe) >= 2:
+            print(f"[{_ts()}] [Stage 9b] Scanning for cointegrated pairs in {len(_pair_universe)} tickers "
+                  f"(includes {len(_pair_universe) - len(actionable)} AVOID ticker(s)) ...")
             try:
                 from pair_selector import PairSelector
                 from strategy_selector import PAIR_TRADING_BASE, _compute_pair_trading_params
                 import copy as _copy
 
-                _pair_ohlcv = {t: ohlcv_raw[t] for t in actionable if ohlcv_raw.get(t) is not None}
+                _pair_ohlcv = {t: ohlcv_raw[t] for t in _pair_universe if ohlcv_raw.get(t) is not None}
                 _selector   = PairSelector(min_corr=0.70, max_coint_pv=0.10, max_pairs=5)
                 _pairs      = self._safe("pair_selector.find_pairs",
                                          lambda: _selector.find_pairs(_pair_ohlcv), [])

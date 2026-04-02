@@ -177,11 +177,11 @@ EVENT_DRIVEN_BASE: dict = {
 _REGIME_TO_STRATEGY: dict[str, str] = {
     # Directional trend regimes
     "Trending-Up":      "Momentum",            # follow the trend long
-    "Trending-Down":    "AlphaCombined",        # multi-signal: idiosyncratic reversion + volume exhaustion
+    "Trending-Down":    "VolatilityBreakout",  # direction-agnostic squeeze→expansion; avoids knife-catching
     # Volatility regimes
     "High-Volatility":  "VolatilityBreakout",  # squeeze → expansion alpha
     "Low-Volatility":   "MLSignal",             # quiet markets: ML detects subtle nonlinear patterns
-    "Crisis":           "AlphaCombined",        # extreme moves: use alpha signal with tight stops
+    "Crisis":           "VolatilityBreakout",  # extreme vol: trade the next directional breakout, not the dip
     # Statistical regimes
     "Mean-Reverting":   "AlphaCombined",        # primary regime for multi-factor MR
     "Neutral":          "MLSignal",             # no strong structural bias: ML learns from data
@@ -215,7 +215,7 @@ NEWS REASONING: {news_reasoning}
 AVAILABLE STRATEGY CLASSES:
 1. Momentum            — N-day high breakout + volume confirmation. Edge: trend persistence (Hurst > 0.55).
 2. Mean-Reversion      — RSI oversold + below lower Bollinger Band. Edge: oscillation in low-Hurst assets.
-3. VolatilityBreakout  — BB squeeze → expansion + ATR surge. Edge: compressed volatility preceding directional move.
+3. VolatilityBreakout  — BB squeeze → expansion + ATR surge. Edge: compressed volatility preceding directional move. Works in both up and down breakouts — direction-agnostic.
 4. AlphaCombined       — Cross-sectional multi-factor signal (CS-MR + residual + vol-spike + momentum). Edge: diversified alpha, higher trade frequency, market-neutral component.
 5. MLSignal            — Gradient-boosting ML probability signal. Edge: learns nonlinear patterns from lagged features in low-structural-bias regimes.
 6. EventDriven         — Post-Earnings Announcement Drift (PEAD): enter after blackout, ride earnings gap drift. Edge: systematic under-reaction to earnings surprises (Bernard & Thomas 1989).
@@ -351,15 +351,6 @@ def _compute_alpha_combined_params(
         rules.append(
             "Event-Driven: max_holding_days=7, alpha_threshold=0.45 "
             "(target post-event gap fill within 7 bars)"
-        )
-
-    # Trending-Down: want stronger reversion signal before buying the dip
-    if regime_label == "Trending-Down":
-        p["alpha_threshold"]   = 0.55   # require stronger signal in downtrend
-        p["max_holding_days"]  = 7
-        rules.append(
-            "Trending-Down: alpha_threshold=0.55, max_holding_days=7 "
-            "(only trade strongest idiosyncratic bounce signals)"
         )
 
     # High ATR: widen stops slightly
