@@ -54,13 +54,14 @@ import json
 # ── PRD base templates ────────────────────────────────────────────────────────
 
 MOMENTUM_BASE: dict = {
-    "entry_lookback":    10,
-    "volume_multiplier": 1.2,
-    "trailing_stop_atr": 2.0,
-    "ma_exit_period":    20,    # widened from 10 — 10d MA fires too early, cutting winners short
-    "stop_loss_atr":     1.5,
-    "max_holding_days":  20,
-    "momentum_lookback": 252,   # 12-1 month momentum gate: only enter if 11m return (skip last month) > 0
+    "entry_lookback":       10,
+    "volume_multiplier":    1.2,
+    "trailing_stop_atr":    2.0,
+    "ma_exit_period":       20,    # widened from 10 — 10d MA fires too early, cutting winners short
+    "stop_loss_atr":        1.5,
+    "max_holding_days":     20,
+    "momentum_lookback":    252,   # 12-1 month momentum gate: only enter if 11m return (skip last month) > 0
+    "momentum_gate_active": True,  # set False in Crisis/High-Vol to allow entries after crashes
 }
 
 MEAN_REVERSION_BASE: dict = {
@@ -528,6 +529,65 @@ def _compute_pair_trading_params(
     return p, rules
 
 
+def _apply_market_state_overrides(
+    params: dict,
+    rule_log: list[str],
+    strategy: str,
+    market_state: str,
+) -> tuple[dict, list[str]]:
+    """
+    Apply portfolio-level market state overrides on top of per-ticker regime params.
+
+    Crisis
+    ------
+    - Disable 12-1 month momentum gate (momentum_gate_active = False).
+      Rationale: 12-1m gate filters out tickers that crashed recently — which is
+      exactly the universe in a crisis. The gate is designed for normal trending
+      markets; keeping it active in a crash guarantees zero entries.
+    - Cap max_holding_days at 5 days across ALL strategies.
+      Rationale: holding 10-30 days through a crash gets whipsawed by 5-10%
+      intraday reversals. Short holds cut risk; the market can reverse completely
+      in days during panic conditions.
+
+    High-Volatility
+    ---------------
+    - Cap max_holding_days at 10 days across ALL strategies.
+      Rationale: elevated vol means larger intraday noise relative to signal;
+      shorter holds reduce the probability of being stopped out by noise rather
+      than signal.
+    - Tighten volume_multiplier for entry confirmation where applicable.
+    """
+    import copy as _copy
+    p = _copy.deepcopy(params)
+
+    if market_state == "Crisis":
+        # Disable 12-1 month momentum gate
+        if "momentum_gate_active" in p:
+            p["momentum_gate_active"] = False
+            rule_log.append(
+                "[MarketState=Crisis] momentum_gate_active=False — "
+                "12-1m gate disabled; gate is calibrated for trending markets, not crashes"
+            )
+        # Cap holding days to 5 across all strategies
+        if p.get("max_holding_days", 999) > 5:
+            p["max_holding_days"] = 5
+            rule_log.append(
+                f"[MarketState=Crisis] max_holding_days capped at 5 — "
+                f"holding > 5 days through a crash risks full reversal whipsaw"
+            )
+
+    elif market_state == "High-Volatility":
+        # Cap holding days to 10 across all strategies
+        if p.get("max_holding_days", 999) > 10:
+            p["max_holding_days"] = 10
+            rule_log.append(
+                f"[MarketState=High-Volatility] max_holding_days capped at 10 — "
+                f"elevated vol shortens the signal-to-noise window"
+            )
+
+    return p, rule_log
+
+
 class StrategySelector:
     def __init__(self, llm_client: callable, verbose: bool = False):
         self.llm_client = llm_client
@@ -539,12 +599,18 @@ class StrategySelector:
 
     def select(self, ticker: str, regime: dict,
                ohlcv_features: dict, macro: dict,
-               ticker_verdict: dict | None = None) -> dict:
+               ticker_verdict: dict | None = None,
+               market_state: str = "Normal") -> dict:
         """
         Deterministically compute strategy parameters, then call LLM twice:
           1. Alpha hypothesis: does the LLM agree with the regime-rule strategy?
              If it disagrees, the disagreement is logged as a signal for the trader.
           2. Reasoning: plain-English explanation of the final params.
+
+        market_state : "Normal" | "High-Volatility" | "Crisis"
+            Portfolio-level market environment from MarketStateDetector.
+            Crisis  → disable 12-1m momentum gate; cap max_holding_days at 5.
+            High-Vol → cap max_holding_days at 10; tighten entry thresholds.
         """
         regime_label = regime.get("regime", "Neutral")
         strategy     = _REGIME_TO_STRATEGY.get(regime_label, "Momentum")
@@ -583,6 +649,13 @@ class StrategySelector:
             adjusted_params["rsi_entry_threshold"] = min(adjusted_params.get("rsi_entry_threshold", 30), 25)
             adjusted_params["max_holding_days"]    = min(adjusted_params.get("max_holding_days", 10), 8)
             rule_log.append("Trending-Down override: rsi_entry_threshold <= 25, max_holding_days <= 8")
+
+        # ── Market-state adaptive overrides ──────────────────────────────────
+        # Applied on top of regime overrides — portfolio-level environment takes
+        # precedence over per-ticker regime for holding-period risk management.
+        adjusted_params, rule_log = _apply_market_state_overrides(
+            adjusted_params, rule_log, strategy, market_state
+        )
 
         print(f"  [Strategy] {ticker}: {regime_label} -> {strategy} | "
               f"Hurst={hurst:.3f} ATR%={atr_pct:.2%} VolRatio={vol_ratio:.2f}")

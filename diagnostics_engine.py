@@ -64,15 +64,22 @@ RISK_FREE_RATE        = 0.045  # annualised risk-free rate (~current Fed funds);
 #   normal drawdowns even for strategies with positive edge.  Tightening the floor
 #   in a VIX spike would reject valid strategies for noise, not real weakness.
 _REGIME_FLOORS: dict[str, dict] = {
-    # regime_label       sharpe  max_dd  win_rate  oos_sharpe  p_value
-    "Crisis":         {"sharpe": 0.25, "max_dd": 0.35, "win_rate": 0.30, "oos_sharpe": 0.15, "p_value": 0.15},
-    "High-Volatility":{"sharpe": 0.35, "max_dd": 0.28, "win_rate": 0.32, "oos_sharpe": 0.20, "p_value": 0.12},
-    "Event-Driven":   {"sharpe": 0.30, "max_dd": 0.30, "win_rate": 0.30, "oos_sharpe": 0.15, "p_value": 0.15},
-    "Trending-Down":  {"sharpe": 0.40, "max_dd": 0.25, "win_rate": 0.33, "oos_sharpe": 0.25, "p_value": 0.12},
-    "Trending-Up":    {"sharpe": 0.45, "max_dd": 0.22, "win_rate": 0.34, "oos_sharpe": 0.28, "p_value": 0.10},
-    "Mean-Reverting": {"sharpe": 0.50, "max_dd": 0.20, "win_rate": 0.35, "oos_sharpe": 0.30, "p_value": 0.10},
-    "Low-Volatility": {"sharpe": 0.50, "max_dd": 0.20, "win_rate": 0.35, "oos_sharpe": 0.30, "p_value": 0.10},
-    "Neutral":        {"sharpe": 0.50, "max_dd": 0.20, "win_rate": 0.35, "oos_sharpe": 0.30, "p_value": 0.10},
+    # regime_label       sharpe  max_dd  win_rate  oos_sharpe  p_value  min_trades
+    #
+    # min_trades rationale per regime:
+    #   Crisis      : Entry conditions are rarely met in a crash — 10 trades over
+    #                 2 years is a realistic ceiling.  Statistical significance is
+    #                 enforced by the p_value (Lo t-stat) and bootstrap CI gates.
+    #   High-Vol    : Fewer setups than normal; 15 is achievable over 2 years.
+    #   Normal regs : 30 ensures walk-forward splits have enough OOS data.
+    "Crisis":         {"sharpe": 0.25, "max_dd": 0.35, "win_rate": 0.30, "oos_sharpe": 0.15, "p_value": 0.15, "min_trades": 10},
+    "High-Volatility":{"sharpe": 0.35, "max_dd": 0.28, "win_rate": 0.32, "oos_sharpe": 0.20, "p_value": 0.12, "min_trades": 15},
+    "Event-Driven":   {"sharpe": 0.30, "max_dd": 0.30, "win_rate": 0.30, "oos_sharpe": 0.15, "p_value": 0.15, "min_trades": 10},
+    "Trending-Down":  {"sharpe": 0.40, "max_dd": 0.25, "win_rate": 0.33, "oos_sharpe": 0.25, "p_value": 0.12, "min_trades": 20},
+    "Trending-Up":    {"sharpe": 0.45, "max_dd": 0.22, "win_rate": 0.34, "oos_sharpe": 0.28, "p_value": 0.10, "min_trades": 20},
+    "Mean-Reverting": {"sharpe": 0.50, "max_dd": 0.20, "win_rate": 0.35, "oos_sharpe": 0.30, "p_value": 0.10, "min_trades": 30},
+    "Low-Volatility": {"sharpe": 0.50, "max_dd": 0.20, "win_rate": 0.35, "oos_sharpe": 0.30, "p_value": 0.10, "min_trades": 30},
+    "Neutral":        {"sharpe": 0.50, "max_dd": 0.20, "win_rate": 0.35, "oos_sharpe": 0.30, "p_value": 0.10, "min_trades": 30},
 }
 _DEFAULT_FLOORS = _REGIME_FLOORS["Neutral"]
 
@@ -254,8 +261,16 @@ class DiagnosticsEngine:
                 return False, f"Walk-forward degradation {wf:.1%} exceeds floor {WALKFWD_DEGRAD_FLOOR:.0%}"
 
         tc = metrics["trade_count"]
-        if tc < MIN_TRADE_COUNT:
-            return False, f"Trade count {tc} below minimum {MIN_TRADE_COUNT} for statistical significance"
+        # Use regime-specific min_trades floor when available; fall back to global.
+        # Crisis/High-Vol regimes generate fewer setups by construction — applying
+        # the normal 30-trade floor would systematically reject all crisis strategies.
+        # The p-value and bootstrap CI gates enforce significance regardless.
+        regime_min_trades = floors.get("min_trades", MIN_TRADE_COUNT)
+        if tc < regime_min_trades:
+            return False, (
+                f"Trade count {tc} below regime floor {regime_min_trades} "
+                f"(global min={MIN_TRADE_COUNT}; statistical significance enforced by p-value + bootstrap CI)"
+            )
 
         # ── Statistical significance — p-value (Lo 2002 autocorr-corrected) ─────
         # The Sharpe floor confirms magnitude but not reliability: a Sharpe of 0.55

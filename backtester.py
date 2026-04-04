@@ -928,7 +928,11 @@ class Backtester:
         ma_period         = params["ma_exit_period"]
         stop_loss_atr     = params["stop_loss_atr"]
         max_holding       = params["max_holding_days"]
-        mom_lookback      = int(params.get("momentum_lookback", 0))
+        # momentum_gate_active=False disables the 12-1 month filter (Crisis/High-Vol
+        # markets: the gate is calibrated for trending markets and blocks all entries
+        # after a crash, where the exact tickers that need evaluation have recently fallen).
+        gate_active   = bool(params.get("momentum_gate_active", True))
+        mom_lookback  = int(params.get("momentum_lookback", 0)) if gate_active else 0
 
         atr           = self._atr(high, low, close)
         ma            = close.rolling(ma_period).mean().shift(1)   # shift(1): no look-ahead
@@ -938,11 +942,11 @@ class Backtester:
 
         # 12-1 month momentum gate: return from [t-252] to [t-21], fully non-look-ahead.
         # Skipping the most recent month avoids short-term reversal contamination.
-        # Only computed when momentum_lookback > 0 (Momentum strategy only).
+        # Only computed when momentum_lookback > 0 AND gate_active (Momentum strategy only).
         if mom_lookback > 0:
             mom_filter = (close.shift(22) / close.shift(mom_lookback + 1) - 1)
         else:
-            mom_filter = None
+            mom_filter = None   # gate disabled — all tickers pass the momentum filter
 
         start = max(entry_lookback, 20, ma_period, ATR_PERIOD,
                     mom_lookback + 2 if mom_lookback > 0 else 0)
