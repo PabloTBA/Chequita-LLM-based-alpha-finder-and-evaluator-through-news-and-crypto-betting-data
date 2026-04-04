@@ -30,16 +30,17 @@ Design rationale
     structural regime information for any ticker with an upcoming earnings date,
     routing everything into AlphaCombined regardless of actual market structure.
 
-Strategy mapping
+Strategy mapping  (authoritative source: strategy_selector._REGIME_TO_STRATEGY)
 ----------------
-    Trending-Up    → Momentum          (follow direction)
-    Trending-Down  → Mean-Reversion    (fade downtrend / buy dips)
-    High-Volatility→ VolatilityBreakout(squeeze → expansion)
-    Mean-Reverting → Mean-Reversion
-    Low-Volatility → Mean-Reversion
-    Crisis         → Mean-Reversion    (extreme moves revert; tight params)
-    Event-Driven   → Mean-Reversion    (post-earnings gap fill)
-    Neutral        → Momentum          (default)
+    Trending-Up    → Momentum           (follow the confirmed uptrend)
+    Trending-Down  → VolatilityBreakout (direction-agnostic BB squeeze→expansion;
+                                         avoids knife-catching into a downtrend)
+    High-Volatility→ VolatilityBreakout (squeeze → expansion alpha)
+    Crisis         → VolatilityBreakout (trade the next breakout, not the dip)
+    Mean-Reverting → AlphaCombined      (multi-factor cross-sectional MR signal)
+    Low-Volatility → MLSignal           (quiet markets: ML detects subtle patterns)
+    Event-Driven   → EventDriven        (post-earnings PEAD drift)
+    Neutral        → MLSignal           (no strong structural bias; let ML decide)
 
 Public interface
 ----------------

@@ -1,8 +1,9 @@
 """
 Backtester
 ==========
-Executes one of five strategy rules on 2-year OHLCV history and returns a
-trade log, equity curve, daily returns series, and summary stats.
+Executes one of six strategy rules on the full OHLCV history supplied by the
+caller (typically 5–10 years of daily data) and returns a trade log, equity
+curve, daily returns series, and summary stats.
 
 Strategies
 ----------

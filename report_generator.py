@@ -805,11 +805,12 @@ class ReportGenerator:
             status  = "PASS" if passed else "FAIL"
             reject  = d.get("reject_reason") or "—"
             metrics = d.get("metrics", {})
-            bt      = backtests.get(ticker, {})
-            returns = bt.get("returns", pd.Series(dtype=float))
+            bt        = backtests.get(ticker, {})
+            returns   = bt.get("returns",     pd.Series(dtype=float))
+            equity    = bt.get("equity_curve", pd.Series(dtype=float))
             trade_log = bt.get("trade_log", [])
 
-            adv = _advanced_metrics(returns, trade_log, metrics)
+            adv = _advanced_metrics(returns, trade_log, metrics, equity_curve=equity)
 
             blocks += [
                 f"### {ticker} — {d['strategy']} [{status}]",
@@ -848,7 +849,7 @@ class ReportGenerator:
                 "",
                 "| Metric | Value | Interpretation |",
                 "|--------|-------|----------------|",
-                f"| Permutation p-value (Calmar) | {metrics.get('permutation_p_value', float('nan')):.3f} | < 0.10 = temporal structure present |" if not math.isnan(metrics.get('permutation_p_value', float('nan'))) else "| Permutation p-value (Calmar) | N/A (underpowered) | < 10 trades — test skipped |",
+                _fmt_perm_pvalue_row(metrics),
                 f"| Rolling Sharpe (% positive windows) | {metrics.get('rolling_pct_positive', float('nan')):.1%} | {'Regime-dependent' if metrics.get('rolling_pct_positive', 1.0) < 0.50 else 'Consistent'} |" if not math.isnan(metrics.get('rolling_pct_positive', float('nan'))) else "| Rolling Sharpe (% positive windows) | N/A | Insufficient data |",
                 f"| Rolling Sharpe Std Dev | {metrics.get('rolling_sharpe_std', float('nan')):.3f} | Lower = more stable |" if not math.isnan(metrics.get('rolling_sharpe_std', float('nan'))) else "| Rolling Sharpe Std Dev | N/A | Insufficient data |",
                 "",
@@ -858,7 +859,7 @@ class ReportGenerator:
                 "|--------|--------|--------------|",
                 f"| In-Sample | {adv['is_sharpe']:.3f} | {adv['is_return']:.2%} |",
                 f"| Out-of-Sample | {adv['oos_sharpe']:.3f} | {adv['oos_return']:.2%} |",
-                f"| Degradation | — | {metrics.get('walk_forward_degradation', 0):.1%} |",
+                _fmt_degradation_row(metrics),
                 "",
                 "#### Exit Reason Breakdown",
                 "",
@@ -999,19 +1000,22 @@ class ReportGenerator:
                     blocks.append(f"| {dstr} | {val:.2%} |")
 
             # Walk-Forward table (70/30 IS/OOS split — industry standard)
-            if not returns.empty:
-                split   = int(len(returns) * 0.70)
-                is_ret  = returns.iloc[:split]
-                oos_ret = returns.iloc[split:]
+            # Use the equity curve (not returns) to avoid RF-on-flat-days inflation:
+            # _build_returns() sets flat days to DAILY_RF so (1+r).prod()-1 compounds
+            # the risk-free rate on every uninvested day, overstating cumulative return
+            # vs what the equity curve actually shows.
+            if not equity.empty:
+                split     = int(len(equity) * 0.70)
+                split     = max(split, 1)
+                is_cum    = float(equity.iloc[split] / equity.iloc[0] - 1)
+                oos_cum   = float(equity.iloc[-1]   / equity.iloc[split] - 1)
+                is_start  = equity.index[0].strftime("%Y-%m-%d")       if hasattr(equity.index[0],       "strftime") else str(equity.index[0])
+                is_end    = equity.index[split - 1].strftime("%Y-%m-%d") if hasattr(equity.index[split-1], "strftime") else str(equity.index[split-1])
+                oos_start = equity.index[split].strftime("%Y-%m-%d")    if hasattr(equity.index[split],   "strftime") else str(equity.index[split])
+                oos_end   = equity.index[-1].strftime("%Y-%m-%d")       if hasattr(equity.index[-1],      "strftime") else str(equity.index[-1])
                 blocks += ["", "#### Walk-Forward Returns (70% IS / 30% OOS)", "",
                            "| Period | Start | End | Cumulative Return |",
                            "|--------|-------|-----|-------------------|"]
-                is_cum  = float((1 + is_ret).prod() - 1)
-                oos_cum = float((1 + oos_ret).prod() - 1)
-                is_start  = returns.index[0].strftime("%Y-%m-%d")      if hasattr(returns.index[0],      "strftime") else str(returns.index[0])
-                is_end    = returns.index[split-1].strftime("%Y-%m-%d") if hasattr(returns.index[split-1],"strftime") else str(returns.index[split-1])
-                oos_start = returns.index[split].strftime("%Y-%m-%d")   if hasattr(returns.index[split],  "strftime") else str(returns.index[split])
-                oos_end   = returns.index[-1].strftime("%Y-%m-%d")      if hasattr(returns.index[-1],     "strftime") else str(returns.index[-1])
                 blocks.append(f"| In-Sample (70%)     | {is_start}  | {is_end}  | {is_cum:.2%} |")
                 blocks.append(f"| Out-of-Sample (30%) | {oos_start} | {oos_end} | {oos_cum:.2%} |")
 
@@ -1084,8 +1088,11 @@ class ReportGenerator:
             "",
             "### Strategy vs Baselines",
             "",
-            "| Ticker | Strategy | Net Return | Sharpe | vs SPY B&H | vs 50d MA cross |",
-            "|--------|----------|------------|--------|-----------|-----------------|",
+            "_Both 'vs' columns show net-return difference (strategy − baseline)._",
+            "_A positive value means the strategy returned more; Sharpe is shown separately for quality context._",
+            "",
+            "| Ticker | Strategy | Net Return | Sharpe | vs SPY B&H (return) | vs 50d MA cross (return) |",
+            "|--------|----------|------------|--------|---------------------|--------------------------|",
         ]
 
         for bt in backtests:
@@ -1096,7 +1103,7 @@ class ReportGenerator:
             sharpe  = diag.get("metrics", {}).get("sharpe", 0.0)
 
             bnh_diff = net_ret - spy_bnh_ret
-            ma_diff  = sharpe  - spy_ma_sharpe
+            ma_diff  = net_ret - spy_ma_ret   # both columns now use return diff
 
             bnh_icon = "PASS" if bnh_diff >= 0 else "FAIL"
             ma_icon  = "PASS" if ma_diff  >= 0 else "FAIL"
@@ -1104,7 +1111,7 @@ class ReportGenerator:
             lines.append(
                 f"| {t} | {bt['strategy']} | {net_ret:.2%} | {sharpe:.3f}"
                 f" | {bnh_icon} {bnh_diff:+.2%}"
-                f" | {ma_icon} {ma_diff:+.3f} |"
+                f" | {ma_icon} {ma_diff:+.2%} |"
             )
 
         return "\n".join(lines)
@@ -1354,7 +1361,14 @@ class ReportGenerator:
         else:
             lines += ["", "_No active entry signals today._", ""]
 
-        if pending:
+        # Filter pending signals to only those that passed diagnostics
+        # (execution_advisor generates briefs for ALL inactive strategies, not just qualified ones)
+        diag_passed_set = {d["ticker"] for d in po.get("diagnostics", []) if d.get("passed")}
+        mc_set = {mc["ticker"] for mc in po.get("monte_carlos", [])
+                  if not mc.get("insufficient_sample") and not mc.get("stress_test")}
+        qualified_pending = [b for b in pending if b["ticker"] in diag_passed_set]
+
+        if qualified_pending:
             lines += ["", "---", "", "### Pending Signals — Monitor Daily", ""]
             lines += [
                 "_These tickers passed all 3 validation stages (backtest → diagnostics → Monte Carlo)_",
@@ -1362,10 +1376,10 @@ class ReportGenerator:
                 "_trade will look like when conditions are met._",
                 "",
             ]
-            for b in pending:
+            for b in qualified_pending:
                 lines += _render_brief(b, active_signal=False)
 
-        if active or pending:
+        if active or qualified_pending:
             lines += [
                 "",
                 "---",
@@ -1628,8 +1642,66 @@ def _drawdown_series(equity: pd.Series) -> pd.Series:
     return (equity - rolling_max) / rolling_max
 
 
-def _advanced_metrics(returns: pd.Series, trade_log: list[dict], metrics: dict) -> dict:
-    """Compute advanced metrics from returns series and trade log."""
+def _fmt_perm_pvalue_row(metrics: dict) -> str:
+    """Format the permutation p-value diagnostic table row with a dynamic interpretation.
+
+    The permutation test shuffles the return series and measures what fraction of
+    random orderings produce a Calmar ratio >= the real strategy's.
+    - p < 0.10 : real strategy's temporal structure (entry/exit timing) beats 90%+
+                 of random orderings → strong evidence of order-dependent edge
+    - 0.10–0.30: weak evidence of temporal structure
+    - 0.30–0.70: no detectable temporal structure (expected for IID-return strategies)
+    - p > 0.90 : exits are actively destroying value (most shuffles outperform)
+    """
+    pv = metrics.get("permutation_p_value", float("nan"))
+    if math.isnan(pv):
+        return "| Permutation p-value (Calmar) | N/A (underpowered) | < 10 trades — test skipped |"
+    if pv < 0.10:
+        interp = "temporal structure present (exits beat 90%+ of shuffles)"
+    elif pv < 0.30:
+        interp = "weak temporal structure"
+    elif pv <= 0.70:
+        interp = "no temporal structure (expected for IID-return strategies)"
+    else:
+        interp = "WARNING: exits destroying value (90%+ of shuffles outperform)"
+    return f"| Permutation p-value (Calmar) | {pv:.3f} | {interp} |"
+
+
+def _fmt_degradation_row(metrics: dict) -> str:
+    """Format the walk-forward degradation table row.
+
+    Degradation is only meaningful when the strategy had positive in-sample
+    Sharpe.  When WF is underpowered (< 30 trades) or the IS Sharpe was
+    negative, the formula returns 0.0 by convention — display 'N/A' with a
+    reason instead of the misleading '0.0%'.
+    """
+    wf_degrad      = metrics.get("walk_forward_degradation", 0.0)
+    wf_underpowered = metrics.get("wf_underpowered", False)
+    is_sharpe      = metrics.get("sharpe", 0.0)   # full-period Sharpe; IS ≈ 0 signals no edge
+
+    if wf_underpowered:
+        note = "N/A (< 30 trades)"
+    elif is_sharpe <= 0:
+        note = "N/A (no IS edge)"
+    else:
+        note = f"{wf_degrad:.1%}"
+
+    return f"| Degradation | — | {note} |"
+
+
+def _advanced_metrics(
+    returns: pd.Series,
+    trade_log: list[dict],
+    metrics: dict,
+    equity_curve: "pd.Series | None" = None,
+) -> dict:
+    """Compute advanced metrics from returns series and trade log.
+
+    equity_curve is used for IS/OOS return calculation to avoid the RF-inflation
+    artefact: _build_returns() earns DAILY_RF on flat/cash days so
+    (1+returns).prod()-1 compounds that rate on every uninvested day, reporting
+    a higher cumulative return than the equity curve actually shows.
+    """
     result: dict[str, Any] = {}
 
     # ── returns-based ─────────────────────────────────────────────────────────
@@ -1701,6 +1773,16 @@ def _advanced_metrics(returns: pd.Series, trade_log: list[dict], metrics: dict) 
             raw = float((r.mean() - _DAILY_RF) / s * math.sqrt(TRADING_DAYS))
             return float(np.clip(raw, -20.0, 20.0))
 
+        # IS/OOS returns: use equity curve to avoid RF-inflation artefact.
+        # Falls back to compounding returns only if equity is unavailable.
+        if equity_curve is not None and not equity_curve.empty:
+            eq_split = max(int(len(equity_curve) * 0.70), 1)
+            is_ret_pct  = float(equity_curve.iloc[eq_split] / equity_curve.iloc[0] - 1)
+            oos_ret_pct = float(equity_curve.iloc[-1] / equity_curve.iloc[eq_split] - 1)
+        else:
+            is_ret_pct  = float((1 + is_ret).prod() - 1)
+            oos_ret_pct = float((1 + oos_ret).prod() - 1)
+
         result.update({
             "sortino":       sortino,
             "calmar":        calmar,
@@ -1711,8 +1793,8 @@ def _advanced_metrics(returns: pd.Series, trade_log: list[dict], metrics: dict) 
             "recovery_days": recovery_days,
             "is_sharpe":     _sharpe(is_ret),
             "oos_sharpe":    _sharpe(oos_ret),
-            "is_return":     float((1 + is_ret).prod() - 1),
-            "oos_return":    float((1 + oos_ret).prod() - 1),
+            "is_return":     is_ret_pct,
+            "oos_return":    oos_ret_pct,
         })
 
     # ── trade-log-based ────────────────────────────────────────────────────────

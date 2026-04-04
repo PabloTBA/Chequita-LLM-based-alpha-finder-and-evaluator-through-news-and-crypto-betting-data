@@ -6,13 +6,17 @@ deterministic rule-based algorithm (no LLM numeric decisions).  The LLM is
 called once only to produce a plain-English explanation of the final params
 for the report — it has no influence on the numbers.
 
-Regime -> Strategy mapping
+Regime -> Strategy mapping  (see _REGIME_TO_STRATEGY for the authoritative dict)
 --------------------------
-    Trending         -> Momentum
+    Trending-Up      -> Momentum           (follow the confirmed uptrend)
+    Trending-Down    -> VolatilityBreakout  (direction-agnostic squeeze→expansion;
+                                            avoids knife-catching into a downtrend)
     High-Volatility  -> VolatilityBreakout  (BB squeeze → expansion alpha)
-    Mean-Reverting   -> Mean-Reversion
-    Low-Volatility   -> Mean-Reversion
-    Neutral          -> Momentum  (default)
+    Crisis           -> VolatilityBreakout  (trade the next breakout, not the dip)
+    Mean-Reverting   -> AlphaCombined       (multi-factor MR signal)
+    Low-Volatility   -> MLSignal            (quiet markets: ML detects subtle patterns)
+    Neutral          -> MLSignal            (no strong structural signal: let ML decide)
+    Event-Driven     -> EventDriven         (post-earnings PEAD drift)
 
 Parameter adjustment rules (Momentum)
 --------------------------------------
