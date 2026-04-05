@@ -261,6 +261,36 @@ class PipelineOrchestrator:
         else:
             print(f"[{_ts()}] [Stage 1] Collected {total_articles} articles total.")
 
+        # ── Stage 1c: Crucix OSINT enrichment ────────────────────────────────
+        # Pulls real-time macro/geopolitical intelligence from the Crucix sidecar
+        # (node server.mjs in Crucix-master/, port 3117).  Gracefully skipped when
+        # Crucix is not running — the pipeline continues with Benzinga data only.
+        crucix_snapshot  = None
+        crucix_macro_ctx = {}
+        print(f"[{_ts()}] [Stage 1c] Checking Crucix OSINT sidecar ...")
+        try:
+            from crucix_adapter import CrucixAdapter
+            _crucix = CrucixAdapter(
+                base_url=self._cfg.get("crucix_url", "http://localhost:3117")
+            )
+            crucix_snapshot = _crucix.fetch()
+            if crucix_snapshot:
+                crucix_macro_ctx = _crucix.to_macro_context(crucix_snapshot)
+                crucix_articles  = _crucix.to_articles(crucix_snapshot)
+                # Merge Crucix OSINT articles into today's article bucket so they
+                # flow into NewsSummarizer alongside Benzinga articles.
+                crucix_date = run_date
+                if crucix_date not in articles:
+                    articles[crucix_date] = []
+                if isinstance(articles[crucix_date], list):
+                    articles[crucix_date].extend(crucix_articles)
+                print(f"[{_ts()}] [Stage 1c] Crucix: {len(crucix_articles)} OSINT articles merged. "
+                      f"Macro signals: {len(crucix_macro_ctx.get('cross_domain_risk_signals', []))}")
+            else:
+                print(f"[{_ts()}] [Stage 1c] Crucix not available — continuing without OSINT enrichment.")
+        except Exception as _e:
+            print(f"[{_ts()}] [Stage 1c] Crucix enrichment error ({_e}) — continuing.")
+
         # ── Stage 1b: RAG insert news ─────────────────────────────────────────
         print(f"[{_ts()}] [Stage 1b] Inserting news into RAG store ...")
         self._safe(
@@ -279,6 +309,14 @@ class PipelineOrchestrator:
 
         # ── Stage 3: macro screen ─────────────────────────────────────────────
         print(f"[{_ts()}] [Stage 3] Running macro screen ...")
+        # Merge Crucix live macro data into the summary so MacroScreener has
+        # real-time FRED, EIA, VIX, yield curve, and conflict signals.
+        if crucix_macro_ctx:
+            if isinstance(summary, dict):
+                summary.setdefault("crucix_macro", crucix_macro_ctx)
+            elif isinstance(summary, str) and crucix_snapshot:
+                from crucix_adapter import CrucixAdapter as _CA
+                summary = summary + "\n\n" + _CA().to_summary_text(crucix_snapshot)
         macro = self._safe(
             "macro_screener",
             lambda: m["macro_screener"].screen(summary),
