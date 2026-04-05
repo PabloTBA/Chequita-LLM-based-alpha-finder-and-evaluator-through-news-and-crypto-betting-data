@@ -386,7 +386,8 @@ class ReportGenerator:
         lines += ["", "### 5. Diagnostic Scorecard", ""]
 
         _sharpe    = metrics.get("sharpe", 0.0)
-        _oos       = metrics.get("oos_sharpe", 0.0)
+        _raw_oos   = metrics.get("oos_sharpe")
+        _oos       = 0.0 if _raw_oos is None else _raw_oos
         _dd        = metrics.get("max_drawdown", 0.0)
         _wr        = metrics.get("win_rate", 0.0)
         _pf        = metrics.get("profit_factor", 0.0)
@@ -428,22 +429,34 @@ class ReportGenerator:
                 "split results are not statistically meaningful and the WF gate was not applied.",
             ]
         elif wf_splits and not returns.empty:
-            lines += ["", "**Walk-forward (3-split robustness: 60/40, 70/30, 80/20 — requires 2/3 passes):**", ""]
+            is_rolling = any(sp.get("rolling_wf") for sp in wf_splits)
+            if is_rolling:
+                lines += ["", "**Walk-forward (rolling anchored — requires ≥50% windows with OOS Sharpe > 0):**", ""]
+            else:
+                lines += ["", "**Walk-forward (3-split robustness: 60/40, 70/30, 80/20 — requires 2/3 passes):**", ""]
             lines += [
                 "| IS/OOS | IS Sharpe | OOS Sharpe | Degradation | Pass |",
                 "|--------|-----------|------------|-------------|------|",
             ]
             for sp in wf_splits:
-                is_p  = int(sp["is_pct"] * 100)
+                is_p  = int(sp.get("is_pct", 0) * 100)
                 oos_p = 100 - is_p
                 tick  = "PASS" if sp.get("passed") else "FAIL"
-                lines.append(
-                    f"| {is_p}/{oos_p} | {sp['is_sharpe']:.3f} | "
-                    f"{sp['oos_sharpe']:.3f} | {sp['degradation']:.1%} | {tick} |"
-                )
+                # None sentinel = underpowered — render as N/A
+                _is_s  = sp.get("is_sharpe")
+                _oos_s = sp.get("oos_sharpe")
+                _degrad = sp.get("degradation")
+                is_str   = "N/A" if _is_s  is None else f"{_is_s:.3f}"
+                oos_str  = "N/A" if _oos_s is None else f"{_oos_s:.3f}"
+                deg_str  = "N/A" if _degrad is None else f"{_degrad:.1%}"
+                lines.append(f"| {is_p}/{oos_p} | {is_str} | {oos_str} | {deg_str} | {tick} |")
             n_pass = sum(1 for sp in wf_splits if sp.get("passed"))
+            n_total = len(wf_splits)
             lines.append(f"")
-            lines.append(f"**{n_pass}/3 splits passed** ({'robust' if n_pass >= 2 else 'fragile — likely IS overfit'})")
+            if is_rolling:
+                lines.append(f"**{n_pass}/{n_total} windows passed** ({'robust' if n_pass >= n_total // 2 else 'fragile — likely IS overfit'})")
+            else:
+                lines.append(f"**{n_pass}/3 splits passed** ({'robust' if n_pass >= 2 else 'fragile — likely IS overfit'})")
 
         # ── 6. Backtest performance ────────────────────────────────────────────
         slip_bps = bt.get("slippage_bps", 10.0)
@@ -712,12 +725,17 @@ class ReportGenerator:
                 blocks += ["", "**LLM adjustments:**", ""]
                 for note in adj:
                     blocks.append(f"- {note}")
-            # LLM alpha hypothesis — show when LLM disagrees with regime rule
+            # LLM alpha hypothesis — show when LLM disagrees with regime rule.
+            # This is PRE-BACKTEST opinion from StrategySelector — the LLM sees
+            # only the regime label and OHLCV features, not the actual backtest returns.
+            # Contrast with "LLM Diagnostic Commentary" in the Diagnostic Results section,
+            # which is POST-BACKTEST and has access to the full realized P&L metrics.
             hyp = s.get("llm_hypothesis", {})
             if hyp and not hyp.get("agree", True) and hyp.get("suggested"):
                 blocks += [
                     "",
-                    f"> **LLM Alpha Hypothesis:** Disagrees with regime-rule selection. "
+                    f"> **LLM Alpha Hypothesis (pre-backtest, StrategySelector):** "
+                    f"Disagrees with regime-rule selection. "
                     f"Suggests **{hyp['suggested']}** instead."
                     + (f" Reason: _{hyp['reason']}_" if hyp.get("reason") else ""),
                 ]
@@ -844,6 +862,7 @@ class ReportGenerator:
                 f"| Avg Holding Days | {bt.get('summary', {}).get('avg_holding_days', 0):.1f} |",
                 f"| Profit Factor | {adv['profit_factor']:.3f} |",
                 f"| Max Consecutive Losses | {adv['max_consec_losses']} |",
+                _fmt_exposure_row(metrics),
                 "",
                 "#### Alpha Quality Diagnostics",
                 "",
@@ -870,7 +889,11 @@ class ReportGenerator:
                 blocks.append(f"| {reason} | {count} |")
 
             if d.get("llm_commentary"):
-                blocks += ["", f"> **LLM commentary:** {d['llm_commentary']}"]
+                blocks += [
+                    "",
+                    f"> **LLM Diagnostic Commentary (post-backtest, from DiagnosticsEngine):** "
+                    f"{d['llm_commentary']}",
+                ]
 
             blocks.append("")
 
@@ -1216,7 +1239,16 @@ class ReportGenerator:
                 roll_pct = m.get("rolling_pct_positive")
                 perm_p   = m.get("permutation_p_value")
                 roll_str = f"{'PASS' if roll_pct >= 0.50 else 'WARNING'} {roll_pct:.0%}" if roll_pct is not None and not math.isnan(roll_pct) else "N/A"
-                perm_str = f"{perm_p:.3f}" if perm_p is not None and not math.isnan(perm_p) else "N/A"
+                if perm_p is None or (isinstance(perm_p, float) and math.isnan(perm_p)):
+                    perm_str = "N/A"
+                elif perm_p < 0.10:
+                    perm_str = f"{perm_p:.3f} [TEMPORAL EDGE]"
+                elif perm_p < 0.30:
+                    perm_str = f"{perm_p:.3f} [weak temporal]"
+                elif perm_p <= 0.70:
+                    perm_str = f"{perm_p:.3f} [IID — expected]"
+                else:
+                    perm_str = f"{perm_p:.3f} [WARNING: exits destroying value]"
                 lines.append(
                     f"| {ticker} | {sharpe:.3f} | {t_stat:.2f} | {p_val:.3f} | "
                     f"[{bs_p5:.2f}, {bs_p95:.2f}] | {roll_str} | {perm_str} | {sig} |"
@@ -1436,7 +1468,7 @@ class ReportGenerator:
                 f"| {mc.get('p5_final', 0):,.0f} "
                 f"| {mc.get('p50_final', 0):,.0f} "
                 f"| {mc.get('p95_final', 0):,.0f} |",
-                f"| Sharpe Ratio "
+                f"| Sharpe Ratio † "
                 f"| {mc.get('p5_sharpe', 0):.3f} "
                 f"| {mc.get('p50_sharpe', 0):.3f} "
                 f"| {mc.get('p95_sharpe', 0):.3f} |",
@@ -1489,6 +1521,14 @@ class ReportGenerator:
                 )
             if disclaimer:
                 blocks.append(disclaimer)
+            blocks.append(
+                "\n† **Sharpe annualization note:** Monte Carlo Sharpe uses trade-frequency "
+                "annualization (√(trades/year)), while Diagnostic Sharpe uses daily-return "
+                "annualization (√252). For strategies with <252 trades/year the MC Sharpe will "
+                "be lower — this is not a discrepancy; it reflects a stricter per-trade view. "
+                "Use the Diagnostic Sharpe for regime comparisons; use MC Sharpe for realistic "
+                "out-of-sample expectation."
+            )
             blocks.append("")
 
         return "\n".join(blocks)
@@ -1665,6 +1705,26 @@ def _fmt_perm_pvalue_row(metrics: dict) -> str:
     else:
         interp = "WARNING: exits destroying value (90%+ of shuffles outperform)"
     return f"| Permutation p-value (Calmar) | {pv:.3f} | {interp} |"
+
+
+def _fmt_exposure_row(metrics: dict) -> str:
+    """Format market exposure as a trade-statistics table row.
+
+    Market exposure = fraction of backtested days the strategy was invested.
+    < 15%  : flag as potentially under-deployed (limited compounding opportunity)
+    15–50% : normal for swing / momentum strategies
+    > 50%  : high exposure — confirm VaR/CVaR are acceptable before sizing up
+    """
+    exposure = metrics.get("market_exposure")
+    if exposure is None:
+        return "| Market Exposure (% days invested) | N/A | Insufficient trade log |"
+    if exposure < 0.15:
+        interp = f"WARNING: under-deployed — only {exposure:.1%} of days invested; limited compounding"
+    elif exposure > 0.50:
+        interp = f"High exposure ({exposure:.1%}) — verify VaR/CVaR are within limits"
+    else:
+        interp = f"Normal ({exposure:.1%})"
+    return f"| Market Exposure (% days invested) | {exposure:.1%} | {interp} |"
 
 
 def _fmt_degradation_row(metrics: dict) -> str:

@@ -116,9 +116,17 @@ class Backtester:
     def __init__(self, initial_portfolio: float = 100_000.0, slippage_bps: float = DEFAULT_SLIP_BPS):
         self.initial_portfolio = initial_portfolio
         self._default_slip_bps = slippage_bps
+        # NOTE: _slip is the DEFAULT rate only; per-call slippage is computed
+        # locally inside run() / run_pair() and never mutates this instance attribute.
         self._slip = slippage_bps / 10_000  # convert to fraction
 
     # ── public ────────────────────────────────────────────────────────────────
+
+    def _resolve_slip(self, adv_shares: float) -> float:
+        """Return the slippage fraction for a single call without mutating state."""
+        if adv_shares > 0:
+            return _slip_bps_for_adv(adv_shares) / 10_000
+        return self._default_slip_bps / 10_000
 
     def run(self, ticker: str, strategy: dict, ohlcv: pd.DataFrame,
             adv_shares: float = 0.0) -> dict:
@@ -140,27 +148,25 @@ class Backtester:
         dict with keys: ticker, strategy, trade_log, equity_curve, returns, summary,
                         slippage_bps (the rate actually used)
         """
-        # Apply per-ticker ADV-tiered slippage when ADV is known
-        if adv_shares > 0:
-            self._slip = _slip_bps_for_adv(adv_shares) / 10_000
-        else:
-            self._slip = self._default_slip_bps / 10_000
+        # Compute slippage locally — never mutate self._slip so parallel / sequential
+        # calls do not bleed state into each other.
+        slip = self._resolve_slip(adv_shares)
 
         strategy_type = strategy["strategy"]
         params        = strategy["adjusted_params"]
 
         if strategy_type == "Momentum":
-            trade_log = self._run_momentum(ohlcv, params)
+            trade_log = self._run_momentum(ohlcv, params, slip)
         elif strategy_type == "VolatilityBreakout":
-            trade_log = self._run_volatility_breakout(ohlcv, params)
+            trade_log = self._run_volatility_breakout(ohlcv, params, slip)
         elif strategy_type == "AlphaCombined":
-            trade_log = self._run_alpha_combined(ohlcv, params)
+            trade_log = self._run_alpha_combined(ohlcv, params, slip)
         elif strategy_type == "MLSignal":
-            trade_log = self._run_ml_signal(ohlcv, params)
+            trade_log = self._run_ml_signal(ohlcv, params, slip)
         elif strategy_type == "EventDriven":
-            trade_log = self._run_event_driven(ohlcv, params)
+            trade_log = self._run_event_driven(ohlcv, params, slip)
         else:
-            trade_log = self._run_mean_reversion(ohlcv, params)
+            trade_log = self._run_mean_reversion(ohlcv, params, slip)
 
         equity_curve = self._build_equity_curve(ohlcv, trade_log)
         returns      = self._build_returns(ohlcv, trade_log, equity_curve)
@@ -177,7 +183,7 @@ class Backtester:
             except Exception:
                 pass
 
-        used_slip_bps = round(self._slip * 10_000, 1)
+        used_slip_bps = round(slip * 10_000, 1)
         return {
             "ticker":       ticker,
             "strategy":     strategy_type,
@@ -252,13 +258,17 @@ class Backtester:
             atr_map[ticker]      = atr_s
             blackout_map[ticker] = bl_s
 
+        # Portfolio-level backtest uses the default slippage (no ADV override available
+        # at the portfolio level — individual tickers have mixed liquidity).
+        slip = self._default_slip_bps / 10_000
+
         if not close_map:
             empty = pd.Series(dtype=float)
             return {
                 "ticker": "AlphaCombined_Portfolio", "tickers": [],
                 "strategy": "AlphaCombined", "trade_log": [],
                 "equity_curve": empty, "returns": empty,
-                "summary": {}, "slippage_bps": round(self._slip * 10_000, 1),
+                "summary": {}, "slippage_bps": round(slip * 10_000, 1),
             }
 
         # Build a common date index (union so no ticker data is silently dropped)
@@ -305,7 +315,7 @@ class Backtester:
                 if ticker not in positions:
                     # Entry: cross-sectional signal exceeds threshold
                     if s > alpha_th and not bl:
-                        entry_px = c * (1 + self._slip)
+                        entry_px = c * (1 + slip)
                         stop_px  = entry_px - stop_atr * a
                         pos_size = (equity * RISK_PER_TRADE) / (stop_atr * a)
                         positions[ticker] = {
@@ -342,8 +352,8 @@ class Backtester:
                         exit_reason = "max_holding"
 
                     if exit_reason:
-                        exit_px   = c * (1 - self._slip)
-                        gross_pnl = (c - (pos["entry_price"] / (1 + self._slip))) * pos["pos_size"]
+                        exit_px   = c * (1 - slip)
+                        gross_pnl = (c - (pos["entry_price"] / (1 + slip))) * pos["pos_size"]
                         pnl       = (exit_px - pos["entry_price"]) * pos["pos_size"]
                         equity   += pnl
                         all_trades.append(_make_trade(
@@ -364,8 +374,8 @@ class Backtester:
             if len(c_s) == 0:
                 continue
             c        = float(c_s.iloc[-1])
-            exit_px  = c * (1 - self._slip)
-            gross_pnl = (c - (pos["entry_price"] / (1 + self._slip))) * pos["pos_size"]
+            exit_px  = c * (1 - slip)
+            gross_pnl = (c - (pos["entry_price"] / (1 + slip))) * pos["pos_size"]
             pnl      = (exit_px - pos["entry_price"]) * pos["pos_size"]
             equity  += pnl
             all_trades.append(_make_trade(
@@ -403,7 +413,7 @@ class Backtester:
             "equity_curve": equity_curve,
             "returns":      raw_returns,
             "summary":      summary,
-            "slippage_bps": round(self._slip * 10_000, 1),
+            "slippage_bps": round(slip * 10_000, 1),
         }
 
     # ── pair trading ─────────────────────────────────────────────────────────
@@ -462,13 +472,14 @@ class Backtester:
             trade_log, equity_curve, returns, summary,
             hedge_ratio, slippage_bps
         """
+        # Compute local slip — never mutate self._slip
         if adv_a > 0 or adv_b > 0:
-            avg_adv   = (adv_a + adv_b) / max(int(adv_a > 0) + int(adv_b > 0), 1)
-            self._slip = _slip_bps_for_adv(avg_adv) / 10_000
+            avg_adv = (adv_a + adv_b) / max(int(adv_a > 0) + int(adv_b > 0), 1)
+            slip    = _slip_bps_for_adv(avg_adv) / 10_000
         else:
-            self._slip = self._default_slip_bps / 10_000
+            slip    = self._default_slip_bps / 10_000
 
-        trade_log    = self._run_pair_trading(ohlcv_a, ohlcv_b, params, hedge_ratio)
+        trade_log    = self._run_pair_trading(ohlcv_a, ohlcv_b, params, hedge_ratio, slip)
         equity_curve = self._build_pair_equity_curve(ohlcv_a, ohlcv_b, trade_log)
         returns      = self._build_pair_returns(equity_curve, trade_log)
         summary      = self._summarize_pair(trade_log, equity_curve)
@@ -482,12 +493,12 @@ class Backtester:
             "returns":      returns,
             "summary":      summary,
             "hedge_ratio":  round(hedge_ratio, 4),
-            "slippage_bps": round(self._slip * 10_000, 1),
+            "slippage_bps": round(slip * 10_000, 1),
         }
 
     def _run_pair_trading(
         self, ohlcv_a: pd.DataFrame, ohlcv_b: pd.DataFrame,
-        params: dict, initial_hedge: float,
+        params: dict, initial_hedge: float, slip: float = 0.0,
     ) -> list[dict]:
         """
         Core pair trading simulation engine.
@@ -574,7 +585,7 @@ class Backtester:
                 # This ensures a stop-out at stop_z costs at most 1% per trade.
                 denom = max(stop_z - abs(z), 0.5)   # floor at 0.5z to avoid gigantic sizing
                 notional_a = (equity * RISK_PER_TRADE) / denom
-                size_a     = notional_a / (ca * (1 + self._slip))
+                size_a     = notional_a / (ca * (1 + slip))
                 size_b     = size_a * abs(beta)
 
                 in_position  = True
@@ -587,13 +598,13 @@ class Backtester:
                 if direction == "short_spread":
                     # Short A (entry: sell at ca with slip credit lost)
                     # Long  B (entry: buy  at cb with slip paid)
-                    entry_ca = ca * (1 - self._slip)   # received for short
-                    entry_cb = cb * (1 + self._slip)   # paid for long
+                    entry_ca = ca * (1 - slip)   # received for short
+                    entry_cb = cb * (1 + slip)   # paid for long
                 else:
                     # Long  A (entry: buy  at ca)
                     # Short B (entry: sell at cb)
-                    entry_ca = ca * (1 + self._slip)
-                    entry_cb = cb * (1 - self._slip)
+                    entry_ca = ca * (1 + slip)
+                    entry_cb = cb * (1 - slip)
             else:
                 holding_days += 1
 
@@ -620,14 +631,14 @@ class Backtester:
                 if exit_reason:
                     if direction == "short_spread":
                         # Cover short A (buy back at ca), sell long B (at cb)
-                        exit_ca = ca * (1 + self._slip)   # pay slip to cover
-                        exit_cb = cb * (1 - self._slip)   # receive minus slip
+                        exit_ca = ca * (1 + slip)   # pay slip to cover
+                        exit_cb = cb * (1 - slip)   # receive minus slip
                         pnl_a   = (entry_ca - exit_ca) * size_a   # short A: sold high, buy back
                         pnl_b   = (exit_cb  - entry_cb) * size_b  # long  B: buy low, sold high
                     else:
                         # Sell long A, cover short B
-                        exit_ca = ca * (1 - self._slip)
-                        exit_cb = cb * (1 + self._slip)
+                        exit_ca = ca * (1 - slip)
+                        exit_cb = cb * (1 + slip)
                         pnl_a   = (exit_ca  - entry_ca) * size_a  # long  A
                         pnl_b   = (entry_cb - exit_cb) * size_b   # short B: sold high, buy back
 
@@ -643,11 +654,11 @@ class Backtester:
                     raw_entry_ca = ca if direction == "short_spread" else ca   # pre-slip entry
                     raw_entry_cb = cb if direction == "short_spread" else cb
                     if direction == "short_spread":
-                        gross_pnl = (entry_ca / (1 - self._slip) - exit_ca / (1 + self._slip)) * size_a \
-                                  + (exit_cb  / (1 - self._slip) - entry_cb / (1 + self._slip)) * size_b
+                        gross_pnl = (entry_ca / (1 - slip) - exit_ca / (1 + slip)) * size_a \
+                                  + (exit_cb  / (1 - slip) - entry_cb / (1 + slip)) * size_b
                     else:
-                        gross_pnl = (exit_ca  / (1 - self._slip) - entry_ca / (1 + self._slip)) * size_a \
-                                  + (entry_cb / (1 - self._slip) - exit_cb  / (1 + self._slip)) * size_b
+                        gross_pnl = (exit_ca  / (1 - slip) - entry_ca / (1 + slip)) * size_a \
+                                  + (entry_cb / (1 - slip) - exit_cb  / (1 + slip)) * size_b
                     net_pnl   = pnl_a + pnl_b - borrow_cost
                     slip_cost = abs(gross_pnl - (pnl_a + pnl_b))
                     equity   += net_pnl
@@ -917,7 +928,7 @@ class Backtester:
 
     # ── strategy engines ──────────────────────────────────────────────────────
 
-    def _run_momentum(self, ohlcv: pd.DataFrame, params: dict) -> list[dict]:
+    def _run_momentum(self, ohlcv: pd.DataFrame, params: dict, slip: float = 0.0) -> list[dict]:
         close  = ohlcv["Close"].astype(float)
         high   = ohlcv["High"].astype(float)
         low    = ohlcv["Low"].astype(float)
@@ -977,7 +988,7 @@ class Backtester:
                     mom_ok = not np.isnan(mv) and mv > 0.0
                 if c > rh and v > vol_multiplier * vm and mom_ok and not bool(blackout.iloc[i]):
                     in_position  = True
-                    entry_price  = c * (1 + self._slip)   # pay spread on entry
+                    entry_price  = c * (1 + slip)   # pay spread on entry
                     entry_date   = close.index[i]
                     stop_price   = entry_price - stop_loss_atr * a
                     pos_size     = (equity * RISK_PER_TRADE) / (stop_loss_atr * a)
@@ -1006,9 +1017,8 @@ class Backtester:
                     exit_reason = "max_holding"
 
                 if exit_reason:
-                    exit_price      = c * (1 - self._slip)   # lose spread on exit
-                    slip_cost       = (entry_price - c * (1 - self._slip + self._slip)) * pos_size
-                    gross_pnl       = (c - (entry_price / (1 + self._slip))) * pos_size
+                    exit_price      = c * (1 - slip)   # lose spread on exit
+                    gross_pnl       = (c - (entry_price / (1 + slip))) * pos_size
                     pnl             = (exit_price - entry_price) * pos_size
                     equity         += pnl
                     trades.append(_make_trade(
@@ -1022,7 +1032,7 @@ class Backtester:
 
         return trades
 
-    def _run_mean_reversion(self, ohlcv: pd.DataFrame, params: dict) -> list[dict]:
+    def _run_mean_reversion(self, ohlcv: pd.DataFrame, params: dict, slip: float = 0.0) -> list[dict]:
         close  = ohlcv["Close"].astype(float)
         high   = ohlcv["High"].astype(float)
         low    = ohlcv["Low"].astype(float)
@@ -1064,7 +1074,7 @@ class Backtester:
             if not in_position:
                 if r < rsi_entry and c <= lb and not bool(blackout.iloc[i]):
                     in_position  = True
-                    entry_price  = c * (1 + self._slip)   # pay spread on entry
+                    entry_price  = c * (1 + slip)   # pay spread on entry
                     entry_date   = close.index[i]
                     stop_price   = entry_price - stop_atr * a
                     pos_size     = (equity * RISK_PER_TRADE) / (stop_atr * a)
@@ -1088,8 +1098,8 @@ class Backtester:
                     exit_reason = "max_holding"
 
                 if exit_reason:
-                    exit_price    = c * (1 - self._slip)   # lose spread on exit
-                    gross_pnl     = (c - (entry_price / (1 + self._slip))) * pos_size
+                    exit_price    = c * (1 - slip)   # lose spread on exit
+                    gross_pnl     = (c - (entry_price / (1 + slip))) * pos_size
                     pnl           = (exit_price - entry_price) * pos_size
                     equity       += pnl
                     trades.append(_make_trade(
@@ -1103,7 +1113,7 @@ class Backtester:
 
         return trades
 
-    def _run_alpha_combined(self, ohlcv: pd.DataFrame, params: dict) -> list[dict]:
+    def _run_alpha_combined(self, ohlcv: pd.DataFrame, params: dict, slip: float = 0.0) -> list[dict]:
         """
         AlphaCombined strategy engine.
 
@@ -1170,7 +1180,7 @@ class Backtester:
             if not in_position:
                 if s > alpha_th and not bool(blackout.iloc[i]):
                     in_position  = True
-                    entry_price  = c * (1 + self._slip)
+                    entry_price  = c * (1 + slip)
                     entry_date   = close.index[i]
                     stop_price   = entry_price - stop_atr * a
                     trail_stop   = stop_price
@@ -1199,8 +1209,8 @@ class Backtester:
                     exit_reason = "max_holding"
 
                 if exit_reason:
-                    exit_price  = c * (1 - self._slip)
-                    gross_pnl   = (c - (entry_price / (1 + self._slip))) * pos_size
+                    exit_price  = c * (1 - slip)
+                    gross_pnl   = (c - (entry_price / (1 + slip))) * pos_size
                     pnl         = (exit_price - entry_price) * pos_size
                     equity     += pnl
                     trades.append(_make_trade(
@@ -1214,7 +1224,7 @@ class Backtester:
 
         return trades
 
-    def _run_ml_signal(self, ohlcv: pd.DataFrame, params: dict) -> list[dict]:
+    def _run_ml_signal(self, ohlcv: pd.DataFrame, params: dict, slip: float = 0.0) -> list[dict]:
         """
         MLSignal strategy engine.
 
@@ -1280,7 +1290,7 @@ class Backtester:
                     continue
                 if s > ml_th and not bool(blackout.iloc[i]):
                     in_position  = True
-                    entry_price  = c * (1 + self._slip)
+                    entry_price  = c * (1 + slip)
                     entry_date   = close.index[i]
                     stop_price   = entry_price - stop_atr * a
                     trail_stop   = stop_price
@@ -1309,8 +1319,8 @@ class Backtester:
                     exit_reason = "max_holding"
 
                 if exit_reason:
-                    exit_price = c * (1 - self._slip)
-                    gross_pnl  = (c - (entry_price / (1 + self._slip))) * pos_size
+                    exit_price = c * (1 - slip)
+                    gross_pnl  = (c - (entry_price / (1 + slip))) * pos_size
                     pnl        = (exit_price - entry_price) * pos_size
                     equity    += pnl
                     trades.append(_make_trade(
@@ -1324,7 +1334,7 @@ class Backtester:
 
         return trades
 
-    def _run_volatility_breakout(self, ohlcv: pd.DataFrame, params: dict) -> list[dict]:
+    def _run_volatility_breakout(self, ohlcv: pd.DataFrame, params: dict, slip: float = 0.0) -> list[dict]:
         """
         VolatilityBreakout strategy engine.
 
@@ -1402,7 +1412,7 @@ class Backtester:
 
                 if was_sq and bb_breakout and vol_confirmed and not bool(blackout.iloc[i]):
                     in_position   = True
-                    entry_price   = c * (1 + self._slip)
+                    entry_price   = c * (1 + slip)
                     entry_date    = close.index[i]
                     stop_price    = entry_price - stop_loss_atr * a
                     pos_size      = (equity * RISK_PER_TRADE) / (stop_loss_atr * a)
@@ -1425,8 +1435,8 @@ class Backtester:
                     exit_reason = "max_holding"
 
                 if exit_reason:
-                    exit_price  = c * (1 - self._slip)
-                    gross_pnl   = (c - (entry_price / (1 + self._slip))) * pos_size
+                    exit_price  = c * (1 - slip)
+                    gross_pnl   = (c - (entry_price / (1 + slip))) * pos_size
                     pnl         = (exit_price - entry_price) * pos_size
                     equity     += pnl
                     trades.append(_make_trade(
@@ -1440,7 +1450,7 @@ class Backtester:
 
         return trades
 
-    def _run_event_driven(self, ohlcv: pd.DataFrame, params: dict) -> list[dict]:
+    def _run_event_driven(self, ohlcv: pd.DataFrame, params: dict, slip: float = 0.0) -> list[dict]:
         """
         EventDriven (PEAD) strategy engine.
 
@@ -1560,7 +1570,7 @@ class Backtester:
 
                 if gap_ok and pead_ok and ma_ok and vol_ok and no_blackout:
                     in_position  = True
-                    entry_price  = c * (1 + self._slip)
+                    entry_price  = c * (1 + slip)
                     entry_date   = close.index[i]
                     stop_price   = entry_price - stop_atr * a
                     trail_stop   = stop_price
@@ -1592,8 +1602,8 @@ class Backtester:
                     exit_reason = "max_holding"
 
                 if exit_reason:
-                    exit_price  = c * (1 - self._slip)
-                    gross_pnl   = (c - (entry_price / (1 + self._slip))) * pos_size
+                    exit_price  = c * (1 - slip)
+                    gross_pnl   = (c - (entry_price / (1 + slip))) * pos_size
                     pnl         = (exit_price - entry_price) * pos_size
                     equity     += pnl
                     trade = _make_trade(

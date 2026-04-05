@@ -10,10 +10,10 @@ Regime labels (priority order)
     ATR/price > 6%                             → "Crisis"
                                                  (extreme vol — all strategies
                                                   use tight params / skip entry)
-    Hurst > 0.55  AND  20d return > 0          → "Trending-Up"
-    Hurst > 0.55  AND  20d return ≤ 0          → "Trending-Down"
+    Hurst > 0.58  AND  20d return > 0          → "Trending-Up"
+    Hurst > 0.58  AND  20d return ≤ 0          → "Trending-Down"
     Hurst < 0.45                               → "Mean-Reverting"
-    0.45 ≤ Hurst ≤ 0.55:
+    0.45 ≤ Hurst ≤ 0.58  (uncertainty margin):
         ATR/price > 3%                         → "High-Volatility"
         ATR/price < 1.5%                       → "Low-Volatility"
         earnings_blackout within last 5 bars   → "Event-Driven"
@@ -32,9 +32,10 @@ Design rationale
 
 Strategy mapping  (authoritative source: strategy_selector._REGIME_TO_STRATEGY)
 ----------------
-    Trending-Up    → Momentum           (follow the confirmed uptrend)
-    Trending-Down  → VolatilityBreakout (direction-agnostic BB squeeze→expansion;
-                                         avoids knife-catching into a downtrend)
+    Trending-Up    → Momentum        (follow the confirmed uptrend)
+    Trending-Down  → Mean-Reversion  (fade oversold exhaustion within the downtrend;
+                                      a long-only VolatilityBreakout buying above the
+                                      upper BB fights the confirmed downtrend direction)
     High-Volatility→ VolatilityBreakout (squeeze → expansion alpha)
     Crisis         → VolatilityBreakout (trade the next breakout, not the dip)
     Mean-Reverting → AlphaCombined      (multi-factor cross-sectional MR signal)
@@ -82,8 +83,15 @@ import pandas as pd
 
 # ── Regime thresholds (PRD defaults) ─────────────────────────────────────────
 
-HURST_TRENDING       = 0.55
-HURST_MEAN_REVERTING = 0.45
+HURST_TRENDING       = 0.58   # raised from 0.55 — adds ±0.03 uncertainty margin around the
+                              # theoretical 0.5 boundary.  R/S estimation on 756 daily observations
+                              # has a standard error of ~0.03–0.05 (Lo 1991; Peters 1994).
+                              # Requiring Hurst > 0.58 before classifying "Trending" prevents
+                              # borderline 0.55–0.58 estimates (which could be 0.50 noise) from
+                              # routing to Momentum and then failing every diagnostic floor.
+HURST_MEAN_REVERTING = 0.45  # conservative lower boundary unchanged — false mean-reversion
+                              # classification is less harmful than false trending classification
+                              # because AlphaCombined is more regime-agnostic.
 ATR_CRISIS           = 0.06    # 6% — extreme panic/distress; takes priority
 ATR_HIGH_VOL         = 0.03    # 3%
 ATR_LOW_VOL          = 0.015   # 1.5%

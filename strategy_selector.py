@@ -9,8 +9,9 @@ for the report — it has no influence on the numbers.
 Regime -> Strategy mapping  (see _REGIME_TO_STRATEGY for the authoritative dict)
 --------------------------
     Trending-Up      -> Momentum           (follow the confirmed uptrend)
-    Trending-Down    -> VolatilityBreakout  (direction-agnostic squeeze→expansion;
-                                            avoids knife-catching into a downtrend)
+    Trending-Down    -> Mean-Reversion     (fade oversold exhaustion within the
+                                            downtrend; long-only VolatilityBreakout
+                                            buying above the upper-BB fights the trend)
     High-Volatility  -> VolatilityBreakout  (BB squeeze → expansion alpha)
     Crisis           -> VolatilityBreakout  (trade the next breakout, not the dip)
     Mean-Reverting   -> AlphaCombined       (multi-factor MR signal)
@@ -29,7 +30,7 @@ Parameter adjustment rules (Momentum)
     max_holding_days  : 20 base
         -> 30 if Hurst > 0.75   (very strong trend — allow longer ride)
     entry_lookback    : 10 (fixed)
-    ma_exit_period    : 10 (fixed)
+    ma_exit_period    : 50 (fixed — institutional 50d MA; 20d fired prematurely)
 
 Parameter adjustment rules (Mean-Reversion)
 --------------------------------------------
@@ -61,7 +62,11 @@ MOMENTUM_BASE: dict = {
     "entry_lookback":       10,
     "volume_multiplier":    1.2,
     "trailing_stop_atr":    2.0,
-    "ma_exit_period":       20,    # widened from 10 — 10d MA fires too early, cutting winners short
+    "ma_exit_period":       50,    # widened from 20 → 50 — 20d MA fires too early in trending regimes,
+                                   # cutting winners short before the trend exhausts.
+                                   # 50d MA is the institutional standard for trend-following exits
+                                   # and aligns with the ~3-month holding horizon of Jegadeesh-Titman
+                                   # cross-sectional momentum (the regime this strategy exploits).
     "stop_loss_atr":        1.5,
     "max_holding_days":     20,
     "momentum_lookback":    252,   # 12-1 month momentum gate: only enter if 11m return (skip last month) > 0
@@ -181,8 +186,13 @@ EVENT_DRIVEN_BASE: dict = {
 
 _REGIME_TO_STRATEGY: dict[str, str] = {
     # Directional trend regimes
-    "Trending-Up":      "Momentum",            # follow the trend long
-    "Trending-Down":    "VolatilityBreakout",  # direction-agnostic squeeze→expansion; avoids knife-catching
+    "Trending-Up":      "Momentum",          # follow the confirmed uptrend long
+    # Trending-Down: in a long-only system, VolatilityBreakout (which buys above the
+    # upper BB) fights the downtrend — the breakout signal fires against momentum, not
+    # with it.  Mean-Reversion fades oversold exhaustion within a downtrend, which is
+    # the correct long-only posture: wait for RSI compression and a lower-BB touch,
+    # capture the bounce, exit quickly.  If no oversold setup appears, no trade is taken.
+    "Trending-Down":    "Mean-Reversion",    # fade oversold exhaustion in the downtrend
     # Volatility regimes
     "High-Volatility":  "VolatilityBreakout",  # squeeze → expansion alpha
     "Low-Volatility":   "MLSignal",             # quiet markets: ML detects subtle nonlinear patterns
