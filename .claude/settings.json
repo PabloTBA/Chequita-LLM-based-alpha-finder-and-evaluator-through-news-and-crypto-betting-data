@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(ls -lh *.csv)"
+      "Bash(ls -lh *.csv)",
+      "Bash(pip show:*)"
     ]
   }
 }
