@@ -267,6 +267,7 @@ class PipelineOrchestrator:
         # Crucix is not running — the pipeline continues with Benzinga data only.
         crucix_snapshot  = None
         crucix_macro_ctx = {}
+        _crucix          = None   # kept in scope so Stage 3 can call to_summary_text
         print(f"[{_ts()}] [Stage 1c] Checking Crucix OSINT sidecar ...")
         try:
             from crucix_adapter import CrucixAdapter
@@ -276,15 +277,12 @@ class PipelineOrchestrator:
             crucix_snapshot = _crucix.fetch()
             if crucix_snapshot:
                 crucix_macro_ctx = _crucix.to_macro_context(crucix_snapshot)
-                crucix_articles  = _crucix.to_articles(crucix_snapshot)
-                # Merge Crucix OSINT articles into today's article bucket so they
-                # flow into NewsSummarizer alongside Benzinga articles.
-                crucix_date = run_date
-                if crucix_date not in articles:
-                    articles[crucix_date] = []
-                if isinstance(articles[crucix_date], list):
-                    articles[crucix_date].extend(crucix_articles)
-                print(f"[{_ts()}] [Stage 1c] Crucix: {len(crucix_articles)} OSINT articles merged. "
+                crucix_df        = _crucix.to_dataframe(crucix_snapshot)
+                # articles is {source_type: DataFrame} — add Crucix as its own source
+                # so RAG store and NewsSummarizer can iterate it like any other source.
+                if not crucix_df.empty:
+                    articles["crucix_osint"] = crucix_df
+                print(f"[{_ts()}] [Stage 1c] Crucix: {len(crucix_df)} OSINT articles merged. "
                       f"Macro signals: {len(crucix_macro_ctx.get('cross_domain_risk_signals', []))}")
             else:
                 print(f"[{_ts()}] [Stage 1c] Crucix not available — continuing without OSINT enrichment.")
@@ -314,9 +312,8 @@ class PipelineOrchestrator:
         if crucix_macro_ctx:
             if isinstance(summary, dict):
                 summary.setdefault("crucix_macro", crucix_macro_ctx)
-            elif isinstance(summary, str) and crucix_snapshot:
-                from crucix_adapter import CrucixAdapter as _CA
-                summary = summary + "\n\n" + _CA().to_summary_text(crucix_snapshot)
+            elif isinstance(summary, str) and crucix_snapshot and _crucix is not None:
+                summary = summary + "\n\n" + _crucix.to_summary_text(crucix_snapshot)
         macro = self._safe(
             "macro_screener",
             lambda: m["macro_screener"].screen(summary),

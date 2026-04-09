@@ -108,6 +108,8 @@ class MonteCarloEngine:
             initial_portfolio + np.cumsum(sampled, axis=1),
         ])
 
+        
+
         # ── per-simulation metrics ────────────────────────────────────────────
         final_equity = equity[:, -1]
 
@@ -163,6 +165,7 @@ class MonteCarloEngine:
         # Win rate per sim
         wins     = (sampled > 0).sum(axis=1)
         win_rate = wins / n_trades
+        
 
         # Max consecutive losses per sim
         max_consec = self._max_consec_losses_batch(sampled)
