@@ -92,6 +92,7 @@ class ReportGenerator:
             self._strategy_section(pipeline_output),
             self._diagnostic_section(pipeline_output),
             self._backtest_section(pipeline_output),
+            self._pairs_section(pipeline_output),
             self._baseline_section(pipeline_output),
             self._portfolio_section(pipeline_output),
             self._monte_carlo_section(pipeline_output),
@@ -1363,19 +1364,38 @@ class ReportGenerator:
                 out.append(f"| Mean-reversion target | ${b['target']:,.2f} |")
             if not active_signal:
                 out += ["", "**Conditions to watch (enter when ALL are met):**", ""]
+                trig = b.get("entry_trigger")
+                is_str_trig = isinstance(trig, str)
+
+                # String triggers (AlphaCombined / MLSignal / EventDriven)
+                if is_str_trig:
+                    # MLSignal: "ml_signal > 0.60"
+                    if "ml_signal" in trig:
+                        out.append(f"- Entry condition: **{trig}** (ensemble ML probability threshold)")
+                        if b.get("ml_signal") is not None:
+                            out.append(f"- Current ml_signal: **{b['ml_signal']:.3f}** (needs to exceed threshold)")
+                    # EventDriven: contains "pead_signal"
+                    elif "pead_signal" in trig:
+                        out.append(f"- Entry condition: **{trig}**")
+                        out.append(f"- Close must be **above the {b.get('ma_filter_period', 5)}-day MA** (drift intact)")
+                        if b.get("volume_needed") is not None:
+                            out.append(f"- Volume must exceed **{b['volume_needed']:,.0f} shares** (participation confirmed)")
+                        out.append(f"- Must be **outside earnings blackout window**")
+                        if b.get("pead_signal") is not None:
+                            out.append(f"- Current pead_signal: **{b['pead_signal']:.3f}**")
+                    # AlphaCombined
+                    else:
+                        out.append(f"- Entry condition: **{trig}** (cross-sectional alpha signal threshold)")
                 # Momentum conditions
-                if b.get("entry_trigger") is not None and b.get("volume_needed") is not None:
-                    out.append(f"- Price must close **above ${b['entry_trigger']:,.2f}** (N-day high breakout)")
+                elif trig is not None and b.get("volume_needed") is not None and b.get("squeeze_pct_threshold") is None:
+                    out.append(f"- Price must close **above ${trig:,.2f}** (N-day high breakout)")
                     out.append(f"- Volume must exceed **{b['volume_needed']:,.0f} shares** (volume confirmation)")
                 # Mean-Reversion conditions
                 elif b.get("rsi_needed") is not None:
                     out.append(f"- RSI(14) must drop **below {b['rsi_needed']}** (oversold) AND price ≤ lower Bollinger Band")
-                # AlphaCombined conditions (entry_trigger is a string like "alpha_signal > 0.45")
-                elif b.get("entry_trigger") is not None and isinstance(b.get("entry_trigger"), str):
-                    out.append(f"- Entry condition: **{b['entry_trigger']}** (cross-sectional alpha signal threshold)")
-                # VolatilityBreakout conditions (entry_trigger is a float price level)
-                elif b.get("entry_trigger") is not None:
-                    out.append(f"- Close must **break above upper Bollinger Band (${b['entry_trigger']:,.2f})**")
+                # VolatilityBreakout conditions (numeric trigger + squeeze fields)
+                elif trig is not None:
+                    out.append(f"- Close must **break above upper Bollinger Band (${trig:,.2f})**")
                     if b.get("squeeze_pct_threshold") is not None:
                         out.append(f"- BB width must be in the bottom {int(b.get('squeeze_pct_threshold', 0)*100 if isinstance(b.get('squeeze_pct_threshold'), float) else 20)}% of its rolling history (squeeze)")
                     if b.get("min_atr_expansion") is not None:
@@ -1426,6 +1446,217 @@ class ReportGenerator:
             ]
 
         return "\n".join(lines)
+
+    @staticmethod
+    def _pairs_section(po: dict) -> str:
+        """
+        Full trader-facing rendering of statistical pair-trading analyses.
+
+        For each pair the pipeline discovered (stage 9b), render: pair stats,
+        strategy mechanics, backtest summary, diagnostic verdict, and a
+        complete execution brief covering both legs — so the trader knows
+        exactly which to sell, which to buy, at what size, when to exit,
+        and what costs to expect. No additional research required.
+        """
+        pair_analyses = po.get("pair_analyses", [])
+        blocks = ["## Pair Trading (Statistical Arbitrage)", ""]
+
+        if not pair_analyses:
+            blocks.append("_No cointegrated pairs were found in this run's universe._")
+            return "\n".join(blocks)
+
+        blocks.append(
+            f"**{len(pair_analyses)} pair(s) analysed.** "
+            "Pairs are market-neutral: returns come from spread convergence, "
+            "not market direction. Execution requires simultaneous fills on BOTH legs."
+        )
+        blocks.append("")
+
+        for pa in pair_analyses:
+            pair_name = pa.get("pair", "?/?")
+            ta        = pa.get("ticker_a", "A")
+            tb        = pa.get("ticker_b", "B")
+            stats     = pa.get("pair_stats", {}) or {}
+            params    = pa.get("params", {}) or {}
+            bt        = pa.get("backtest", {}) or {}
+            diag      = pa.get("diagnostic", {}) or {}
+            summary   = bt.get("summary", {}) or {}
+            metrics   = diag.get("metrics", {}) or {}
+            sig       = pa.get("current_signal") or {}
+            passed    = bool(diag.get("passed"))
+
+            status_badge = "PASS (tradable)" if passed else "FAIL (do not trade)"
+            blocks += [
+                "---",
+                "",
+                f"### {pair_name} — {status_badge}",
+                "",
+                "#### Pair Statistics",
+                "",
+                "| Field | Value |",
+                "|-------|-------|",
+                f"| Correlation (returns) | {stats.get('correlation', float('nan')):.3f} |",
+                f"| Cointegration p-value | {stats.get('coint_pvalue', float('nan')):.4f} |",
+                f"| Spread half-life | {stats.get('halflife_days', float('nan')):.1f} days |",
+                f"| Hedge ratio β (historical) | {stats.get('hedge_ratio', float('nan')):.4f} |",
+                "",
+                "#### Strategy Mechanics",
+                "",
+            ]
+            blocks += _render_mechanics("PairTrading", params)
+            blocks += [
+                "",
+                "#### Adjusted Parameters",
+                "",
+                "| Parameter | Value |",
+                "|-----------|-------|",
+            ]
+            for k, v in params.items():
+                blocks.append(f"| {k} | {v} |")
+
+            # ── Backtest summary ─────────────────────────────────────────
+            blocks += [
+                "",
+                "#### Backtest Summary",
+                "",
+                "| Metric | Value |",
+                "|--------|-------|",
+                f"| Trades | {summary.get('trade_count', len(bt.get('trade_log', [])))} |",
+                f"| Win rate | {summary.get('win_rate', 0):.1%} |",
+                f"| Total return | {summary.get('total_return', 0):+.2%} |",
+                f"| Sharpe | {metrics.get('sharpe', float('nan')):.2f} |",
+                f"| Max drawdown | {metrics.get('max_drawdown', 0):.2%} |",
+                f"| Avg |entry_z| | {summary.get('avg_entry_z', 0):.2f} |",
+                f"| Avg |exit_z| | {summary.get('avg_exit_z', 0):.2f} |",
+                f"| Diagnostic verdict | {'PASS' if passed else 'FAIL'} |",
+                f"| Reject reason | {diag.get('reject_reason') or '—'} |",
+            ]
+
+            # ── Execution brief (live) ───────────────────────────────────
+            if not passed:
+                blocks += [
+                    "",
+                    "> NOTE: **Execution brief suppressed — pair FAILED diagnostic floors.**  ",
+                    "> Do not trade this pair; the backtest has no demonstrated edge.",
+                    "",
+                ]
+                continue
+
+            blocks += [
+                "",
+                "#### Execution Brief (Live Signal)",
+                "",
+            ]
+            z_live     = sig.get("z_score")
+            active     = bool(sig.get("signal_active"))
+            direction  = sig.get("direction")
+            setup      = sig.get("setup") or {}
+
+            if z_live is None:
+                blocks.append(
+                    "_Live pair signal unavailable for this run "
+                    "(insufficient recent history or pipeline skipped computation)._"
+                )
+                blocks.append("")
+                continue
+
+            status = "ACTIVE — ENTER NOW" if active else "PENDING — wait for z-score to breach entry band"
+            blocks.append(f"**Status:** {status}")
+            blocks.append("")
+
+            # Direction-aware leg mapping
+            if direction == "short_spread":
+                short_leg, long_leg = ta, tb
+                action_line = f"**SHORT {ta}** + **LONG {tb}** (spread z > 0; {ta} is relatively overvalued)"
+            elif direction == "long_spread":
+                short_leg, long_leg = tb, ta
+                action_line = f"**LONG {ta}** + **SHORT {tb}** (spread z < 0; {ta} is relatively undervalued)"
+            else:
+                short_leg, long_leg = None, None
+                action_line = "_No trade signal on latest bar — monitor z-score daily._"
+
+            entry_z = params.get("entry_z", 2.0)
+            exit_z  = params.get("exit_z",  0.25)
+            stop_z  = params.get("stop_z",  3.5)
+            mh      = params.get("max_holding_days", "—")
+
+            blocks += [
+                "| Field | Value |",
+                "|-------|-------|",
+                f"| Live spread z-score | {z_live:+.3f} |",
+                f"| Entry band | ±{entry_z:.2f} |",
+                f"| Profit-take band | ±{exit_z:.2f} (spread mean-reversion target) |",
+                f"| Stop-out band | ±{stop_z:.2f} (divergence stop) |",
+                f"| Live hedge ratio β | {sig.get('beta_live', float('nan')):.4f} |",
+                f"| Spread std | {sig.get('spread_std', float('nan')):.6f} |",
+                f"| {ta} last close | ${sig.get('close_a', 0):,.2f} |",
+                f"| {tb} last close | ${sig.get('close_b', 0):,.2f} |",
+                "",
+                f"**Action:** {action_line}",
+                "",
+            ]
+
+            if active and setup:
+                s_a    = float(setup.get("size_a", 0) or 0)
+                s_b    = float(setup.get("size_b", 0) or 0)
+                na     = float(setup.get("notional_a", 0) or 0)
+                nb     = float(setup.get("notional_b", 0) or 0)
+                drisk  = float(setup.get("dollar_risk", 0) or 0)
+                # Slippage: 10bps per leg, paid twice (entry + exit)
+                slip_a = na * 0.0010 * 2
+                slip_b = nb * 0.0010 * 2
+                # Borrow cost on short leg (50 bps/yr, charged per day of hold)
+                short_notional = na if direction == "short_spread" else nb
+                borrow_daily   = short_notional * (0.005 / 252)
+
+                blocks += [
+                    "##### Order Tickets (submit BOTH simultaneously at next open)",
+                    "",
+                    "| Leg | Side | Ticker | Shares | ~Notional |",
+                    "|-----|------|--------|--------|-----------|",
+                    f"| A | {'SELL SHORT' if direction == 'short_spread' else 'BUY'} | "
+                    f"{ta} | {s_a:,.0f} | ${na:,.0f} |",
+                    f"| B | {'BUY' if direction == 'short_spread' else 'SELL SHORT'} | "
+                    f"{tb} | {s_b:,.0f} | ${nb:,.0f} |",
+                    "",
+                    "##### Risk & Cost Accounting",
+                    "",
+                    "| Field | Value |",
+                    "|-------|-------|",
+                    f"| Dollar risk at entry | ${drisk:,.0f} (1% of portfolio) |",
+                    f"| Est. round-trip slippage (both legs × entry + exit) | ${slip_a + slip_b:,.0f} |",
+                    f"| Short-leg borrow cost (~50 bps/yr) | ${borrow_daily:,.2f} / day held |",
+                    f"| Max holding | {mh} trading days |",
+                    "",
+                    "##### When to Close the Position",
+                    "",
+                    f"1. **Take profit:** spread z-score converges inside ±{exit_z:.2f}"
+                    f" → BUY BACK **{short_leg}**, SELL **{long_leg}**.",
+                    f"2. **Stop out:** spread z-score breaches ±{stop_z:.2f}"
+                    f" (divergence worsening) → close BOTH legs immediately.",
+                    f"3. **Time stop:** still open after {mh} trading days → close BOTH legs at next open.",
+                    "",
+                    "> **Important:** if only ONE leg fills at entry, cancel the other"
+                    " and skip the trade — a one-sided pair trade is a directional bet,"
+                    " not an arbitrage.",
+                    "",
+                ]
+            elif active:
+                blocks.append("_Signal active but live setup unavailable — recompute before trading._")
+                blocks.append("")
+            else:
+                blocks += [
+                    "##### Projected Trade (when signal fires)",
+                    "",
+                    f"- Will enter when |z| > {entry_z:.2f}. Current z = {z_live:+.3f}.",
+                    f"- Direction will be determined by the sign of the breach"
+                    f" (positive z → SHORT {ta} / LONG {tb}; negative z → LONG {ta} / SHORT {tb}).",
+                    f"- Sizing will be recomputed at entry using live prices and β.",
+                    f"- Monitor daily; entry band is ±{entry_z:.2f}.",
+                    "",
+                ]
+
+        return "\n".join(blocks)
 
     @staticmethod
     def _monte_carlo_section(po: dict) -> str:
@@ -1658,6 +1889,122 @@ def _render_mechanics(strategy: str, params: dict) -> list[str]:
             f"1. **Trailing stop** — Close < highest close since entry − {ts} × ATR₁₄",
             f"2. **Alpha reversal** — alpha signal drops below {rth} (signal exhaustion)",
             f"3. **Max holding** — Force exit after {mh} trading days",
+        ]
+    elif strategy == "MLSignal":
+        ml_th   = params.get("ml_threshold",    "N")
+        sl      = params.get("stop_loss_atr",   "N")
+        ts      = params.get("trailing_stop_atr", "N")
+        mh      = params.get("max_holding_days", "N")
+        lines += [
+            "**Why it works:** MLSignal is an ensemble probability signal produced by"
+            " averaging four independent models (logistic regression, random forest,"
+            " gradient boosting, and a shallow MLP) trained on engineered features"
+            " (momentum, volatility, volume, cross-sectional rank). The ensemble is"
+            " shift(1)-lagged to prevent look-ahead bias. It excels in Neutral and"
+            " Low-Volatility regimes where no single linear factor dominates but"
+            " subtle nonlinear interactions (e.g. high short-term momentum combined"
+            " with low realised vol) carry predictive content. Threshold-gated entries"
+            " only fire when the ensemble probability exceeds a regime-tuned cutoff,"
+            " keeping false-positive rate down in quiet markets.",
+            "",
+            "**Order type:** Market order at next session open.",
+            "",
+            "**Entry condition:**",
+            f"- Ensemble ML probability `ml_signal` > {ml_th} (prior-bar value, no look-ahead)",
+            "",
+            f"**Position sizing:** 1% portfolio risk ÷ ({sl} × ATR₁₄) = shares to buy",
+            "",
+            "**Exit rules (checked in priority order each day):**",
+            f"1. **Hard stop loss** — Close < entry price − {sl} × ATR₁₄",
+            f"2. **Trailing stop** — Close < highest close since entry − {ts} × ATR₁₄",
+            f"3. **Signal decay** — ml_signal drops back below {ml_th}",
+            f"4. **Max holding** — Force exit after {mh} trading days",
+        ]
+    elif strategy == "EventDriven":
+        gap_t   = params.get("gap_threshold",        "N")
+        pead_t  = params.get("pead_min_signal",      "N")
+        ewin    = params.get("entry_window_bars",    "N")
+        vm      = params.get("volume_mult",          "N")
+        map_    = params.get("ma_filter_period",     "N")
+        sl      = params.get("stop_loss_atr",        "N")
+        pex     = params.get("pead_exit_threshold",  "N")
+        mh      = params.get("max_holding_days",     "N")
+        gap_pct_str = f"{gap_t*100:.1f}%" if isinstance(gap_t, float) else str(gap_t)
+        lines += [
+            "**Why it works:** Post-Earnings Announcement Drift (PEAD) is one of the"
+            " most persistent anomalies in equity markets: stocks that gap up on"
+            " earnings continue to drift upward for days to weeks as institutions"
+            " re-rate slowly and analyst estimates get revised. The strategy waits"
+            " out the immediate earnings blackout window (to avoid adverse selection"
+            " by informed traders), then enters when (a) a recent positive gap is"
+            " still in force, (b) the PEAD composite signal is above threshold,"
+            " (c) price remains above its short MA (drift still intact), and"
+            " (d) volume confirms continued participation. Exits cut early when the"
+            " PEAD signal fades, capturing the drift and not the mean-reversion that"
+            " follows exhaustion.",
+            "",
+            "**Order type:** Market order at next session open (after blackout lifts).",
+            "",
+            "**Entry (ALL conditions required):**",
+            f"- Positive earnings gap > {gap_pct_str} within the last {ewin} bars",
+            f"- PEAD composite signal > {pead_t} (drift still active)",
+            f"- Close > {map_}-day simple moving average (drift not broken)",
+            f"- Volume > {vm}× 20-bar average (participation confirmed)",
+            f"- Outside earnings blackout window",
+            "",
+            f"**Position sizing:** 1% portfolio risk ÷ ({sl} × ATR₁₄) = shares to buy",
+            "",
+            "**Exit rules (checked in priority order each day):**",
+            f"1. **Hard stop loss** — Close < entry price − {sl} × ATR₁₄",
+            f"2. **PEAD fade** — pead_signal drops below {pex} (drift reversed)",
+            f"3. **MA break** — Close < {map_}-day MA (drift broken)",
+            f"4. **Max holding** — Force exit after {mh} trading days",
+        ]
+    elif strategy in ("PairTrading", "PairsTrading"):
+        ez  = params.get("entry_z",       2.0)
+        xz  = params.get("exit_z",        0.25)
+        sz  = params.get("stop_z",        3.5)
+        bw  = params.get("beta_window",   60)
+        zw  = params.get("z_window",      60)
+        mh  = params.get("max_holding_days", "N")
+        lines += [
+            "**Why it works:** Statistical pair (spread) trading exploits short-run"
+            " dislocations between two historically cointegrated assets. When the"
+            " log-spread `log(A) − β·log(B)` deviates from its rolling mean by more"
+            " than `entry_z` standard deviations, the market-neutral position is"
+            " opened — shorting the relatively expensive leg and going long the"
+            " relatively cheap leg. Mean-reversion of the spread (cointegration)"
+            " provides the edge; dollar-neutral sizing removes broad market beta"
+            " exposure so returns come from convergence rather than market direction.",
+            "",
+            "**Order type:** Two simultaneous market orders at next session open"
+            " (one long leg, one short leg). Both must fill — if only one leg fills,"
+            " cancel the other and skip the trade.",
+            "",
+            "**Entry conditions:**",
+            f"- |spread z-score| > {ez} (computed on rolling {zw}-bar window)",
+            f"- Hedge ratio β estimated from rolling {bw}-bar OLS of log(A) on log(B)",
+            "- Direction:",
+            f"  - **z > +{ez}** → **SHORT A**, **LONG B** (A is overvalued vs B)",
+            f"  - **z < −{ez}** → **LONG A**,  **SHORT B** (A is undervalued vs B)",
+            "",
+            "**Position sizing (dollar-neutral):**",
+            f"- Risk budget: 1% of portfolio allocated to a ({sz} − |entry_z|) spread move",
+            f"- notional_A = portfolio × 0.01 / ({sz} − |z|)",
+            f"- size_A     = notional_A / price_A",
+            f"- size_B     = size_A × |β|          (β from rolling regression)",
+            "- Verify: notional_A ≈ notional_B at entry (leg balance check)",
+            "",
+            "**Exit rules (checked in priority order each day):**",
+            f"1. **Hard stop** — |spread z-score| > {sz} (divergence getting worse; close both legs)",
+            f"2. **Target** — |spread z-score| < {xz} (spread has converged to mean; take profit)",
+            f"3. **Max holding** — Force close both legs after {mh} trading days",
+            "",
+            "**Costs to account for:**",
+            "- Slippage on BOTH legs (paid twice on entry, twice on exit)",
+            "- Borrow fee on the short leg (~50 bps/yr on liquid large caps,"
+            " charged daily on short-leg notional)",
+            "- Dividend pass-through on the short leg if a dividend falls during the hold",
         ]
     else:
         lines.append(f"_Mechanics not defined for strategy type: {strategy}_")

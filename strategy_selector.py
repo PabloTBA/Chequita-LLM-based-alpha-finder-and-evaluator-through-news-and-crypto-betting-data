@@ -652,11 +652,16 @@ class StrategySelector:
             adjusted_params, rule_log = _compute_mean_reversion_params(atr_pct)
 
         # ── Regime-specific overrides ─────────────────────────────────────────
-        # Crisis: tighten stops and shorten max hold to reduce exposure in panic conditions
+        # Crisis downgrade guard: Momentum is structurally wrong in panic regimes
+        # (trend-following buys into collapsing tapes). If anything hand-routes
+        # Momentum into a Crisis regime, force a downgrade to VolatilityBreakout
+        # — the correct crisis posture (wait for directional expansion, not dip-buy).
         if regime_label == "Crisis" and strategy == "Momentum":
-            adjusted_params["stop_loss_atr"]    = min(adjusted_params.get("stop_loss_atr", 1.5), 1.0)
-            adjusted_params["max_holding_days"] = min(adjusted_params.get("max_holding_days", 10), 5)
-            rule_log.append("Crisis override: stop_loss_atr <= 1.0, max_holding_days <= 5")
+            strategy        = "VolatilityBreakout"
+            base_params     = copy.deepcopy(_STRATEGY_TO_BASE[strategy])
+            adjusted_params, rule_log_vb = _compute_volatility_breakout_params(atr_pct, hurst)
+            rule_log.append("Crisis downgrade: Momentum -> VolatilityBreakout")
+            rule_log.extend(rule_log_vb)
 
         # Trending-Down: tighten entry to only buy deep oversold, reduce hold
         if regime_label == "Trending-Down" and strategy == "Mean-Reversion":

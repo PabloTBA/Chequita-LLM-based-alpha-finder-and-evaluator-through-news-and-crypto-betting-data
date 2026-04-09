@@ -165,8 +165,10 @@ class Backtester:
             trade_log = self._run_ml_signal(ohlcv, params, slip)
         elif strategy_type == "EventDriven":
             trade_log = self._run_event_driven(ohlcv, params, slip)
-        else:
+        elif strategy_type == "Mean-Reversion":
             trade_log = self._run_mean_reversion(ohlcv, params, slip)
+        else:
+            raise ValueError(f"Unknown strategy type: {strategy_type}")
 
         equity_curve = self._build_equity_curve(ohlcv, trade_log)
         returns      = self._build_returns(ohlcv, trade_log, equity_curve)
@@ -1654,6 +1656,31 @@ class Backtester:
             return self._mean_rev_signal(ohlcv, params, initial_portfolio)
         except Exception as e:
             return {"signal_active": None, "details": f"Signal check failed: {e}", "setup": None}
+
+    def pair_signal_status(
+        self,
+        ohlcv_a:           pd.DataFrame,
+        ohlcv_b:           pd.DataFrame,
+        params:            dict,
+        hedge_ratio:       float,
+        initial_portfolio: float = 100_000.0,
+    ) -> dict:
+        """
+        Public wrapper around ``_pair_trading_signal`` so the pipeline can
+        compute the live pair signal (direction, z-score, size, notionals)
+        and attach it to the pair analysis payload for the report.
+        """
+        try:
+            return self._pair_trading_signal(
+                ohlcv_a, ohlcv_b, params, initial_portfolio, hedge_ratio,
+            )
+        except Exception as e:
+            return {
+                "signal_active": None,
+                "details":       f"Pair signal check failed: {e}",
+                "setup":         None,
+                "projected_setup": None,
+            }
 
     def _momentum_signal(
         self, ohlcv: pd.DataFrame, params: dict, portfolio: float

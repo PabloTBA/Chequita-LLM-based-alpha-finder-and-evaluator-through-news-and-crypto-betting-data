@@ -588,15 +588,31 @@ class PipelineOrchestrator:
                             ),
                             None,
                         )
+                        # Live pair signal — computed on latest bar so the
+                        # report can render a full execution brief (direction,
+                        # leg sizing, z-score, exit/stop bands) without
+                        # requiring additional research by the trader.
+                        _pair_signal = self._safe(
+                            f"backtester.pair_signal_status({_ta}/{_tb})",
+                            lambda _oa2=_oa, _ob2=_ob, _p=_params,
+                                   _hr=_pair["hedge_ratio"]: m["backtester"].pair_signal_status(
+                                _oa2, _ob2, _p,
+                                hedge_ratio=_hr,
+                                initial_portfolio=self._cfg.get("initial_portfolio", 100_000.0),
+                            ),
+                            {"signal_active": None, "details": "unavailable",
+                             "setup": None, "projected_setup": None},
+                        )
                         pair_analyses.append({
-                            "pair":        f"{_ta}/{_tb}",
-                            "ticker_a":    _ta,
-                            "ticker_b":    _tb,
-                            "pair_stats":  _pair,
-                            "params":      _params,
-                            "rule_log":    _rule_log,
-                            "backtest":    _bt_pair,
-                            "diagnostic":  _diag_pair,
+                            "pair":           f"{_ta}/{_tb}",
+                            "ticker_a":       _ta,
+                            "ticker_b":       _tb,
+                            "pair_stats":     _pair,
+                            "params":         _params,
+                            "rule_log":       _rule_log,
+                            "backtest":       _bt_pair,
+                            "diagnostic":     _diag_pair,
+                            "current_signal": _pair_signal,
                         })
                         status = "PASS" if (_diag_pair or {}).get("passed") else "FAIL"
                         sharpe = (_diag_pair or {}).get("metrics", {}).get("sharpe", float("nan"))
