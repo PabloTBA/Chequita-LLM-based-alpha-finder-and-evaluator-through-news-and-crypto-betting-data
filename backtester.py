@@ -396,7 +396,7 @@ class Backtester:
         )
 
         # Daily returns: flat days earn DAILY_RF (idle cash)
-        raw_returns  = equity_curve.pct_change().fillna(0.0)
+        raw_returns  = equity_curve.pct_change(fill_method=None).fillna(0.0)
         in_position  = pd.Series(False, index=equity_curve.index)
         for trade in all_trades:
             try:
@@ -749,7 +749,7 @@ class Backtester:
         self, equity_curve: pd.Series, trade_log: list[dict]
     ) -> pd.Series:
         """Daily returns; flat days earn DAILY_RF (idle cash earns T-bill rate)."""
-        returns     = equity_curve.pct_change().fillna(0.0)
+        returns     = equity_curve.pct_change(fill_method=None).fillna(0.0)
         in_position = pd.Series(False, index=equity_curve.index)
         for trade in trade_log:
             try:
@@ -2265,7 +2265,7 @@ class Backtester:
         terrible.  When not in position, idle capital earns T-bill rate — so the
         excess return on those days is exactly zero, not negative.
         """
-        returns = equity_curve.pct_change().fillna(0.0)
+        returns = equity_curve.pct_change(fill_method=None).fillna(0.0)
 
         # Mark every day that falls within an open trade window as "in position"
         in_position = pd.Series(False, index=ohlcv.index)

@@ -117,9 +117,9 @@ class AlphaEngine:
         vol_panel   = pd.DataFrame(vol_dict).sort_index()
 
         # ── 2. Return series (all shift(1) so yesterday's info is used) ───────
-        ret_1d = close_panel.pct_change(1).shift(1)
-        ret_2d = close_panel.pct_change(2).shift(1)
-        ret_5d = close_panel.pct_change(_CS_MR_WINDOW).shift(1)
+        ret_1d = close_panel.pct_change(1, fill_method=None).shift(1)
+        ret_2d = close_panel.pct_change(2, fill_method=None).shift(1)
+        ret_5d = close_panel.pct_change(_CS_MR_WINDOW, fill_method=None).shift(1)
 
         # ── 3. CS-MR signal ───────────────────────────────────────────────────
         # Rank the 5-day returns cross-sectionally (pct rank → [0,1]).
@@ -300,9 +300,9 @@ class AlphaEngine:
         close_panel = pd.DataFrame(close_dict).sort_index()
         vol_panel   = pd.DataFrame(vol_dict).sort_index()
 
-        ret_1d = close_panel.pct_change(1).shift(1)
-        ret_2d = close_panel.pct_change(2).shift(1)
-        ret_5d = close_panel.pct_change(_CS_MR_WINDOW).shift(1)
+        ret_1d = close_panel.pct_change(1, fill_method=None).shift(1)
+        ret_2d = close_panel.pct_change(2, fill_method=None).shift(1)
+        ret_5d = close_panel.pct_change(_CS_MR_WINDOW, fill_method=None).shift(1)
 
         pct_rank  = ret_5d.rank(axis=1, pct=True, na_option="keep")
         cs_mr_raw = -(pct_rank - 0.5) * 2.0
@@ -356,7 +356,7 @@ class AlphaEngine:
         fwd_returns: dict[int, pd.DataFrame] = {}
         for h in (1, 2, 5, 10):
             # forward return: close at t+h / close at t - 1, aligned to current bar
-            fwd_returns[h] = close_panel.pct_change(h).shift(-h)
+            fwd_returns[h] = close_panel.pct_change(h, fill_method=None).shift(-h)
 
         ic_by_horizon: dict[str, float] = {}
         for h, fwd in fwd_returns.items():

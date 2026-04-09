@@ -946,7 +946,7 @@ class ReportGenerator:
             spy_exp_adj: float | None = None
             if spy_close_full is not None and len(in_pos) > 0:
                 try:
-                    spy_dr      = spy_close_full.pct_change().fillna(0.0)
+                    spy_dr      = spy_close_full.pct_change(fill_method=None).fillna(0.0)
                     common      = in_pos.index.intersection(spy_dr.index)
                     in_pos_c    = in_pos.reindex(common, fill_value=False)
                     spy_dr_c    = spy_dr.reindex(common, fill_value=0.0)
@@ -1078,7 +1078,7 @@ class ReportGenerator:
 
         try:
             spy_close  = spy_ohlcv["Close"].squeeze().astype(float)
-            spy_daily  = spy_close.pct_change().fillna(0.0)
+            spy_daily  = spy_close.pct_change(fill_method=None).fillna(0.0)
         except Exception:
             return "## Baseline Comparison\n\n_SPY data malformed._"
 

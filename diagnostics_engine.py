@@ -813,7 +813,7 @@ if __name__ == "__main__":
         # Build a synthetic trade log from OHLCV for the smoke test
         # (real trade log comes from backtester — not yet built)
         df   = ohlcv_raw[ticker].dropna()
-        rets = df["Close"].pct_change().dropna()
+        rets = df["Close"].pct_change(fill_method=None).dropna()
         fake_log = [{"pnl": float(r)} for r in rets.tail(30)]
 
         result = eng.run(ticker, strategy["strategy"], fake_log, rets)

@@ -976,7 +976,7 @@ class PipelineOrchestrator:
                 if (ohlcv_raw or {}).get(t) is not None
             }
             if len(close_data) >= 2:
-                ret_df = pd.DataFrame(close_data).pct_change().dropna()
+                ret_df = pd.DataFrame(close_data).pct_change(fill_method=None).dropna()
                 corr   = ret_df.corr()
                 tlist  = list(corr.columns)
                 for i in range(len(tlist)):
