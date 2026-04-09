@@ -294,9 +294,6 @@ class PipelineOrchestrator:
         )
 
         # Early exit: no tickers found
-        _empty_market_state = {"market_state": "Normal", "spy_atr_pct": 0.0,
-                               "crisis_fraction": 0.0, "stress_fraction": 0.0,
-                               "stable_days": 0, "recovery_score": 1.0}
         if top50 is None or (isinstance(top50, pd.DataFrame) and top50.empty):
             return self._finish(
                 m, run_date, summary, macro,
@@ -308,7 +305,6 @@ class PipelineOrchestrator:
                 spy_ohlcv=None,
                 correlation_warnings=[],
                 meta_insights=meta_insights,
-                market_state=_empty_market_state,
             )
 
         tickers = top50["ticker"].tolist()
@@ -356,10 +352,9 @@ class PipelineOrchestrator:
         # AlphaEngine uses shift(1) throughout.
         print(f"[{_ts()}] [Stage 5d] Computing cross-sectional alpha signals ...")
         if ohlcv_raw:
-            _bias = (macro or {}).get("market_bias", "neutral")
             ohlcv_raw = self._safe(
                 "alpha_engine.compute",
-                lambda: m["alpha_engine"].compute(dict(ohlcv_raw), market_bias=_bias),
+                lambda: m["alpha_engine"].compute(dict(ohlcv_raw)),
                 ohlcv_raw,
             )
 
@@ -383,18 +378,24 @@ class PipelineOrchestrator:
             tickers,
         )
         shortlisted = shortlisted or tickers
+        shortlisted = _enforce_sector_diversity(shortlisted)
         shortlisted = _deduplicate_aliases(shortlisted)
         max_tickers = self._cfg.get("max_tickers", 15)
 
-        # Backfill: if shortlist is below max_tickers, pull the next-best
-        # candidates from top50 that are not already shortlisted.
+        # Backfill: if sector cap reduced the list below max_tickers, pull the
+        # next-best candidates from top50 that are not already shortlisted.
+        # Run sector diversity on the combined list so sector counts from the
+        # original shortlist are respected when evaluating candidates.
         if len(shortlisted) < max_tickers and top50 is not None and not top50.empty:
             shortlisted_set = set(shortlisted)
             candidates = [
                 t for t in top50["ticker"].tolist()
                 if t not in shortlisted_set
             ]
-            combined = _deduplicate_aliases(shortlisted + candidates)
+            combined = _enforce_sector_diversity(
+                _deduplicate_aliases(shortlisted + candidates),
+                max_per_sector=_MAX_PER_SECTOR,
+            )
             shortlisted = combined[:max_tickers]
             added = [t for t in shortlisted if t not in shortlisted_set]
             if added:
@@ -441,73 +442,19 @@ class PipelineOrchestrator:
             [],
         )
 
-        # ── Stage 9c: portfolio-level market state detection ─────────────────
-        # Determines whether the whole market is in Crisis, High-Volatility, or
-        # Normal mode.  This single value drives four downstream adaptations:
-        #   1. No-trade gate  : Crisis tickers are skipped entirely (no recommendations).
-        #   2. Holding cap    : max_holding_days capped at 5 (Crisis) or 10 (High-Vol).
-        #   3. Momentum gate  : 12-1m gate disabled in Crisis (calibrated for trending mkts).
-        #   4. Trade-count floor: Crisis floor = 10 trades instead of 30.
-        print(f"[{_ts()}] [Stage 9c] Detecting portfolio-level market state ...")
-        try:
-            from regime_classifier import MarketStateDetector as _MSD
-            _spy_df    = (ohlcv_raw or {}).get("SPY")
-            _msd       = _MSD()
-            market_state_info = self._safe(
-                "market_state_detector.detect",
-                lambda: _msd.detect(_spy_df, regimes or []),
-                {"market_state": "Normal", "spy_atr_pct": 0.0,
-                 "crisis_fraction": 0.0, "stress_fraction": 0.0,
-                 "stable_days": 0, "recovery_score": 1.0},
-            )
-        except Exception as _e:
-            print(f"[{_ts()}] [Stage 9c] MarketStateDetector unavailable ({_e}), defaulting to Normal")
-            market_state_info = {"market_state": "Normal", "spy_atr_pct": 0.0,
-                                 "crisis_fraction": 0.0, "stress_fraction": 0.0,
-                                 "stable_days": 0, "recovery_score": 1.0}
-
-        _ms = market_state_info.get("market_state", "Normal")
-        if _ms == "Crisis":
-            print(
-                f"[{_ts()}] [Stage 9c] CRISIS MODE ACTIVE — "
-                f"Crisis tickers will be skipped (no recommendations). "
-                f"SPY_ATR%={market_state_info['spy_atr_pct']:.2%}  "
-                f"crisis_frac={market_state_info['crisis_fraction']:.0%}  "
-                f"recovery_score={market_state_info['recovery_score']:.2f}"
-            )
-        elif _ms == "High-Volatility":
-            print(
-                f"[{_ts()}] [Stage 9c] HIGH-VOLATILITY MODE — "
-                f"max_holding_days capped at 10; entry thresholds tightened. "
-                f"recovery_score={market_state_info['recovery_score']:.2f}  "
-                f"stable_days={market_state_info['stable_days']}"
-            )
-        else:
-            print(
-                f"[{_ts()}] [Stage 9c] NORMAL MODE — standard pipeline parameters. "
-                f"recovery_score={market_state_info['recovery_score']:.2f}  "
-                f"stable_days={market_state_info['stable_days']}"
-            )
-
         # ── Stage 9b: pair trading analysis ──────────────────────────────────
         # Runs after regime classification so we have the full shortlisted
         # universe available.  Pair analysis is cross-sectional — it needs
         # all tickers' OHLCV simultaneously to find cointegrated pairs.
         pair_analyses: list[dict] = []
-        # Use the full shortlisted universe for pair discovery — AVOID tickers are
-        # excluded from directional single-leg strategies but can still form valid
-        # market-neutral spreads.  A cointegrated pair is evaluated on the spread's
-        # own backtest and diagnostic, not on either leg's individual verdict.
-        _pair_universe = [t for t in shortlisted if (ohlcv_raw or {}).get(t) is not None]
-        if ohlcv_raw and len(_pair_universe) >= 2:
-            print(f"[{_ts()}] [Stage 9b] Scanning for cointegrated pairs in {len(_pair_universe)} tickers "
-                  f"(includes {len(_pair_universe) - len(actionable)} AVOID ticker(s)) ...")
+        if ohlcv_raw and len(actionable) >= 2:
+            print(f"[{_ts()}] [Stage 9b] Scanning for cointegrated pairs in {len(actionable)} tickers ...")
             try:
                 from pair_selector import PairSelector
                 from strategy_selector import PAIR_TRADING_BASE, _compute_pair_trading_params
                 import copy as _copy
 
-                _pair_ohlcv = {t: ohlcv_raw[t] for t in _pair_universe if ohlcv_raw.get(t) is not None}
+                _pair_ohlcv = {t: ohlcv_raw[t] for t in actionable if ohlcv_raw.get(t) is not None}
                 _selector   = PairSelector(min_corr=0.70, max_coint_pv=0.10, max_pairs=5)
                 _pairs      = self._safe("pair_selector.find_pairs",
                                          lambda: _selector.find_pairs(_pair_ohlcv), [])
@@ -553,31 +500,15 @@ class PipelineOrchestrator:
                             ),
                             None,
                         )
-                        # Live pair signal — computed on latest bar so the
-                        # report can render a full execution brief (direction,
-                        # leg sizing, z-score, exit/stop bands) without
-                        # requiring additional research by the trader.
-                        _pair_signal = self._safe(
-                            f"backtester.pair_signal_status({_ta}/{_tb})",
-                            lambda _oa2=_oa, _ob2=_ob, _p=_params,
-                                   _hr=_pair["hedge_ratio"]: m["backtester"].pair_signal_status(
-                                _oa2, _ob2, _p,
-                                hedge_ratio=_hr,
-                                initial_portfolio=self._cfg.get("initial_portfolio", 100_000.0),
-                            ),
-                            {"signal_active": None, "details": "unavailable",
-                             "setup": None, "projected_setup": None},
-                        )
                         pair_analyses.append({
-                            "pair":           f"{_ta}/{_tb}",
-                            "ticker_a":       _ta,
-                            "ticker_b":       _tb,
-                            "pair_stats":     _pair,
-                            "params":         _params,
-                            "rule_log":       _rule_log,
-                            "backtest":       _bt_pair,
-                            "diagnostic":     _diag_pair,
-                            "current_signal": _pair_signal,
+                            "pair":        f"{_ta}/{_tb}",
+                            "ticker_a":    _ta,
+                            "ticker_b":    _tb,
+                            "pair_stats":  _pair,
+                            "params":      _params,
+                            "rule_log":    _rule_log,
+                            "backtest":    _bt_pair,
+                            "diagnostic":  _diag_pair,
                         })
                         status = "PASS" if (_diag_pair or {}).get("passed") else "FAIL"
                         sharpe = (_diag_pair or {}).get("metrics", {}).get("sharpe", float("nan"))
@@ -602,13 +533,10 @@ class PipelineOrchestrator:
 
         portfolio = self._cfg.get("initial_portfolio", 100_000.0)
 
-        _market_state = market_state_info.get("market_state", "Normal")
-
         def _analyse_ticker(regime: dict) -> dict:
-            ticker       = regime["ticker"]
-            ticker_regime = regime.get("regime", "Neutral")
-            ohlcv        = (ohlcv_raw or {}).get(ticker)
-            feats        = features.get(ticker, {})
+            ticker = regime["ticker"]
+            ohlcv  = (ohlcv_raw or {}).get(ticker)
+            feats  = features.get(ticker, {})
 
             # AVOID gate: skip full analysis if LLM rated this ticker AVOID
             tv = next((v for v in (ticker_verdicts or []) if v["ticker"] == ticker), None)
@@ -617,32 +545,12 @@ class PipelineOrchestrator:
                 return {"ticker": ticker, "strategy": None, "backtest": None,
                         "diagnostic": None, "mc_result": None}
 
-            # NO-TRADE gate: Crisis market state + Crisis ticker regime → skip entry.
-            # Rationale: forcing Mean-Reversion entries into a sustained sell-off
-            # (buying falling knives) has negative expected value.  The system outputs
-            # no recommendation rather than a low-confidence trade.
-            # High-Volatility market state alone does NOT trigger a skip — the
-            # strategy parameters are adapted instead (shorter holds, tighter gates).
-            if _market_state == "Crisis" and ticker_regime == "Crisis":
-                print(
-                    f"[{_ts()}]   [Stage 10] {ticker} — NO TRADE (Crisis market + Crisis ticker). "
-                    f"Skipping to avoid buying falling knives."
-                )
-                return {
-                    "ticker":     ticker,
-                    "strategy":   None,
-                    "backtest":   None,
-                    "diagnostic": None,
-                    "mc_result":  None,
-                    "no_trade_reason": "Crisis market state — no new entries during sustained sell-off",
-                }
-
             print(f"[{_ts()}]   [Stage 10] {ticker} — strategy select / backtest / diagnostics ...")
 
             strategy = self._safe(
                 f"selector.select({ticker})",
-                lambda _t=ticker, _r=regime, _f=feats, _v=tv, _ms=_market_state: m["selector"].select(
-                    _t, _r, _f, macro, ticker_verdict=_v, market_state=_ms
+                lambda _t=ticker, _r=regime, _f=feats, _v=tv: m["selector"].select(
+                    _t, _r, _f, macro, ticker_verdict=_v
                 ),
                 None,
             )
@@ -941,7 +849,7 @@ class PipelineOrchestrator:
                 if (ohlcv_raw or {}).get(t) is not None
             }
             if len(close_data) >= 2:
-                ret_df = pd.DataFrame(close_data).pct_change(fill_method=None).dropna()
+                ret_df = pd.DataFrame(close_data).pct_change().dropna()
                 corr   = ret_df.corr()
                 tlist  = list(corr.columns)
                 for i in range(len(tlist)):
@@ -1006,7 +914,6 @@ class PipelineOrchestrator:
             meta_insights=meta_insights,
             portfolio_result=portfolio_result,
             pair_analyses=pair_analyses,
-            market_state=market_state_info,
         )
 
     # ── internal helpers ──────────────────────────────────────────────────────

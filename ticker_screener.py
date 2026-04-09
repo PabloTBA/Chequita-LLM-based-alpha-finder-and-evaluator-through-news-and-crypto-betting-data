@@ -36,19 +36,18 @@ SHORTLIST_LIMIT = 50
 _SHORTLIST_PROMPT = """\
 You are a stock screener. Given the top-100 tickers ranked by news score, \
 the current macro environment, and OHLCV summaries, select exactly {n} tickers \
-that represent the highest-conviction RELATIVE opportunities.
-
-Your goal is to find stocks that will outperform their sector peers — even if \
-the overall market is declining, some stocks hold up better, benefit from sector \
-rotation, or have idiosyncratic catalysts that decouple them from the macro trend. \
-Prioritise relative strength, defensive positioning, and stocks with specific \
-positive catalysts over those simply moving with the market.
+that represent the highest-conviction opportunities.
 
 Macro context:
   Favored sectors:    {favored}
   Avoid sectors:      {avoid}
   Active macro risks: {risks}
   Market bias:        {bias}
+
+Sector diversity rules (MANDATORY):
+  - Include NO MORE THAN 2 tickers from the same GICS sector.
+  - Prefer tickers from favored sectors when scores are similar.
+  - Actively spread selections across different sectors to maximise breadth.
 
 Top-50 tickers by news score:
 {ticker_list}
@@ -62,18 +61,8 @@ Respond ONLY with valid JSON:
 """
 
 _VERDICT_PROMPT = """\
-You are a stock analyst. Evaluate {ticker} relative to its sector peers given \
-the macro environment and its price action.
-
-Your goal is to identify relative performance — not absolute direction. \
-A "buy" verdict means this stock is likely to OUTPERFORM its sector peers over \
-the coming days, regardless of whether the overall market rises or falls. \
-A "watch" verdict means neutral relative performance with no clear edge. \
-An "avoid" verdict means this stock is likely to UNDERPERFORM peers with elevated \
-risk and no compensating catalyst.
-
-Even in a bearish or volatile market, some stocks demonstrate relative strength, \
-have defensive characteristics, or benefit from sector rotation. Focus on those.
+You are a stock analyst. Evaluate {ticker} given the macro environment and its \
+price action, then return a single structured verdict.
 
 Macro context:
   Favored sectors:    {favored}

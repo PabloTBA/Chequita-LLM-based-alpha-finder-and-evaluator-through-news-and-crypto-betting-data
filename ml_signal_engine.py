@@ -103,9 +103,9 @@ def _build_base_features(df: pd.DataFrame) -> pd.DataFrame:
     bm    = c.rolling(20).mean();  bs = c.rolling(20).std(ddof=1)
     vm    = v.rolling(20).mean()
     return pd.DataFrame({
-        "ret_5d":          c.pct_change(5, fill_method=None).shift(1),
-        "ret_10d":         c.pct_change(10, fill_method=None).shift(1),
-        "ret_20d":         c.pct_change(20, fill_method=None).shift(1),
+        "ret_5d":          c.pct_change(5).shift(1),
+        "ret_10d":         c.pct_change(10).shift(1),
+        "ret_20d":         c.pct_change(20).shift(1),
         "rsi_14":          _rsi(c).shift(1),
         "atr_pct":         (atr / c).shift(1),
         "vol_ratio_20":    (v / vm.replace(0, np.nan)).shift(1),
@@ -114,7 +114,7 @@ def _build_base_features(df: pd.DataFrame) -> pd.DataFrame:
         "vol_z_20":        ((v - vm) / v.rolling(20).std(ddof=1).replace(0, np.nan)).shift(1),
         "close_to_ma50":   (c / c.rolling(50).mean().replace(0, np.nan) - 1).shift(1),
         "close_to_ma200":  (c / c.rolling(200).mean().replace(0, np.nan) - 1).shift(1),
-        "realized_vol_20": c.pct_change(fill_method=None).rolling(20).std(ddof=1).shift(1),
+        "realized_vol_20": c.pct_change().rolling(20).std(ddof=1).shift(1),
     }, index=df.index)[_BASE]
 
 
