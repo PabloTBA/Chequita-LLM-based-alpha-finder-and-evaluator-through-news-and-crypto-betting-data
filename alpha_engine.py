@@ -51,6 +51,12 @@ _SPY_TICKER      = "SPY"
 
 _WEIGHTS = {"cs_mr": 0.40, "residual": 0.30, "vol_spike": 0.20, "mom_2d": 0.10}
 
+# In a bearish / crisis market the residual-reversion signal degrades (all betas
+# converge to 1, leaving near-zero idiosyncratic residuals) and the pure CS-MR
+# dip-buying thesis breaks down in a sustained downtrend.  Volume-spike exhaustion
+# (climactic selling) and short-term momentum continuation carry more information.
+_BEARISH_WEIGHTS = {"cs_mr": 0.20, "residual": 0.10, "vol_spike": 0.45, "mom_2d": 0.25}
+
 
 class AlphaEngine:
     """
@@ -63,7 +69,9 @@ class AlphaEngine:
     """
 
     def compute(
-        self, ohlcv_dict: dict[str, "pd.DataFrame | None"]
+        self,
+        ohlcv_dict: dict[str, "pd.DataFrame | None"],
+        market_bias: str = "neutral",
     ) -> dict[str, "pd.DataFrame | None"]:
         """
         Parameters
@@ -94,9 +102,11 @@ class AlphaEngine:
                     result[ticker] = df
             return result
 
+        weights = _BEARISH_WEIGHTS if market_bias == "bearish" else _WEIGHTS
         print(
             f"[AlphaEngine] Computing cross-sectional alpha for "
-            f"{len(valid)} tickers ..."
+            f"{len(valid)} tickers "
+            f"(market_bias={market_bias!r}, weights={weights}) ..."
         )
 
         # ── 1. Align close & volume panels ────────────────────────────────────
@@ -107,9 +117,9 @@ class AlphaEngine:
         vol_panel   = pd.DataFrame(vol_dict).sort_index()
 
         # ── 2. Return series (all shift(1) so yesterday's info is used) ───────
-        ret_1d = close_panel.pct_change(1).shift(1)
-        ret_2d = close_panel.pct_change(2).shift(1)
-        ret_5d = close_panel.pct_change(_CS_MR_WINDOW).shift(1)
+        ret_1d = close_panel.pct_change(1, fill_method=None).shift(1)
+        ret_2d = close_panel.pct_change(2, fill_method=None).shift(1)
+        ret_5d = close_panel.pct_change(_CS_MR_WINDOW, fill_method=None).shift(1)
 
         # ── 3. CS-MR signal ───────────────────────────────────────────────────
         # Rank the 5-day returns cross-sectionally (pct rank → [0,1]).
@@ -213,12 +223,12 @@ class AlphaEngine:
                 combined = None
 
         if combined is None:
-            # Fixed-weight fallback (original combination)
+            # Weighted combination — uses bearish weights when market_bias=="bearish"
             combined = (
-                z_cs_mr     * _WEIGHTS["cs_mr"]     +
-                z_residual  * _WEIGHTS["residual"]   +
-                z_vol_spike * _WEIGHTS["vol_spike"]  +
-                z_mom       * _WEIGHTS["mom_2d"]
+                z_cs_mr     * weights["cs_mr"]     +
+                z_residual  * weights["residual"]   +
+                z_vol_spike * weights["vol_spike"]  +
+                z_mom       * weights["mom_2d"]
             )
 
         combined = _cs_zscore(combined)   # final normalisation
@@ -290,9 +300,9 @@ class AlphaEngine:
         close_panel = pd.DataFrame(close_dict).sort_index()
         vol_panel   = pd.DataFrame(vol_dict).sort_index()
 
-        ret_1d = close_panel.pct_change(1).shift(1)
-        ret_2d = close_panel.pct_change(2).shift(1)
-        ret_5d = close_panel.pct_change(_CS_MR_WINDOW).shift(1)
+        ret_1d = close_panel.pct_change(1, fill_method=None).shift(1)
+        ret_2d = close_panel.pct_change(2, fill_method=None).shift(1)
+        ret_5d = close_panel.pct_change(_CS_MR_WINDOW, fill_method=None).shift(1)
 
         pct_rank  = ret_5d.rank(axis=1, pct=True, na_option="keep")
         cs_mr_raw = -(pct_rank - 0.5) * 2.0
@@ -346,7 +356,7 @@ class AlphaEngine:
         fwd_returns: dict[int, pd.DataFrame] = {}
         for h in (1, 2, 5, 10):
             # forward return: close at t+h / close at t - 1, aligned to current bar
-            fwd_returns[h] = close_panel.pct_change(h).shift(-h)
+            fwd_returns[h] = close_panel.pct_change(h, fill_method=None).shift(-h)
 
         ic_by_horizon: dict[str, float] = {}
         for h, fwd in fwd_returns.items():

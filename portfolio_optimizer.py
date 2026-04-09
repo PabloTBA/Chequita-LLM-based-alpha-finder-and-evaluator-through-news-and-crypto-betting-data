@@ -86,12 +86,32 @@ class PortfolioOptimizer:
         print("[PortfolioOptimizer] Building cross-sectional momentum ranks ...")
         cs_ranks = self._cs_momentum_ranks(ohlcv_dict)
 
+        # ── build set of diagnostics-passed tickers ───────────────────────────
+        # Portfolio construction must only consider tickers whose strategy passed
+        # all diagnostic floors.  Including failed strategies inflates position
+        # count and produces a portfolio with negative-expectancy components.
+        diag_passed_set: set[str] = {
+            d["ticker"] for d in diagnostics if d.get("passed", False)
+        }
+        print(f"[PortfolioOptimizer] {len(diag_passed_set)} tickers passed diagnostics "
+              f"({len(backtests) - len(diag_passed_set)} failed — excluded from portfolio)")
+
         # ── build candidate set ───────────────────────────────────────────────
         candidates: list[dict] = []
         rejected:   list[dict] = []
 
         for bt in backtests:
             ticker    = bt["ticker"]
+
+            # Gate 0: diagnostic pass — hard requirement before any other filter
+            if ticker not in diag_passed_set:
+                diag_result = next((d for d in diagnostics if d["ticker"] == ticker), {})
+                rejected.append({
+                    "ticker": ticker,
+                    "reason": f"failed diagnostics: {diag_result.get('reject_reason', 'unknown')}",
+                })
+                continue
+
             daily_ret = bt.get("returns")
             if daily_ret is None or len(daily_ret) < 20:
                 rejected.append({"ticker": ticker,

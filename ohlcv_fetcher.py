@@ -224,7 +224,10 @@ class OHLCVFetcher:
 
     @staticmethod
     def _return_20d(close: np.ndarray) -> float:
-        return (close[-1] - close[-21]) / close[-21]
+        base = close[-21]
+        if base == 0 or not np.isfinite(base):
+            return 0.0
+        return (close[-1] - base) / base
 
     @staticmethod
     def _rsi(close: np.ndarray, period: int = 14) -> float:
@@ -265,12 +268,14 @@ class OHLCVFetcher:
     @staticmethod
     def _52w_high_prox(close: np.ndarray) -> float:
         window = close[-252:] if len(close) >= 252 else close
-        return close[-1] / window.max()
+        hi = window.max()
+        return float(close[-1] / hi) if hi else 0.0
 
     @staticmethod
     def _52w_low_prox(close: np.ndarray) -> float:
         window = close[-252:] if len(close) >= 252 else close
-        return close[-1] / window.min()
+        lo = window.min()
+        return float(close[-1] / lo) if lo else 0.0
 
     @staticmethod
     def _volume_ratio(volume: np.ndarray, window: int = 30) -> float:

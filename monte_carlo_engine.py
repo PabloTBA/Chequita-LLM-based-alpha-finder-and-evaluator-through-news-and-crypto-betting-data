@@ -108,6 +108,8 @@ class MonteCarloEngine:
             initial_portfolio + np.cumsum(sampled, axis=1),
         ])
 
+        
+
         # ── per-simulation metrics ────────────────────────────────────────────
         final_equity = equity[:, -1]
 
@@ -128,30 +130,42 @@ class MonteCarloEngine:
                 -1.0,   # total ruin or worse → -100% CAGR
             )
 
-        # Sharpe per sim — convert each trade's dollar P&L to a per-day return so
-        # that multi-day holds are correctly annualised.  Without this, a 20-day trade
-        # returning $500 on $100k looks like a daily return of 0.5%, which when
-        # annualised by √252 produces a Sharpe ≈ 3-4× higher than the diagnostics
-        # engine (which operates on the actual daily returns series).
-        holding_days = np.array(
-            [max(t.get("holding_days", 1), 1) for t in trade_log], dtype=float
-        )  # (n_trades,)
-        # Broadcast: each bootstrapped trade gets its per-day P&L
-        per_day_pnl   = pnls / holding_days                   # (n_trades,)
-        sampled_daily = per_day_pnl[indices] / initial_portfolio  # (n_sims, n_trades)
-        excess_mean   = sampled_daily.mean(axis=1) - DAILY_RF
-        ret_std       = sampled_daily.std(axis=1, ddof=1)
+        # Sharpe per sim — computed at the trade frequency, not the daily frequency.
+        #
+        # Why NOT sqrt(252):
+        #   We have n_trades samples per sim, NOT 252 daily returns.  Using sqrt(252)
+        #   as the annualisation factor assumes the std is computed over 252 independent
+        #   observations; with only ~30-50 trades the std is estimated over far fewer
+        #   points, inflating it and producing Sharpe values an order of magnitude more
+        #   extreme than the diagnostics engine (which works on the actual daily series).
+        #
+        # Correct annualisation: sqrt(trades_per_year) where
+        #   trades_per_year = n_trades / backtest_years.
+        #   This treats each trade as "one period" and annualises consistently.
+        #   A strategy with 3 trades/year and Sharpe 1.0 per-trade has annualised
+        #   Sharpe ≈ 1.0 × sqrt(3) ≈ 1.73 — not 1.0 × sqrt(252) ≈ 15.9.
+        trades_per_year  = max(n_trades / backtest_years, 0.5)   # floor at 0.5 to avoid sqrt(0)
+        annual_rf_trade  = RISK_FREE_RATE / trades_per_year       # RF per trade period
+
+        per_trade_return = pnls / initial_portfolio               # (n_trades,)
+        sampled_trade    = per_trade_return[indices]              # (n_sims, n_trades)
+        excess_mean      = sampled_trade.mean(axis=1) - annual_rf_trade / trades_per_year
+        ret_std          = sampled_trade.std(axis=1, ddof=1)
         with np.errstate(invalid="ignore", divide="ignore"):
             sharpe = np.where(
                 ret_std > 1e-10,
-                excess_mean / ret_std * math.sqrt(TRADING_DAYS),
+                excess_mean / ret_std * math.sqrt(trades_per_year),
                 np.where(excess_mean > 0, 20.0, np.where(excess_mean < 0, -20.0, 0.0)),
             )
         sharpe = np.clip(sharpe, -20.0, 20.0)
 
+        # sampled_daily alias kept so win-rate / consec-loss code below is unchanged
+        sampled_daily = sampled_trade
+
         # Win rate per sim
         wins     = (sampled > 0).sum(axis=1)
         win_rate = wins / n_trades
+        
 
         # Max consecutive losses per sim
         max_consec = self._max_consec_losses_batch(sampled)

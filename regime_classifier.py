@@ -10,10 +10,10 @@ Regime labels (priority order)
     ATR/price > 6%                             → "Crisis"
                                                  (extreme vol — all strategies
                                                   use tight params / skip entry)
-    Hurst > 0.55  AND  20d return > 0          → "Trending-Up"
-    Hurst > 0.55  AND  20d return ≤ 0          → "Trending-Down"
+    Hurst > 0.58  AND  20d return > 0          → "Trending-Up"
+    Hurst > 0.58  AND  20d return ≤ 0          → "Trending-Down"
     Hurst < 0.45                               → "Mean-Reverting"
-    0.45 ≤ Hurst ≤ 0.55:
+    0.45 ≤ Hurst ≤ 0.58  (uncertainty margin):
         ATR/price > 3%                         → "High-Volatility"
         ATR/price < 1.5%                       → "Low-Volatility"
         earnings_blackout within last 5 bars   → "Event-Driven"
@@ -30,22 +30,50 @@ Design rationale
     structural regime information for any ticker with an upcoming earnings date,
     routing everything into AlphaCombined regardless of actual market structure.
 
-Strategy mapping
+Strategy mapping  (authoritative source: strategy_selector._REGIME_TO_STRATEGY)
 ----------------
-    Trending-Up    → Momentum          (follow direction)
-    Trending-Down  → Mean-Reversion    (fade downtrend / buy dips)
-    High-Volatility→ VolatilityBreakout(squeeze → expansion)
-    Mean-Reverting → Mean-Reversion
-    Low-Volatility → Mean-Reversion
-    Crisis         → Mean-Reversion    (extreme moves revert; tight params)
-    Event-Driven   → Mean-Reversion    (post-earnings gap fill)
-    Neutral        → Momentum          (default)
+    Trending-Up    → Momentum        (follow the confirmed uptrend)
+    Trending-Down  → Mean-Reversion  (fade oversold exhaustion within the downtrend;
+                                      a long-only VolatilityBreakout buying above the
+                                      upper BB fights the confirmed downtrend direction)
+    High-Volatility→ VolatilityBreakout (squeeze → expansion alpha)
+    Crisis         → VolatilityBreakout (trade the next breakout, not the dip)
+    Mean-Reverting → AlphaCombined      (multi-factor cross-sectional MR signal)
+    Low-Volatility → MLSignal           (quiet markets: ML detects subtle patterns)
+    Event-Driven   → EventDriven        (post-earnings PEAD drift)
+    Neutral        → MLSignal           (no strong structural bias; let ML decide)
 
 Public interface
 ----------------
     clf  = RegimeClassifier()
     r    = clf.classify("AAPL", ohlcv_df)      # single ticker
     rs   = clf.classify_all(ohlcv_dict)         # dict[str, DataFrame | None]
+
+MarketStateDetector
+===================
+Portfolio-level market state: "Crisis", "High-Volatility", or "Normal".
+Uses SPY ATR/price and the fraction of the universe in stress regimes.
+
+Adaptive thresholds (entry is immediate; exit requires sustained stability)
+---------------------------------------------------------------------------
+    Crisis    : spy_atr_pct ≥ 4%  OR  crisis_fraction ≥ 40%
+    High-Vol  : spy_atr_pct ≥ 2.5% OR  stress_fraction ≥ 25%
+    Normal    : spy_atr_pct < 3%   AND stress_fraction < 20%  for ≥ 5 days
+                (hysteresis — requires sustained calm before returning to Normal)
+
+Outputs
+-------
+    market_state     : "Crisis" | "High-Volatility" | "Normal"
+    spy_atr_pct      : SPY's current ATR/price
+    crisis_fraction  : fraction of universe in Crisis regime
+    stress_fraction  : fraction in Crisis + High-Volatility
+    stable_days      : consecutive days SPY ATR has been below recovery threshold
+    recovery_score   : 0.0 (deep crisis) → 1.0 (fully normal); linear interpolation
+
+Public interface
+----------------
+    det    = MarketStateDetector()
+    state  = det.detect(spy_ohlcv, regime_results)
 """
 
 from __future__ import annotations
@@ -55,8 +83,15 @@ import pandas as pd
 
 # ── Regime thresholds (PRD defaults) ─────────────────────────────────────────
 
-HURST_TRENDING       = 0.55
-HURST_MEAN_REVERTING = 0.45
+HURST_TRENDING       = 0.58   # raised from 0.55 — adds ±0.03 uncertainty margin around the
+                              # theoretical 0.5 boundary.  R/S estimation on 756 daily observations
+                              # has a standard error of ~0.03–0.05 (Lo 1991; Peters 1994).
+                              # Requiring Hurst > 0.58 before classifying "Trending" prevents
+                              # borderline 0.55–0.58 estimates (which could be 0.50 noise) from
+                              # routing to Momentum and then failing every diagnostic floor.
+HURST_MEAN_REVERTING = 0.45  # conservative lower boundary unchanged — false mean-reversion
+                              # classification is less harmful than false trending classification
+                              # because AlphaCombined is more regime-agnostic.
 ATR_CRISIS           = 0.06    # 6% — extreme panic/distress; takes priority
 ATR_HIGH_VOL         = 0.03    # 3%
 ATR_LOW_VOL          = 0.015   # 1.5%
@@ -252,6 +287,158 @@ class RegimeClassifier:
         if near_earnings:
             return "Event-Driven"
         return "Neutral"
+
+
+# ── Market-state thresholds ───────────────────────────────────────────────────
+
+# Entry thresholds (immediate — one bad day is enough to trigger)
+MS_CRISIS_SPY_ATR    = 0.04    # SPY ATR/price ≥ 4%  → Crisis
+MS_CRISIS_FRAC       = 0.40    # ≥ 40% of universe in Crisis regime → Crisis
+MS_HIGHVOL_SPY_ATR   = 0.025   # SPY ATR/price ≥ 2.5% → High-Volatility
+MS_HIGHVOL_FRAC      = 0.25    # ≥ 25% of universe in Crisis+High-Vol → High-Volatility
+
+# Exit thresholds (hysteresis — must stay below these for STABLE_DAYS_REQUIRED)
+MS_RECOVERY_SPY_ATR  = 0.03    # SPY ATR/price must drop below 3% to start recovery
+MS_RECOVERY_FRAC     = 0.20    # stress fraction must drop below 20% to start recovery
+STABLE_DAYS_REQUIRED = 5       # consecutive stable days required before returning to Normal
+
+
+class MarketStateDetector:
+    """
+    Detects the portfolio-level market state from SPY OHLCV and per-ticker
+    regime results.  Uses hysteresis: easy to enter Crisis/High-Vol, requires
+    sustained stability to exit back to Normal.
+    """
+
+    def detect(
+        self,
+        spy_ohlcv: "pd.DataFrame | None",
+        regime_results: "list[dict]",
+    ) -> dict:
+        """
+        Parameters
+        ----------
+        spy_ohlcv      : SPY OHLCV DataFrame (Close/High/Low columns).  May be None.
+        regime_results : output of RegimeClassifier.classify_all() — list of regime dicts.
+
+        Returns
+        -------
+        dict with keys:
+            market_state     : "Crisis" | "High-Volatility" | "Normal"
+            spy_atr_pct      : float — SPY's current ATR/price (0 if SPY unavailable)
+            crisis_fraction  : float — fraction of universe in Crisis
+            stress_fraction  : float — fraction in Crisis + High-Volatility
+            stable_days      : int   — consecutive days SPY ATR < recovery threshold
+            recovery_score   : float — 0.0 (deep crisis) → 1.0 (fully normal)
+        """
+        spy_atr_pct = self._spy_atr_pct(spy_ohlcv)
+        stable_days = self._stable_days(spy_ohlcv)
+
+        total = len(regime_results)
+        if total == 0:
+            crisis_count  = 0
+            highvol_count = 0
+        else:
+            crisis_count  = sum(1 for r in regime_results if r.get("regime") == "Crisis")
+            highvol_count = sum(1 for r in regime_results if r.get("regime") == "High-Volatility")
+
+        crisis_fraction = crisis_count / total if total else 0.0
+        stress_fraction = (crisis_count + highvol_count) / total if total else 0.0
+
+        # ── State determination (entry is immediate) ──────────────────────────
+        if spy_atr_pct >= MS_CRISIS_SPY_ATR or crisis_fraction >= MS_CRISIS_FRAC:
+            market_state = "Crisis"
+        elif spy_atr_pct >= MS_HIGHVOL_SPY_ATR or stress_fraction >= MS_HIGHVOL_FRAC:
+            market_state = "High-Volatility"
+        else:
+            # Below both High-Vol thresholds, but only return "Normal" when
+            # the market has been calm for at least STABLE_DAYS_REQUIRED days.
+            # Before that, stay in "High-Volatility" as a buffer.
+            if stable_days >= STABLE_DAYS_REQUIRED:
+                market_state = "Normal"
+            else:
+                market_state = "High-Volatility"
+
+        recovery_score = self._recovery_score(spy_atr_pct, stress_fraction, stable_days)
+
+        print(
+            f"  [MarketState] {market_state}  SPY_ATR%={spy_atr_pct:.2%}  "
+            f"crisis_frac={crisis_fraction:.0%}  stress_frac={stress_fraction:.0%}  "
+            f"stable_days={stable_days}  recovery={recovery_score:.2f}"
+        )
+        return {
+            "market_state":    market_state,
+            "spy_atr_pct":     spy_atr_pct,
+            "crisis_fraction": crisis_fraction,
+            "stress_fraction": stress_fraction,
+            "stable_days":     stable_days,
+            "recovery_score":  recovery_score,
+        }
+
+    # ── private helpers ───────────────────────────────────────────────────────
+
+    @staticmethod
+    def _spy_atr_pct(spy_ohlcv: "pd.DataFrame | None") -> float:
+        """Return SPY's current ATR/price.  Returns 0.0 if data unavailable."""
+        if spy_ohlcv is None or spy_ohlcv.empty:
+            return 0.0
+        try:
+            close = spy_ohlcv["Close"].astype(float).values
+            high  = spy_ohlcv["High"].astype(float).values
+            low   = spy_ohlcv["Low"].astype(float).values
+            atr   = RegimeClassifier._atr(high, low, close, period=ATR_PERIOD)
+            return float(atr / close[-1])
+        except Exception:
+            return 0.0
+
+    @staticmethod
+    def _stable_days(spy_ohlcv: "pd.DataFrame | None") -> int:
+        """
+        Count consecutive trailing days where SPY ATR/price was below the
+        recovery threshold.  Uses a rolling 14-day ATR on each day's window.
+        Returns 0 if data is insufficient.
+        """
+        if spy_ohlcv is None or len(spy_ohlcv) < ATR_PERIOD + 2:
+            return 0
+        try:
+            close  = spy_ohlcv["Close"].astype(float).values
+            high   = spy_ohlcv["High"].astype(float).values
+            low    = spy_ohlcv["Low"].astype(float).values
+            # Compute rolling ATR% for each of the last 30 bars
+            lookback = min(30, len(close) - ATR_PERIOD - 1)
+            stable   = 0
+            for offset in range(lookback):
+                end   = len(close) - offset
+                if end < ATR_PERIOD + 1:
+                    break
+                c = close[:end]
+                h = high[:end]
+                l = low[:end]
+                atr     = RegimeClassifier._atr(h, l, c, period=ATR_PERIOD)
+                atr_pct = atr / c[-1]
+                if atr_pct < MS_RECOVERY_SPY_ATR:
+                    stable += 1
+                else:
+                    break   # streak broken — stop counting
+            return stable
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _recovery_score(spy_atr_pct: float, stress_fraction: float, stable_days: int) -> float:
+        """
+        Linear recovery score 0.0 → 1.0.
+        0.0 = deepest crisis (SPY ATR ≥ 6%, 100% stress).
+        1.0 = fully normal (SPY ATR < 1.5%, 0% stress, many stable days).
+        """
+        # ATR component: 0 at crisis threshold (4%), 1 at fully calm (1.5%)
+        atr_score    = float(np.clip((MS_CRISIS_SPY_ATR - spy_atr_pct) /
+                                     (MS_CRISIS_SPY_ATR - 0.015), 0.0, 1.0))
+        # Stress-fraction component: 0 at 40%+, 1 at 0%
+        frac_score   = float(np.clip(1.0 - stress_fraction / MS_CRISIS_FRAC, 0.0, 1.0))
+        # Stability component: 0 at 0 days, 1 at STABLE_DAYS_REQUIRED+
+        stab_score   = float(np.clip(stable_days / STABLE_DAYS_REQUIRED, 0.0, 1.0))
+        return round(0.40 * atr_score + 0.40 * frac_score + 0.20 * stab_score, 3)
 
 
 # ── CLI smoke test ────────────────────────────────────────────────────────────

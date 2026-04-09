@@ -64,15 +64,22 @@ RISK_FREE_RATE        = 0.045  # annualised risk-free rate (~current Fed funds);
 #   normal drawdowns even for strategies with positive edge.  Tightening the floor
 #   in a VIX spike would reject valid strategies for noise, not real weakness.
 _REGIME_FLOORS: dict[str, dict] = {
-    # regime_label       sharpe  max_dd  win_rate  oos_sharpe  p_value
-    "Crisis":         {"sharpe": 0.25, "max_dd": 0.35, "win_rate": 0.30, "oos_sharpe": 0.15, "p_value": 0.15},
-    "High-Volatility":{"sharpe": 0.35, "max_dd": 0.28, "win_rate": 0.32, "oos_sharpe": 0.20, "p_value": 0.12},
-    "Event-Driven":   {"sharpe": 0.30, "max_dd": 0.30, "win_rate": 0.30, "oos_sharpe": 0.15, "p_value": 0.15},
-    "Trending-Down":  {"sharpe": 0.40, "max_dd": 0.25, "win_rate": 0.33, "oos_sharpe": 0.25, "p_value": 0.12},
-    "Trending-Up":    {"sharpe": 0.45, "max_dd": 0.22, "win_rate": 0.34, "oos_sharpe": 0.28, "p_value": 0.10},
-    "Mean-Reverting": {"sharpe": 0.50, "max_dd": 0.20, "win_rate": 0.35, "oos_sharpe": 0.30, "p_value": 0.10},
-    "Low-Volatility": {"sharpe": 0.50, "max_dd": 0.20, "win_rate": 0.35, "oos_sharpe": 0.30, "p_value": 0.10},
-    "Neutral":        {"sharpe": 0.50, "max_dd": 0.20, "win_rate": 0.35, "oos_sharpe": 0.30, "p_value": 0.10},
+    # regime_label       sharpe  max_dd  win_rate  oos_sharpe  p_value  min_trades
+    #
+    # min_trades rationale per regime:
+    #   Crisis      : Entry conditions are rarely met in a crash — 10 trades over
+    #                 2 years is a realistic ceiling.  Statistical significance is
+    #                 enforced by the p_value (Lo t-stat) and bootstrap CI gates.
+    #   High-Vol    : Fewer setups than normal; 15 is achievable over 2 years.
+    #   Normal regs : 30 ensures walk-forward splits have enough OOS data.
+    "Crisis":         {"sharpe": 0.25, "max_dd": 0.35, "win_rate": 0.30, "oos_sharpe": 0.15, "p_value": 0.15, "min_trades": 10},
+    "High-Volatility":{"sharpe": 0.35, "max_dd": 0.28, "win_rate": 0.32, "oos_sharpe": 0.20, "p_value": 0.12, "min_trades": 15},
+    "Event-Driven":   {"sharpe": 0.30, "max_dd": 0.30, "win_rate": 0.30, "oos_sharpe": 0.15, "p_value": 0.15, "min_trades": 10},
+    "Trending-Down":  {"sharpe": 0.40, "max_dd": 0.25, "win_rate": 0.33, "oos_sharpe": 0.25, "p_value": 0.12, "min_trades": 20},
+    "Trending-Up":    {"sharpe": 0.45, "max_dd": 0.22, "win_rate": 0.34, "oos_sharpe": 0.28, "p_value": 0.10, "min_trades": 20},
+    "Mean-Reverting": {"sharpe": 0.50, "max_dd": 0.20, "win_rate": 0.35, "oos_sharpe": 0.30, "p_value": 0.10, "min_trades": 30},
+    "Low-Volatility": {"sharpe": 0.50, "max_dd": 0.20, "win_rate": 0.35, "oos_sharpe": 0.30, "p_value": 0.10, "min_trades": 30},
+    "Neutral":        {"sharpe": 0.50, "max_dd": 0.20, "win_rate": 0.35, "oos_sharpe": 0.30, "p_value": 0.10, "min_trades": 30},
 }
 _DEFAULT_FLOORS = _REGIME_FLOORS["Neutral"]
 
@@ -115,8 +122,10 @@ class DiagnosticsEngine:
 
         passed, reject_reason = self._check_floors(metrics, floors)
         status = "PASS" if passed else f"FAIL -- {reject_reason}"
+        _raw_oos = metrics.get("oos_sharpe")
+        _oos_str = "N/A (underpowered)" if _raw_oos is None else f"{_raw_oos:.3f}"
         print(f"  [Diag] {ticker} [{regime_label}]: Sharpe={metrics['sharpe']:.3f} "
-              f"(floor={floors['sharpe']})  OOS_Sharpe={metrics['oos_sharpe']:.3f}  "
+              f"(floor={floors['sharpe']})  OOS_Sharpe={_oos_str}  "
               f"MaxDD={metrics['max_drawdown']:.1%} (floor={floors['max_dd']:.0%})  "
               f"WinRate={metrics['win_rate']:.1%}  "
               f"WFDegrad={metrics['walk_forward_degradation']:.1%}  "
@@ -140,6 +149,7 @@ class DiagnosticsEngine:
     def _compute_metrics(self, trade_log: list[dict], returns: pd.Series) -> dict:
         sharpe = self._sharpe(returns)
         tc = len(trade_log)
+        market_exposure = self._market_exposure(trade_log, returns)
         wf_degrad, oos_sharpe, wf_splits = self._walk_forward_degradation(returns, trade_count=tc)
         t_stat, p_value                  = self._tstat(returns)
         bs_p5, bs_p95                    = self._bootstrap_sharpe_ci(returns)
@@ -164,6 +174,7 @@ class DiagnosticsEngine:
             "permutation_p_value":      perm_p,           # non-parametric: fraction shuffled >= real
             "rolling_pct_positive":     roll_pct_pos,     # fraction of 60-day windows with +ve Sharpe
             "rolling_sharpe_std":       roll_sharpe_std,  # std of rolling Sharpe (instability measure)
+            "market_exposure":          market_exposure,  # fraction of trading days the strategy is invested
         }
 
     @staticmethod
@@ -178,11 +189,16 @@ class DiagnosticsEngine:
         # _REGIME_FLOORS for per-regime calibration rationale.
         sharpe_floor = floors["sharpe"]
         sharpe       = metrics["sharpe"]
-        oos_sharpe   = metrics.get("oos_sharpe", sharpe)
+        # Guard against None sentinel from underpowered walk-forward stubs.
+        # metrics.get("oos_sharpe", sharpe) returns None (not sharpe) when the key
+        # exists with value None — use explicit fallback to full-period sharpe instead.
+        _raw_oos   = metrics.get("oos_sharpe")
+        oos_sharpe = sharpe if _raw_oos is None else _raw_oos
 
         if sharpe < sharpe_floor:
+            oos_display = "N/A (underpowered)" if _raw_oos is None else f"{oos_sharpe:.3f}"
             return False, (f"Sharpe ratio {sharpe:.3f} below regime floor {sharpe_floor} "
-                           f"(OOS {oos_sharpe:.3f} cannot rescue a failed full-period Sharpe)")
+                           f"(OOS {oos_display} cannot rescue a failed full-period Sharpe)")
 
         # OOS must also show positive edge — prevents IS-only curve-fitting.
         # Skipped when WF is underpowered (< 100 trades): oos_sharpe is 0.0 by
@@ -254,8 +270,16 @@ class DiagnosticsEngine:
                 return False, f"Walk-forward degradation {wf:.1%} exceeds floor {WALKFWD_DEGRAD_FLOOR:.0%}"
 
         tc = metrics["trade_count"]
-        if tc < MIN_TRADE_COUNT:
-            return False, f"Trade count {tc} below minimum {MIN_TRADE_COUNT} for statistical significance"
+        # Use regime-specific min_trades floor when available; fall back to global.
+        # Crisis/High-Vol regimes generate fewer setups by construction — applying
+        # the normal 30-trade floor would systematically reject all crisis strategies.
+        # The p-value and bootstrap CI gates enforce significance regardless.
+        regime_min_trades = floors.get("min_trades", MIN_TRADE_COUNT)
+        if tc < regime_min_trades:
+            return False, (
+                f"Trade count {tc} below regime floor {regime_min_trades} "
+                f"(global min={MIN_TRADE_COUNT}; statistical significance enforced by p-value + bootstrap CI)"
+            )
 
         # ── Statistical significance — p-value (Lo 2002 autocorr-corrected) ─────
         # The Sharpe floor confirms magnitude but not reliability: a Sharpe of 0.55
@@ -327,8 +351,10 @@ class DiagnosticsEngine:
              if wf_splits),
             {}
         )
-        is_sharpe  = wf_rep.get("is_sharpe",  metrics.get("sharpe", 0.0))
-        oos_sharpe = wf_rep.get("oos_sharpe", metrics.get("oos_sharpe", 0.0))
+        _wf_is  = wf_rep.get("is_sharpe")
+        _wf_oos = wf_rep.get("oos_sharpe")
+        is_sharpe  = metrics.get("sharpe", 0.0) if _wf_is  is None else _wf_is
+        oos_sharpe = metrics.get("sharpe", 0.0) if _wf_oos is None else _wf_oos
         wf_note = (
             f"IS Sharpe={is_sharpe:.3f}, OOS Sharpe={oos_sharpe:.3f} "
             f"({'OOS better than IS — strategy improved out-of-sample' if oos_sharpe > is_sharpe else 'OOS worse than IS — some degradation' if oos_sharpe < is_sharpe * 0.5 else 'IS and OOS broadly consistent'})"
@@ -560,6 +586,24 @@ class DiagnosticsEngine:
         return round(float(count_geq / n), 4)
 
     @staticmethod
+    def _market_exposure(trade_log: list[dict], returns: pd.Series) -> float:
+        """
+        Fraction of backtested trading days the strategy was invested.
+
+        Uses trade_log holding_days as the numerator and the length of the
+        return series as the denominator.  Strategies with exposure < 15% are
+        flagged in the report as potentially under-deployed — a good strategy
+        that only trades 10% of the time compounds very slowly even if its per-
+        trade metrics look clean.
+
+        Falls back to 0.0 when trade_log is empty or return series is short.
+        """
+        if not trade_log or len(returns) < 1:
+            return 0.0
+        total_held = sum(t.get("holding_days", 0) for t in trade_log)
+        return round(float(total_held) / max(len(returns), 1), 4)
+
+    @staticmethod
     def _rolling_sharpe_stability(
         returns: pd.Series,
         window: int = 60,
@@ -636,13 +680,16 @@ class DiagnosticsEngine:
         _OOS    = 63    # 1 quarter OOS
 
         if trade_count > 0 and trade_count < WF_MIN_TRADE_COUNT:
+            # Use None sentinel — not 0.0 — so callers can distinguish
+            # "not measured" from "measured zero".  The report renders this as
+            # "N/A (underpowered)" rather than the misleading "0.000".
             stub = [
-                {"is_pct": p, "is_sharpe": 0.0, "oos_sharpe": 0.0,
-                 "degradation": 0.0, "passed": True, "underpowered": True,
+                {"is_pct": p, "is_sharpe": None, "oos_sharpe": None,
+                 "degradation": None, "passed": True, "underpowered": True,
                  "rolling_wf": False}
                 for p in (0.60, 0.70, 0.80)
             ]
-            return 0.0, 0.0, stub
+            return 0.0, None, stub
 
         def _sharpe(r: pd.Series) -> float:
             std = r.std(ddof=1)
@@ -766,7 +813,7 @@ if __name__ == "__main__":
         # Build a synthetic trade log from OHLCV for the smoke test
         # (real trade log comes from backtester — not yet built)
         df   = ohlcv_raw[ticker].dropna()
-        rets = df["Close"].pct_change().dropna()
+        rets = df["Close"].pct_change(fill_method=None).dropna()
         fake_log = [{"pnl": float(r)} for r in rets.tail(30)]
 
         result = eng.run(ticker, strategy["strategy"], fake_log, rets)
