@@ -323,8 +323,8 @@ def get_status():
 @app.get("/api/report", response_class=PlainTextResponse)
 def get_report():
     """Return the last full pipeline report as Markdown text."""
-    path = _state.get("SummaryReport")
-    if not path or not os.path.exists(path):
+    path = os.path.join("reports", "ReportSummary.md")
+    if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="No report available yet.")
     with open(path, encoding="utf-8") as f:
         return f.read()
@@ -333,8 +333,8 @@ def get_report():
 @app.get("/api/summary", response_class=PlainTextResponse)
 def get_summary():
     """Return the last trader summary as Markdown text."""
-    path = _state.get("TraderReport")
-    if not path or not os.path.exists(path):
+    path = os.path.join("reports", "TraderSummary.md")
+    if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="No summary available yet.")
     with open(path, encoding="utf-8") as f:
         return f.read()
