@@ -87,7 +87,12 @@ export interface TickerSection {
   screenerVerdict: string;
   screeningRows: Record<string, string>[];
   equityBand: EquityPoint[];
+  mcSummaryRows: Record<string, string>[];
+  mcRiskRows: Record<string, string>[];
   diagnostics: DiagnosticRow[];
+  wfSplitsRows: Record<string, string>[];
+  backtestRows: Record<string, string>[];
+  tradeLogRows: Record<string, string>[];
   backtestReturn: string;
   backtestWinRate: string;
   tradeCount: string;
@@ -144,10 +149,18 @@ function parseTickerSections(md: string): TickerSection[] {
     const screenTables = findTables(sec2);
     const screeningRows = screenTables[0] ?? [];
 
-    // Section 4 — Monte Carlo (equity confidence band is the last table)
+    // Section 4 — Monte Carlo
     const sec4 = slice(part, '### 4. Monte Carlo Risk Profile', '### 5.');
     const mc4Tables = findTables(sec4);
-    const bandTable = mc4Tables.find(t => t[0]?.['Trade #'] !== undefined) ?? [];
+    // Equity band: the table with 'Trade #' column
+    const bandTable    = mc4Tables.find(t => t[0]?.['Trade #'] !== undefined) ?? [];
+    // Summary metrics: first table that has P5/Median/P95 columns (not equity band)
+    const mcSummaryRows = mc4Tables.find(
+      t => t[0] !== undefined && 'Metric' in t[0] && !('Trade #' in t[0])
+    ) ?? [];
+    // Risk metrics: the table with 'Risk metric' column
+    const mcRiskRows    = mc4Tables.find(t => t[0]?.['Risk metric'] !== undefined) ?? [];
+
     const equityBand: EquityPoint[] = bandTable.map(r => ({
       trade:  parseInt(r['Trade #'] ?? '0'),
       p5:     num(r['P5 ($)'] ?? '0'),
@@ -158,22 +171,27 @@ function parseTickerSections(md: string): TickerSection[] {
     // Section 5 — Diagnostic Scorecard
     const sec5 = slice(part, '### 5. Diagnostic Scorecard', '### 6.');
     const diagTables = findTables(sec5);
-    const diagnostics: DiagnosticRow[] = (diagTables[0] ?? []).map(r => ({
+    // Main scorecard: the table with Metric/Value/Floor/Pass columns
+    const scorecardTable = diagTables.find(t => t[0]?.['Pass'] !== undefined) ?? diagTables[0] ?? [];
+    const diagnostics: DiagnosticRow[] = scorecardTable.map(r => ({
       metric: r['Metric'] ?? '',
       value:  r['Value']  ?? '',
       floor:  r['Floor']  ?? '',
       pass:   r['Pass']   ?? '',
     }));
+    // Walk-forward splits: the table with IS/OOS columns
+    const wfSplitsRows = diagTables.find(t => t[0]?.['IS/OOS'] !== undefined) ?? [];
 
     // Section 6 — Backtest
     const sec6 = slice(part, '### 6. Backtest Performance');
     const bt6Tables = findTables(sec6);
+    // Main metrics: first Metric/Value table
+    const backtestRows = bt6Tables.find(t => t[0]?.['Metric'] !== undefined) ?? bt6Tables[0] ?? [];
+    // Trade log: table with Entry/Exit columns
+    const tradeLogRows = bt6Tables.find(t => t[0]?.['Entry'] !== undefined) ?? [];
+
     const btMap: Record<string, string> = {};
-    (bt6Tables[0] ?? []).forEach(r => {
-      // Row format: | Metric | Value | (sometimes extra columns)
-      const k = r['Metric'] ?? '';
-      btMap[k] = r['Value'] ?? '';
-    });
+    backtestRows.forEach(r => { btMap[r['Metric'] ?? ''] = r['Value'] ?? ''; });
 
     return [{
       ticker,
@@ -189,7 +207,12 @@ function parseTickerSections(md: string): TickerSection[] {
       screenerVerdict: part.match(/\*\*Screener verdict:\*\* ([^\n]+)/)?.[1]?.trim() ?? '',
       screeningRows,
       equityBand,
+      mcSummaryRows,
+      mcRiskRows,
       diagnostics,
+      wfSplitsRows,
+      backtestRows,
+      tradeLogRows,
       backtestReturn: btMap['Net return (after slippage)']
         ? btMap['Net return (after slippage)'].split('|')[0].trim()
         : '',
@@ -228,14 +251,79 @@ export interface RegimeRow {
   atrPct: string;
 }
 
+// ── Strategy types ────────────────────────────────────────────────────────────
+
+export interface StrategyAdjParam {
+  parameter: string;
+  value: string;
+}
+
+export interface StrategyTicker {
+  ticker: string;
+  strategy: string;
+  regime: string;
+  reasoning: string;
+  orderType: string;
+  entryConditions: string[];
+  positionSizing: string;
+  exitRules: string[];
+  adjustedParams: StrategyAdjParam[];
+  llmAdjustments: string[];
+  entryStatus: string;
+  entryDetails: string;
+}
+
 export interface ReportData {
   exec: ReportExecSummary;
   tickers: ReportTicker[];
   regimes: RegimeRow[];
+  strategies: StrategyTicker[];
   macroSummary: string;
   favouredSectors: string[];
   avoidSectors: string[];
   rawMd: string;
+}
+
+function parseStrategySection(md: string): StrategyTicker[] {
+  const stratSec = slice(md, '## Strategy Parameters');
+  if (!stratSec) return [];
+
+  const parts = stratSec.split(/\n(?=### [A-Z])/);
+
+  return parts.flatMap(part => {
+    const hdrMatch = part.match(/^### ([A-Z]+(?:[-.][A-Z]+)?) — (.+)/m);
+    if (!hdrMatch) return [];
+
+    const ticker   = hdrMatch[1].trim();
+    const strategy = hdrMatch[2].trim();
+    const regime   = part.match(/\*\*Regime:\*\* ([^\n]+)/)?.[1]?.trim() ?? '';
+    const reasoning = part.match(/\*\*Reasoning:\*\* ([^\n]+)/)?.[1]?.trim() ?? '';
+    const orderType = part.match(/\*\*Order type:\*\* ([^\n]+)/)?.[1]?.trim() ?? '';
+
+    const entryBlock = slice(part, '**Entry', '**Position sizing');
+    const entryConditions = [...entryBlock.matchAll(/^- (.+)$/gm)].map(m => m[1]);
+
+    const positionSizing = part.match(/\*\*Position sizing:\*\* ([^\n]+)/)?.[1]?.trim() ?? '';
+
+    const exitBlock = slice(part, '**Exit rules', '#### Adjusted');
+    const exitRules = [...exitBlock.matchAll(/^\d+\. (.+)$/gm)].map(m => strip(m[1]));
+
+    const adjBlock  = slice(part, '#### Adjusted Parameters', '**LLM adjustments');
+    const adjTables = findTables(adjBlock);
+    const adjustedParams: StrategyAdjParam[] = (adjTables[0] ?? [])
+      .map(r => ({ parameter: r['Parameter'] ?? '', value: r['Value'] ?? '' }))
+      .filter(p => p.parameter);
+
+    const llmBlock = slice(part, '**LLM adjustments:**', '#### Current Entry Signal');
+    const llmAdjustments = [...llmBlock.matchAll(/^- (.+)$/gm)].map(m => m[1]);
+
+    const signalBlock = slice(part, '#### Current Entry Signal');
+    const entryStatus  = signalBlock.match(/\*\*Status: (.+?)\*\*/)?.[1]?.trim() ?? '';
+    const entryDetails = signalBlock.match(/```\n([\s\S]+?)\n```/)?.[1]?.trim() ?? '';
+
+    return [{ ticker, strategy, regime, reasoning, orderType, entryConditions,
+              positionSizing, exitRules, adjustedParams, llmAdjustments, entryStatus, entryDetails }];
+  });
 }
 
 export function parseReport(md: string): ReportData {
@@ -280,6 +368,7 @@ export function parseReport(md: string): ReportData {
     exec,
     tickers,
     regimes,
+    strategies: parseStrategySection(md),
     macroSummary: macroSummaryMatch?.[1]?.trim() ?? '',
     favouredSectors: (macroSec.match(/\*\*Favoured sectors:\*\* ([^\n]+)/)?.[1] ?? '')
       .split(',').map(s => s.trim()).filter(Boolean),

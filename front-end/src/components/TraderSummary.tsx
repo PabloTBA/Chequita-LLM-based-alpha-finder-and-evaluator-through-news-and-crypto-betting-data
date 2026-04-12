@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip,
   ResponsiveContainer, CartesianGrid,
+  BarChart, Bar, Cell, ReferenceLine, LabelList,
 } from 'recharts';
 import {
   parseTraderSummary,
@@ -12,12 +13,16 @@ import {
 
 interface Props { onBack: () => void; }
 
-// ── Shared style tokens ──────────────────────────────────────────────────────
-const GOLD    = '#e3bf17';
+type TickerTab = 'entry' | 'screening' | 'montecarlo' | 'diagnostics' | 'backtest';
+
+// ── Style tokens ──────────────────────────────────────────────────────────────
+const GOLD     = '#e3bf17';
 const GOLD_DIM = 'rgba(227,191,23,0.5)';
 const GOLD_BG  = 'rgba(227,191,23,0.08)';
+const GREEN    = '#4ade80';
+const RED      = '#f87171';
 
-// ── Sub-components ───────────────────────────────────────────────────────────
+// ── Shared primitives ─────────────────────────────────────────────────────────
 
 function Chip({ label, color }: { label: string; color: 'green' | 'red' | 'gold' }) {
   const cls = {
@@ -70,6 +75,121 @@ function MdTable({ rows }: { rows: Record<string, string>[] }) {
   );
 }
 
+function TabBar({ tabs, active, onSelect, small }: {
+  tabs: { id: string; label: string }[];
+  active: string;
+  onSelect: (id: string) => void;
+  small?: boolean;
+}) {
+  const base = small
+    ? 'font-mono text-[9px] tracking-[0.25em] px-3 py-2'
+    : 'font-mono text-[10px] tracking-[0.3em] px-5 py-3';
+  return (
+    <div className="flex overflow-x-auto gap-0 border-b border-[#e3bf17]/15 scrollbar-hide">
+      {tabs.map(t => (
+        <button
+          key={t.id}
+          onClick={() => onSelect(t.id)}
+          className={`${base} whitespace-nowrap uppercase transition-all border-b-2 -mb-px shrink-0 ${
+            active === t.id
+              ? 'text-[#e3bf17] border-[#e3bf17]'
+              : 'text-[#e3bf17]/35 border-transparent hover:text-[#e3bf17]/60 hover:border-[#e3bf17]/30'
+          }`}
+        >
+          {t.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ── Charts ────────────────────────────────────────────────────────────────────
+
+function EquityChart({ data }: { data: { trade: number; p5: number; median: number; p95: number }[] }) {
+  if (!data.length) return (
+    <p className="font-mono text-xs text-[#e3bf17]/30 text-center py-8">No equity band data</p>
+  );
+  const fmt = (v: number) => `$${(v / 1000).toFixed(0)}k`;
+  return (
+    <ResponsiveContainer width="100%" height={260}>
+      <AreaChart data={data} margin={{ top: 10, right: 20, left: 10, bottom: 0 }}>
+        <defs>
+          <linearGradient id="bandGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="5%"  stopColor={GOLD} stopOpacity={0.2} />
+            <stop offset="95%" stopColor={GOLD} stopOpacity={0.02} />
+          </linearGradient>
+        </defs>
+        <CartesianGrid strokeDasharray="3 3" stroke="rgba(227,191,23,0.08)" />
+        <XAxis dataKey="trade" tick={{ fill: GOLD_DIM, fontSize: 10 }} tickLine={false}
+          axisLine={{ stroke: GOLD_DIM }}
+          label={{ value: 'Trade #', position: 'insideBottomRight', fill: GOLD_DIM, fontSize: 10, offset: -5 }} />
+        <YAxis tickFormatter={fmt} tick={{ fill: GOLD_DIM, fontSize: 10 }} tickLine={false}
+          axisLine={{ stroke: GOLD_DIM }} width={48} />
+        <Tooltip
+          contentStyle={{ background: '#0a0a0a', border: `1px solid ${GOLD_DIM}`, borderRadius: 8 }}
+          labelStyle={{ color: GOLD, fontSize: 11, marginBottom: 4 }}
+          itemStyle={{ color: GOLD_DIM, fontSize: 11 }}
+          formatter={(v: number, name: string) => [fmt(v), name]}
+          labelFormatter={(t) => `Trade #${t}`}
+        />
+        <Area type="monotone" dataKey="p95"    stroke={GOLD}     strokeWidth={1.5} fill="url(#bandGrad)" strokeDasharray="4 2" name="P95 (best 5%)"  dot={false} />
+        <Area type="monotone" dataKey="median" stroke={GOLD}     strokeWidth={2.5} fill="none"            name="Median"        dot={false} />
+        <Area type="monotone" dataKey="p5"     stroke={GOLD_DIM} strokeWidth={1.5} fill="black" fillOpacity={0} strokeDasharray="4 2" name="P5 (worst 5%)" dot={false} />
+      </AreaChart>
+    </ResponsiveContainer>
+  );
+}
+
+function BacktestChart({ t }: { t: TickerSection }) {
+  const returnVal  = parseFloat(t.backtestReturn.replace(/[^0-9.-]/g, '')) || 0;
+  const winRate    = parseFloat(t.backtestWinRate.replace(/[^0-9.-]/g, '')) || 0;
+  const drawdown   = Math.abs(parseFloat(t.maxDrawdown.replace(/[^0-9.-]/g, ''))) || 0;
+  const sharpe     = parseFloat(t.sharpe.replace(/[^0-9.-]/g, '')) || 0;
+
+  const bars = [
+    { name: 'Win Rate %', value: winRate,  fill: winRate >= 50 ? GREEN : RED },
+    { name: 'Net Return %', value: returnVal, fill: returnVal >= 0 ? GREEN : RED },
+    { name: 'Max DD %', value: -drawdown, fill: RED },
+    { name: 'Sharpe ×10', value: sharpe * 10, fill: sharpe >= 1 ? GREEN : GOLD },
+  ].filter(b => b.value !== 0);
+
+  if (!bars.length) return null;
+
+  return (
+    <div className="bg-black/40 border border-[#e3bf17]/15 rounded-xl p-4">
+      <p className="font-mono text-[9px] tracking-[0.35em] text-[#e3bf17]/40 uppercase mb-3">
+        Performance Metrics
+      </p>
+      <ResponsiveContainer width="100%" height={140}>
+        <BarChart data={bars} layout="vertical" margin={{ left: 0, right: 50, top: 4, bottom: 4 }}>
+          <XAxis type="number" tick={{ fill: GOLD_DIM, fontSize: 9 }}
+            tickLine={false} axisLine={{ stroke: GOLD_DIM }} />
+          <YAxis type="category" dataKey="name" width={90}
+            tick={{ fill: GOLD_DIM, fontSize: 9, fontFamily: 'monospace' }}
+            tickLine={false} axisLine={false} />
+          <Tooltip
+            contentStyle={{ background: '#0a0a0a', border: `1px solid ${GOLD_DIM}`, borderRadius: 8 }}
+            labelStyle={{ color: GOLD, fontSize: 11 }}
+            itemStyle={{ color: GOLD_DIM, fontSize: 11 }}
+          />
+          <ReferenceLine x={0} stroke={GOLD_DIM} strokeOpacity={0.3} />
+          <Bar dataKey="value" radius={3} barSize={18}>
+            {bars.map((entry, i) => (
+              <Cell key={i} fill={entry.fill} fillOpacity={0.7} />
+            ))}
+            <LabelList dataKey="value" position="right"
+              formatter={(v: number) => v.toFixed(1)}
+              style={{ fill: GOLD_DIM, fontSize: 9, fontFamily: 'monospace' }} />
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+      <p className="font-mono text-[8px] text-[#e3bf17]/25 text-right mt-1">
+        * Sharpe shown ×10 for scale
+      </p>
+    </div>
+  );
+}
+
 function DiagScorecard({ rows }: { rows: { metric: string; value: string; floor: string; pass: string }[] }) {
   return (
     <div className="grid grid-cols-1 gap-2">
@@ -85,175 +205,240 @@ function DiagScorecard({ rows }: { rows: { metric: string; value: string; floor:
   );
 }
 
-function EquityChart({ data }: { data: { trade: number; p5: number; median: number; p95: number }[] }) {
-  if (!data.length) return (
-    <p className="font-mono text-xs text-[#e3bf17]/30 text-center py-8">No equity band data</p>
-  );
+// ── Ticker section content ────────────────────────────────────────────────────
 
-  const fmt = (v: number) => `$${(v / 1000).toFixed(0)}k`;
+function TickerContent({ t }: { t: TickerSection }) {
+  const [tab, setTab] = useState<TickerTab>('entry');
 
-  return (
-    <ResponsiveContainer width="100%" height={260}>
-      <AreaChart data={data} margin={{ top: 10, right: 20, left: 10, bottom: 0 }}>
-        <defs>
-          <linearGradient id="bandGrad" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="5%"  stopColor={GOLD} stopOpacity={0.2} />
-            <stop offset="95%" stopColor={GOLD} stopOpacity={0.02} />
-          </linearGradient>
-        </defs>
-        <CartesianGrid strokeDasharray="3 3" stroke="rgba(227,191,23,0.08)" />
-        <XAxis
-          dataKey="trade"
-          tick={{ fill: GOLD_DIM, fontSize: 10 }}
-          tickLine={false}
-          axisLine={{ stroke: GOLD_DIM }}
-          label={{ value: 'Trade #', position: 'insideBottomRight', fill: GOLD_DIM, fontSize: 10, offset: -5 }}
-        />
-        <YAxis
-          tickFormatter={fmt}
-          tick={{ fill: GOLD_DIM, fontSize: 10 }}
-          tickLine={false}
-          axisLine={{ stroke: GOLD_DIM }}
-          width={48}
-        />
-        <Tooltip
-          contentStyle={{ background: '#0a0a0a', border: `1px solid ${GOLD_DIM}`, borderRadius: 8 }}
-          labelStyle={{ color: GOLD, fontSize: 11, marginBottom: 4 }}
-          itemStyle={{ color: GOLD_DIM, fontSize: 11 }}
-          formatter={(v: number, name: string) => [fmt(v), name]}
-          labelFormatter={(t) => `Trade #${t}`}
-        />
-        {/* P95 top bound — light fill area from bottom */}
-        <Area type="monotone" dataKey="p95"    stroke={GOLD}     strokeWidth={1.5} fill="url(#bandGrad)" strokeDasharray="4 2" name="P95 (best 5%)" dot={false} />
-        {/* Median — solid bright line, no fill */}
-        <Area type="monotone" dataKey="median" stroke={GOLD}     strokeWidth={2.5} fill="none" name="Median"        dot={false} />
-        {/* P5 lower bound — dimmed, no fill */}
-        <Area type="monotone" dataKey="p5"     stroke={GOLD_DIM} strokeWidth={1.5} fill="black" fillOpacity={0} strokeDasharray="4 2" name="P5 (worst 5%)" dot={false} />
-      </AreaChart>
-    </ResponsiveContainer>
-  );
-}
+  const availableTabs: { id: TickerTab; label: string }[] = [
+    { id: 'entry',       label: 'Entry Signal' },
+    ...(t.screeningRows.length > 0 ? [{ id: 'screening' as TickerTab, label: 'Screening' }] : []),
+    ...(t.equityBand.length > 0    ? [{ id: 'montecarlo' as TickerTab, label: 'Monte Carlo' }] : []),
+    ...(t.diagnostics.length > 0   ? [{ id: 'diagnostics' as TickerTab, label: 'Diagnostics' }] : []),
+    ...(t.backtestReturn || t.backtestWinRate ? [{ id: 'backtest' as TickerTab, label: 'Backtest' }] : []),
+  ];
 
-function TickerCard({ t, expanded, onToggle }: {
-  t: TickerSection;
-  expanded: boolean;
-  onToggle: () => void;
-}) {
   const isActive = t.status.toLowerCase().includes('active');
 
   return (
     <div className="border border-[#e3bf17]/25 rounded-2xl overflow-hidden">
-      {/* Header row — always visible */}
-      <button
-        onClick={onToggle}
-        className="w-full flex items-center justify-between px-8 py-5 hover:bg-[#e3bf17]/5 transition-colors text-left"
-      >
-        <div className="flex items-center gap-5">
-          <span className="font-jersey text-4xl text-[#e3bf17]">{t.ticker}</span>
-          <Chip label={t.regime}   color="gold" />
-          <Chip label={t.strategy} color="gold" />
-          {isActive && <Chip label="ACTIVE" color="green" />}
-        </div>
-        <span className="font-mono text-[#e3bf17]/40 text-sm">{expanded ? '▲ collapse' : '▼ expand'}</span>
-      </button>
-
-      <AnimatePresence initial={false}>
-        {expanded && (
-          <motion.div
-            key="body"
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.3 }}
-            className="overflow-hidden"
-          >
-            <div className="px-8 pb-8 space-y-8 border-t border-[#e3bf17]/15">
-
-              {/* Entry Signal */}
-              <section className="pt-6">
-                <h4 className="font-mono text-[10px] tracking-[0.4em] text-[#e3bf17]/50 uppercase mb-4">
-                  Entry Signal
-                </h4>
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                  <StatCard label="Entry Price"    value={t.entryPrice} />
-                  <StatCard label="Stop Loss"      value={t.stopLoss} />
-                  <StatCard label="Stop Distance"  value={t.stopDistance} />
-                  <StatCard label="Position Size"  value={t.positionSize} />
-                  <StatCard label="Dollar Risk"    value={t.dollarRisk} />
-                  <StatCard label="ATR₁₄"          value={t.atr14} />
-                </div>
-              </section>
-
-              {/* Screening Data */}
-              {t.screeningRows.length > 0 && (
-                <section>
-                  <div className="flex items-center justify-between mb-4">
-                    <h4 className="font-mono text-[10px] tracking-[0.4em] text-[#e3bf17]/50 uppercase">
-                      Screening Data
-                    </h4>
-                    {t.screenerVerdict && (
-                      <Chip
-                        label={`Verdict: ${t.screenerVerdict}`}
-                        color={t.screenerVerdict === 'BUY' ? 'green' : 'gold'}
-                      />
-                    )}
-                  </div>
-                  <MdTable rows={t.screeningRows} />
-                </section>
-              )}
-
-              {/* Equity Confidence Band */}
-              {t.equityBand.length > 0 && (
-                <section>
-                  <h4 className="font-mono text-[10px] tracking-[0.4em] text-[#e3bf17]/50 uppercase mb-4">
-                    Monte Carlo — Equity Confidence Band (10,000 sims)
-                  </h4>
-                  <div className="bg-black/40 border border-[#e3bf17]/15 rounded-xl p-4">
-                    <EquityChart data={t.equityBand} />
-                    <div className="flex gap-6 mt-3 justify-center">
-                      {[
-                        { label: 'P95 Best 5%',  style: { borderTop: `2px dashed ${GOLD}` } },
-                        { label: 'Median',        style: { borderTop: `2.5px solid ${GOLD}` } },
-                        { label: 'P5 Worst 5%',  style: { borderTop: `2px dashed ${GOLD_DIM}` } },
-                      ].map(({ label, style }) => (
-                        <div key={label} className="flex items-center gap-2">
-                          <div className="w-8" style={style} />
-                          <span className="font-mono text-[10px] text-[#e3bf17]/50">{label}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </section>
-              )}
-
-              {/* Diagnostic Scorecard */}
-              {t.diagnostics.length > 0 && (
-                <section>
-                  <h4 className="font-mono text-[10px] tracking-[0.4em] text-[#e3bf17]/50 uppercase mb-4">
-                    Diagnostic Scorecard
-                  </h4>
-                  <DiagScorecard rows={t.diagnostics} />
-                </section>
-              )}
-
-              {/* Backtest summary */}
-              {(t.backtestReturn || t.backtestWinRate) && (
-                <section>
-                  <h4 className="font-mono text-[10px] tracking-[0.4em] text-[#e3bf17]/50 uppercase mb-4">
-                    Backtest Performance
-                  </h4>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                    <StatCard label="Net Return"  value={t.backtestReturn} />
-                    <StatCard label="Win Rate"    value={t.backtestWinRate} />
-                    <StatCard label="Trade Count" value={t.tradeCount} />
-                    <StatCard label="Max Drawdown" value={t.maxDrawdown} />
-                  </div>
-                </section>
-              )}
-            </div>
-          </motion.div>
+      {/* Ticker header */}
+      <div className="px-8 pt-6 pb-4 flex items-center gap-5 flex-wrap border-b border-[#e3bf17]/15">
+        <span className="font-jersey text-5xl text-[#e3bf17]">{t.ticker}</span>
+        <Chip label={t.regime}   color="gold" />
+        <Chip label={t.strategy} color="gold" />
+        {isActive && <Chip label="ACTIVE" color="green" />}
+        {t.status && !isActive && (
+          <span className="font-mono text-[10px] text-[#e3bf17]/40 uppercase tracking-widest">
+            {t.status}
+          </span>
         )}
-      </AnimatePresence>
+      </div>
+
+      {/* Sub-tab bar */}
+      <div className="px-8">
+        <TabBar
+          tabs={availableTabs}
+          active={availableTabs.some(x => x.id === tab) ? tab : availableTabs[0]?.id ?? 'entry'}
+          onSelect={id => setTab(id as TickerTab)}
+          small
+        />
+      </div>
+
+      {/* Sub-tab content */}
+      <div className="px-8 py-6 space-y-6">
+
+        {/* Entry Signal */}
+        {tab === 'entry' && (
+          <>
+            <MdTable rows={[
+              { Field: 'Entry Price',   Value: t.entryPrice   || '—' },
+              { Field: 'Stop Loss',     Value: t.stopLoss     || '—' },
+              { Field: 'Stop Distance', Value: t.stopDistance || '—' },
+              { Field: 'Position Size', Value: t.positionSize || '—' },
+              { Field: 'Dollar Risk',   Value: t.dollarRisk   || '—' },
+              { Field: 'ATR₁₄',         Value: t.atr14        || '—' },
+            ].filter(r => r.Value !== '—')} />
+            {(!t.entryPrice && !t.stopLoss) && (
+              <p className="font-mono text-xs text-[#e3bf17]/30">No entry signal data parsed.</p>
+            )}
+          </>
+        )}
+
+        {/* Screening */}
+        {tab === 'screening' && (
+          <>
+            {t.screenerVerdict && (
+              <div className="flex gap-3 items-center">
+                <span className="font-mono text-[9px] tracking-[0.35em] text-[#e3bf17]/40 uppercase">
+                  Screener Verdict
+                </span>
+                <Chip
+                  label={t.screenerVerdict}
+                  color={t.screenerVerdict === 'BUY' ? 'green' : 'gold'}
+                />
+              </div>
+            )}
+            <MdTable rows={t.screeningRows} />
+          </>
+        )}
+
+        {/* Monte Carlo */}
+        {tab === 'montecarlo' && (
+          <>
+            {t.mcSummaryRows.length > 0 && (
+              <div className="space-y-2">
+                <p className="font-mono text-[9px] tracking-[0.35em] text-[#e3bf17]/40 uppercase">
+                  Simulation Summary (10,000 runs)
+                </p>
+                <MdTable rows={t.mcSummaryRows} />
+              </div>
+            )}
+            {t.mcRiskRows.length > 0 && (
+              <div className="space-y-2">
+                <p className="font-mono text-[9px] tracking-[0.35em] text-[#e3bf17]/40 uppercase">
+                  Risk Metrics
+                </p>
+                <MdTable rows={t.mcRiskRows} />
+              </div>
+            )}
+            {t.equityBand.length > 0 && (
+              <div className="bg-black/40 border border-[#e3bf17]/15 rounded-xl p-4">
+                <p className="font-mono text-[9px] tracking-[0.35em] text-[#e3bf17]/40 uppercase mb-3">
+                  Equity Confidence Band
+                </p>
+                <EquityChart data={t.equityBand} />
+                <div className="flex gap-6 mt-3 justify-center">
+                  {[
+                    { label: 'P95 Best 5%',  style: { borderTop: `2px dashed ${GOLD}` } },
+                    { label: 'Median',        style: { borderTop: `2.5px solid ${GOLD}` } },
+                    { label: 'P5 Worst 5%',  style: { borderTop: `2px dashed ${GOLD_DIM}` } },
+                  ].map(({ label, style }) => (
+                    <div key={label} className="flex items-center gap-2">
+                      <div className="w-8" style={style} />
+                      <span className="font-mono text-[10px] text-[#e3bf17]/50">{label}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {t.mcSummaryRows.length === 0 && t.mcRiskRows.length === 0 && t.equityBand.length === 0 && (
+              <p className="font-mono text-xs text-[#e3bf17]/30">No Monte Carlo data available.</p>
+            )}
+          </>
+        )}
+
+        {/* Diagnostics */}
+        {tab === 'diagnostics' && (
+          <>
+            {t.diagnostics.length > 0 && <DiagScorecard rows={t.diagnostics} />}
+            {t.wfSplitsRows.length > 0 && (
+              <div className="space-y-2">
+                <p className="font-mono text-[9px] tracking-[0.35em] text-[#e3bf17]/40 uppercase">
+                  Walk-Forward Robustness (3-split: 60/40, 70/30, 80/20)
+                </p>
+                <MdTable rows={t.wfSplitsRows} />
+              </div>
+            )}
+            {t.diagnostics.length === 0 && (
+              <p className="font-mono text-xs text-[#e3bf17]/30">No diagnostic data available.</p>
+            )}
+          </>
+        )}
+
+        {/* Backtest */}
+        {tab === 'backtest' && (
+          <>
+            {t.backtestRows.length > 0 && (
+              <div className="space-y-2">
+                <p className="font-mono text-[9px] tracking-[0.35em] text-[#e3bf17]/40 uppercase">
+                  Performance Metrics
+                </p>
+                <MdTable rows={t.backtestRows} />
+              </div>
+            )}
+            <BacktestChart t={t} />
+            {t.tradeLogRows.length > 0 && (
+              <div className="space-y-2">
+                <p className="font-mono text-[9px] tracking-[0.35em] text-[#e3bf17]/40 uppercase">
+                  Trade Log ({t.tradeLogRows.length} trades)
+                </p>
+                <div className="max-h-72 overflow-y-auto">
+                  <MdTable rows={t.tradeLogRows} />
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Overview section ──────────────────────────────────────────────────────────
+
+function OverviewSection({ data }: { data: TraderData }) {
+  const { header: h } = data;
+  return (
+    <div className="border border-[#e3bf17]/25 rounded-2xl p-8 space-y-6">
+      <div className="flex items-start justify-between flex-wrap gap-4">
+        <div>
+          <h2 className="font-jersey text-6xl text-[#e3bf17] uppercase">TRADER_SUMMARY</h2>
+          <p className="font-mono text-xs text-[#e3bf17]/40 tracking-widest mt-1">{h.date}</p>
+        </div>
+        <div className="flex flex-col items-end gap-2">
+          <Chip
+            label={`${h.tickersPassed} ticker${h.tickersPassed !== 1 ? 's' : ''} passed`}
+            color={h.tickersPassed > 0 ? 'green' : 'red'}
+          />
+          <Chip label={`Bias: ${h.marketBias}`} color="gold" />
+          {h.spyBenchmark && (
+            <span className="font-mono text-[10px] text-[#e3bf17]/40">
+              SPY benchmark: {h.spyBenchmark}
+            </span>
+          )}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div>
+          <p className="font-mono text-[9px] tracking-[0.35em] text-[#e3bf17]/40 uppercase mb-2">
+            Favoured Sectors
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {h.favouredSectors.map(s => <Chip key={s} label={s} color="green" />)}
+            {h.favouredSectors.length === 0 && (
+              <span className="font-mono text-xs text-[#e3bf17]/30">—</span>
+            )}
+          </div>
+        </div>
+        <div>
+          <p className="font-mono text-[9px] tracking-[0.35em] text-[#e3bf17]/40 uppercase mb-2">
+            Avoid Sectors
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {h.avoidSectors.map(s => <Chip key={s} label={s} color="red" />)}
+            {h.avoidSectors.length === 0 && (
+              <span className="font-mono text-xs text-[#e3bf17]/30">—</span>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {h.keyRisks && (
+        <div className="border-t border-[#e3bf17]/10 pt-4">
+          <p className="font-mono text-[9px] tracking-[0.35em] text-[#e3bf17]/40 uppercase mb-1">Key Risks</p>
+          <p className="font-mono text-xs text-[#e3bf17]/60 leading-relaxed">{h.keyRisks}</p>
+        </div>
+      )}
+
+      {data.tickers.length === 0 && (
+        <div className="border border-[#e3bf17]/15 rounded-xl p-6 text-center">
+          <p className="font-mono text-[#e3bf17]/40 text-sm">
+            No tickers passed all 3 stages today. No action required.
+          </p>
+        </div>
+      )}
     </div>
   );
 }
@@ -261,9 +446,9 @@ function TickerCard({ t, expanded, onToggle }: {
 // ── Main component ────────────────────────────────────────────────────────────
 
 export const TraderSummary = ({ onBack }: Props) => {
-  const [state, setState] = useState<'loading' | 'no-data' | 'error' | 'loaded'>('loading');
-  const [data,  setData]  = useState<TraderData | null>(null);
-  const [expandedTicker, setExpandedTicker] = useState<string | null>(null);
+  const [state,    setState]    = useState<'loading' | 'no-data' | 'error' | 'loaded'>('loading');
+  const [data,     setData]     = useState<TraderData | null>(null);
+  const [mainTab,  setMainTab]  = useState<string>('overview');
 
   useEffect(() => {
     fetch('/api/summary')
@@ -276,6 +461,13 @@ export const TraderSummary = ({ onBack }: Props) => {
       })
       .catch(() => setState('error'));
   }, []);
+
+  const mainTabs = data ? [
+    { id: 'overview', label: 'Overview' },
+    ...data.tickers.map(t => ({ id: t.ticker, label: t.ticker })),
+  ] : [];
+
+  const activeTicker = data?.tickers.find(t => t.ticker === mainTab) ?? null;
 
   return (
     <motion.div
@@ -299,18 +491,27 @@ export const TraderSummary = ({ onBack }: Props) => {
         </span>
       </div>
 
-      <div className="flex-1 px-10 py-8 max-w-6xl mx-auto w-full space-y-8">
+      {/* Main tab bar (sticky below nav) */}
+      {state === 'loaded' && data && (
+        <div className="sticky top-[73px] z-10 bg-black/90 backdrop-blur px-10">
+          <TabBar
+            tabs={mainTabs}
+            active={mainTab}
+            onSelect={id => setMainTab(id)}
+          />
+        </div>
+      )}
 
-        {/* ── Loading ── */}
+      <div className="flex-1 px-10 py-8 max-w-6xl mx-auto w-full">
+
         {state === 'loading' && (
-          <div className="flex flex-col items-center justify-center h-64 gap-4">
+          <div className="flex flex-col items-center justify-center h-64">
             <p className="font-mono text-[#e3bf17]/60 text-sm animate-pulse tracking-widest">
               FETCHING_DATA_STREAM...
             </p>
           </div>
         )}
 
-        {/* ── No data ── */}
         {state === 'no-data' && (
           <div className="flex flex-col items-center justify-center h-64 gap-4">
             <p className="font-mono text-[#e3bf17]/60 text-sm animate-pulse">[!] NO_ACTIVE_DATA_STREAM</p>
@@ -320,104 +521,17 @@ export const TraderSummary = ({ onBack }: Props) => {
           </div>
         )}
 
-        {/* ── Error ── */}
         {state === 'error' && (
-          <div className="flex flex-col items-center justify-center h-64 gap-4">
+          <div className="flex flex-col items-center justify-center h-64">
             <p className="font-mono text-red-400/80 text-sm">[!] STREAM_ERROR — check api_server.py</p>
           </div>
         )}
 
-        {/* ── Loaded ── */}
         {state === 'loaded' && data && (
-          <>
-            {/* Header */}
-            <div className="border border-[#e3bf17]/25 rounded-2xl p-8 space-y-6">
-              <div className="flex items-start justify-between flex-wrap gap-4">
-                <div>
-                  <h2 className="font-jersey text-6xl text-[#e3bf17] uppercase">
-                    TRADER_SUMMARY
-                  </h2>
-                  <p className="font-mono text-xs text-[#e3bf17]/40 tracking-widest mt-1">
-                    {data.header.date}
-                  </p>
-                </div>
-                <div className="flex flex-col items-end gap-2">
-                  <Chip
-                    label={`${data.header.tickersPassed} ticker${data.header.tickersPassed !== 1 ? 's' : ''} passed`}
-                    color={data.header.tickersPassed > 0 ? 'green' : 'red'}
-                  />
-                  <Chip
-                    label={`Bias: ${data.header.marketBias}`}
-                    color="gold"
-                  />
-                  {data.header.spyBenchmark && (
-                    <span className="font-mono text-[10px] text-[#e3bf17]/40">
-                      SPY benchmark: {data.header.spyBenchmark}
-                    </span>
-                  )}
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <p className="font-mono text-[9px] tracking-[0.35em] text-[#e3bf17]/40 uppercase mb-2">
-                    Favoured Sectors
-                  </p>
-                  <div className="flex flex-wrap gap-2">
-                    {data.header.favouredSectors.map(s => (
-                      <Chip key={s} label={s} color="green" />
-                    ))}
-                  </div>
-                </div>
-                <div>
-                  <p className="font-mono text-[9px] tracking-[0.35em] text-[#e3bf17]/40 uppercase mb-2">
-                    Avoid Sectors
-                  </p>
-                  <div className="flex flex-wrap gap-2">
-                    {data.header.avoidSectors.map(s => (
-                      <Chip key={s} label={s} color="red" />
-                    ))}
-                  </div>
-                </div>
-              </div>
-
-              {data.header.keyRisks && (
-                <div className="border-t border-[#e3bf17]/10 pt-4">
-                  <p className="font-mono text-[9px] tracking-[0.35em] text-[#e3bf17]/40 uppercase mb-1">
-                    Key Risks
-                  </p>
-                  <p className="font-mono text-xs text-[#e3bf17]/60 leading-relaxed">
-                    {data.header.keyRisks}
-                  </p>
-                </div>
-              )}
-            </div>
-
-            {/* Ticker deep-dives */}
-            {data.tickers.length === 0 ? (
-              <div className="border border-[#e3bf17]/15 rounded-2xl p-10 text-center">
-                <p className="font-mono text-[#e3bf17]/40 text-sm">
-                  No tickers passed all 3 stages today. No action required.
-                </p>
-              </div>
-            ) : (
-              <div className="space-y-4">
-                <h3 className="font-mono text-[10px] tracking-[0.4em] text-[#e3bf17]/50 uppercase">
-                  Qualified Tickers ({data.tickers.length})
-                </h3>
-                {data.tickers.map(t => (
-                  <TickerCard
-                    key={t.ticker}
-                    t={t}
-                    expanded={expandedTicker === t.ticker}
-                    onToggle={() =>
-                      setExpandedTicker(prev => prev === t.ticker ? null : t.ticker)
-                    }
-                  />
-                ))}
-              </div>
-            )}
-          </>
+          <div className="pt-6">
+            {mainTab === 'overview' && <OverviewSection data={data} />}
+            {activeTicker && <TickerContent key={activeTicker.ticker} t={activeTicker} />}
+          </div>
         )}
       </div>
     </motion.div>
