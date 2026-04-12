@@ -1234,7 +1234,7 @@ if __name__ == "__main__":
     config = {
         "benzinga_api_key":  os.getenv("BENZINGA_API"),
         "llm_client":        llm,
-        "output_dir":        "front-end/md",
+        "output_dir":        "reports",
         "cache_dir":         "data/cache",
         "initial_portfolio": 100_000.0,
         "window_days":       min(args.days, 14),
