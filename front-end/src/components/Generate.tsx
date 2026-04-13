@@ -41,7 +41,7 @@ export const Generate = () => {
 
     // 1. POST /api/run — triggers the pipeline
     try {
-      const res = await fetch('/api/run', {
+      const res = await fetch('http://localhost:8000/api/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ days: 14, max_tickers: 15 }),
@@ -60,7 +60,7 @@ export const Generate = () => {
 
     // 2. Open SSE stream — receives every print() line from the pipeline
     setStatus('running');
-    const es = new EventSource('/api/logs');
+    const es = new EventSource('http://localhost:8000/api/logs');
     esRef.current = es;
 
     es.onmessage = (event) => {
