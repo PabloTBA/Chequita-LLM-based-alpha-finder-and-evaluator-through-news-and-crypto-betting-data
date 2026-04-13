@@ -1,11 +1,10 @@
 import { motion } from 'framer-motion';
 
 const members = [
-  { id: "0x01", name: "Enzo Panaligan", role: "Lead Architect / Back-end Designer / 皮仁杰" },
-  { id: "0x02", name: "Viggo Kristoffer Araneta", role: "Front-end Designer / Marksman" },
-  { id: "0x03", name: "Gilpaul Miguel Dela Cruz", role: "Quant Researcher / Frost Mage" },
-  { id: "0x04", name: "Pio Renato Sanchez", role: "Quant Researcher / Shadow Operative" },
-  { id: "0x05", name: "Alfred Tancotian", role: "SYSTEM ERROR: FILE TOO LARGE" },
+  { id: "0x01", name: "Raphael Lorenzo Panaligan", role: "Lead Architect / Back-end Programmer / 皮仁杰" },
+  { id: "0x02", name: "Viggo Kristoffer Araneta", role: "Lead Designer / Front-end Programmer" },
+  { id: "0x03", name: "Gilpaul Miguel Dela Cruz", role: "Quant Researcher / Business Model Head" },
+  { id: "0x04", name: "Pio Renato Sanchez", role: "Quant Researcher / Tester" },
 ];
 
 export const Creators = () => {

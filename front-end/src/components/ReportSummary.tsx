@@ -1,655 +1,360 @@
-import { useState, useEffect } from 'react';
+import { useMemo } from 'react';
 import { motion } from 'framer-motion';
-import {
-  BarChart, Bar, XAxis, YAxis, Tooltip,
-  ResponsiveContainer, Cell, ReferenceLine, LabelList,
-} from 'recharts';
-import { parseReport, type ReportData, type StrategyTicker } from '../lib/mdParser';
+import ReactMarkdown from 'react-markdown';
+import reportData from "../../../reports/ReportSummary.md?raw";
 
-interface Props { onBack: () => void; }
-
-type Section = 'overview' | 'tickers' | 'regime' | 'strategy';
-
-// ── Style tokens ──────────────────────────────────────────────────────────────
-const GOLD     = '#e3bf17';
-const GOLD_DIM = 'rgba(227,191,23,0.5)';
-const GREEN    = '#4ade80';
-const RED      = '#f87171';
-const YELLOW   = '#fbbf24';
-
-// ── Shared primitives ─────────────────────────────────────────────────────────
-
-function Chip({ label, color }: { label: string; color: 'green' | 'red' | 'gold' | 'yellow' }) {
-  const cls = {
-    green:  'border-green-500/50  text-green-400  bg-green-500/10',
-    red:    'border-red-500/50    text-red-400    bg-red-500/10',
-    gold:   'border-[#e3bf17]/50  text-[#e3bf17]  bg-[#e3bf17]/10',
-    yellow: 'border-yellow-500/50 text-yellow-400 bg-yellow-500/10',
-  }[color];
-  return (
-    <span className={`font-mono text-[10px] tracking-widest px-3 py-1 border rounded-full uppercase ${cls}`}>
-      {label}
-    </span>
-  );
+interface SummaryProps {
+  onBack: () => void;
 }
 
-function verdictColor(v: string): 'green' | 'red' | 'yellow' | 'gold' {
-  const u = v.toUpperCase();
-  if (u === 'BUY')   return 'green';
-  if (u === 'AVOID') return 'red';
-  if (u === 'WATCH') return 'yellow';
-  return 'gold';
-}
+export const ReportSummary = ({ onBack }: SummaryProps) => {
+  const categories = [
+    "Executive Summary",
+    "Macro Environment",
+    "Shortlisted Tickers",
+    "Regime Classification",
+    "Strategy Parameters",
+    "Diagnostic Results"
+  ];
 
-function VerdictBadge({ verdict }: { verdict: string }) {
-  const col = verdictColor(verdict);
-  const map = {
-    green:  { text: 'text-green-400',  bg: 'bg-green-500/15  border-green-500/40' },
-    red:    { text: 'text-red-400',    bg: 'bg-red-500/15    border-red-500/40' },
-    yellow: { text: 'text-yellow-400', bg: 'bg-yellow-500/15 border-yellow-500/40' },
-    gold:   { text: 'text-[#e3bf17]',  bg: 'bg-[#e3bf17]/10  border-[#e3bf17]/40' },
-  }[col];
-  return (
-    <span className={`inline-block font-mono text-[10px] tracking-widest px-3 py-1 border rounded-full uppercase font-bold ${map.text} ${map.bg}`}>
-      {verdict}
-    </span>
-  );
-}
-
-function StatCard({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="border border-[#e3bf17]/20 rounded-xl p-4 bg-black/40">
-      <p className="font-mono text-[9px] tracking-[0.3em] text-[#e3bf17]/40 uppercase mb-1">{label}</p>
-      <p className="font-jersey text-2xl text-[#e3bf17]">{value || '—'}</p>
-    </div>
-  );
-}
-
-function MdTable({ rows }: { rows: Record<string, string>[] }) {
-  if (!rows.length) return null;
-  const headers = Object.keys(rows[0]);
-  return (
-    <div className="overflow-x-auto">
-      <table className="w-full font-mono text-xs border-collapse">
-        <thead>
-          <tr>
-            {headers.map(h => (
-              <th key={h} className="text-left text-[#e3bf17]/50 border-b border-[#e3bf17]/20 pb-2 pr-6 uppercase tracking-widest">
-                {h}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row, i) => (
-            <tr key={i} className="border-b border-[#e3bf17]/10 hover:bg-[#e3bf17]/5 transition-colors">
-              {headers.map(h => (
-                <td key={h} className="py-2 pr-6 text-[#e3bf17]/70 align-top">{row[h]}</td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-// ── Tab bar ───────────────────────────────────────────────────────────────────
-
-function TabBar({ tabs, active, onSelect, small }: {
-  tabs: { id: string; label: string }[];
-  active: string;
-  onSelect: (id: string) => void;
-  small?: boolean;
-}) {
-  const base = small
-    ? 'font-mono text-[9px] tracking-[0.25em] px-3 py-2'
-    : 'font-mono text-[10px] tracking-[0.3em] px-5 py-3';
-  return (
-    <div className="flex overflow-x-auto gap-0 border-b border-[#e3bf17]/15 scrollbar-hide">
-      {tabs.map(t => (
-        <button
-          key={t.id}
-          onClick={() => onSelect(t.id)}
-          className={`${base} whitespace-nowrap uppercase transition-all border-b-2 -mb-px shrink-0 ${
-            active === t.id
-              ? 'text-[#e3bf17] border-[#e3bf17]'
-              : 'text-[#e3bf17]/35 border-transparent hover:text-[#e3bf17]/60 hover:border-[#e3bf17]/30'
-          }`}
-        >
-          {t.label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-// ── Charts ────────────────────────────────────────────────────────────────────
-
-function HurstChart({ regimes }: { regimes: ReportData['regimes'] }) {
-  if (!regimes.length) return null;
-  const data = regimes.map(r => ({ ticker: r.ticker, hurst: parseFloat(r.hurst) || 0 }));
-  const h = Math.max(180, data.length * 28);
-  return (
-    <div className="bg-black/40 border border-[#e3bf17]/15 rounded-xl p-4">
-      <p className="font-mono text-[9px] tracking-[0.35em] text-[#e3bf17]/40 uppercase mb-3">
-        Hurst Exponent (H &gt; 0.5 = trending, H &gt; 0.7 = strongly trending)
-      </p>
-      <ResponsiveContainer width="100%" height={h}>
-        <BarChart data={data} layout="vertical" margin={{ left: 0, right: 50, top: 4, bottom: 4 }}>
-          <XAxis type="number" domain={[0, 1]} tick={{ fill: GOLD_DIM, fontSize: 9 }}
-            tickLine={false} axisLine={{ stroke: GOLD_DIM }} />
-          <YAxis type="category" dataKey="ticker" width={44}
-            tick={{ fill: GOLD_DIM, fontSize: 10, fontFamily: 'monospace' }}
-            tickLine={false} axisLine={false} />
-          <Tooltip
-            contentStyle={{ background: '#0a0a0a', border: `1px solid ${GOLD_DIM}`, borderRadius: 8 }}
-            labelStyle={{ color: GOLD, fontSize: 11 }}
-            itemStyle={{ color: GOLD_DIM, fontSize: 11 }}
-            formatter={(v: number) => [v.toFixed(3), 'Hurst']}
-          />
-          <ReferenceLine x={0.5} stroke={RED}    strokeDasharray="3 3" strokeOpacity={0.5} />
-          <ReferenceLine x={0.7} stroke={YELLOW} strokeDasharray="3 3" strokeOpacity={0.5} />
-          <Bar dataKey="hurst" radius={3} barSize={16} fill={GOLD} fillOpacity={0.7}>
-            <LabelList dataKey="hurst" position="right"
-              formatter={(v: number) => v.toFixed(3)}
-              style={{ fill: GOLD_DIM, fontSize: 9, fontFamily: 'monospace' }} />
-          </Bar>
-        </BarChart>
-      </ResponsiveContainer>
-      <div className="flex gap-6 mt-2 justify-center">
-        {[
-          { label: 'Random walk (0.5)', color: RED },
-          { label: 'Strong trend (0.7)', color: YELLOW },
-        ].map(({ label, color }) => (
-          <div key={label} className="flex items-center gap-2">
-            <div className="w-6 border-t-2 border-dashed" style={{ borderColor: color, opacity: 0.5 }} />
-            <span className="font-mono text-[9px] text-[#e3bf17]/40">{label}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function AtrChart({ regimes }: { regimes: ReportData['regimes'] }) {
-  if (!regimes.length) return null;
-  const data = regimes.map(r => ({
-    ticker: r.ticker,
-    atrPct: parseFloat(r.atrPct.replace('%', '')) || 0,
-  }));
-  const h = Math.max(180, data.length * 28);
-  return (
-    <div className="bg-black/40 border border-[#e3bf17]/15 rounded-xl p-4">
-      <p className="font-mono text-[9px] tracking-[0.35em] text-[#e3bf17]/40 uppercase mb-3">
-        ATR / Price % (daily volatility — higher = wider stops needed)
-      </p>
-      <ResponsiveContainer width="100%" height={h}>
-        <BarChart data={data} layout="vertical" margin={{ left: 0, right: 50, top: 4, bottom: 4 }}>
-          <XAxis type="number" tick={{ fill: GOLD_DIM, fontSize: 9 }}
-            tickLine={false} axisLine={{ stroke: GOLD_DIM }}
-            tickFormatter={(v: number) => `${v}%`} />
-          <YAxis type="category" dataKey="ticker" width={44}
-            tick={{ fill: GOLD_DIM, fontSize: 10, fontFamily: 'monospace' }}
-            tickLine={false} axisLine={false} />
-          <Tooltip
-            contentStyle={{ background: '#0a0a0a', border: `1px solid ${GOLD_DIM}`, borderRadius: 8 }}
-            labelStyle={{ color: GOLD, fontSize: 11 }}
-            itemStyle={{ color: GOLD_DIM, fontSize: 11 }}
-            formatter={(v: number) => [`${v.toFixed(2)}%`, 'ATR/Price']}
-          />
-          <Bar dataKey="atrPct" radius={3} barSize={16} fill={GOLD} fillOpacity={0.55}>
-            <LabelList dataKey="atrPct" position="right"
-              formatter={(v: number) => `${v.toFixed(2)}%`}
-              style={{ fill: GOLD_DIM, fontSize: 9, fontFamily: 'monospace' }} />
-          </Bar>
-        </BarChart>
-      </ResponsiveContainer>
-    </div>
-  );
-}
-
-function VerdictBarChart({ data }: { data: ReportData }) {
-  const counts = {
-    BUY:   data.tickers.filter(t => t.verdict.toUpperCase() === 'BUY').length,
-    WATCH: data.tickers.filter(t => t.verdict.toUpperCase() === 'WATCH').length,
-    AVOID: data.tickers.filter(t => t.verdict.toUpperCase() === 'AVOID').length,
-  };
-  const chartData = [
-    { name: 'BUY',   value: counts.BUY,   fill: GREEN },
-    { name: 'WATCH', value: counts.WATCH, fill: YELLOW },
-    { name: 'AVOID', value: counts.AVOID, fill: RED },
-  ].filter(d => d.value > 0);
-  if (!chartData.length) return null;
-  return (
-    <ResponsiveContainer width="100%" height={110}>
-      <BarChart data={chartData} layout="vertical" margin={{ left: 0, right: 30, top: 0, bottom: 0 }}>
-        <XAxis type="number" tick={{ fill: GOLD_DIM, fontSize: 10 }}
-          tickLine={false} axisLine={{ stroke: GOLD_DIM }} allowDecimals={false} />
-        <YAxis type="category" dataKey="name" width={44}
-          tick={{ fill: GOLD_DIM, fontSize: 11, fontFamily: 'monospace' }}
-          tickLine={false} axisLine={false} />
-        <Tooltip
-          contentStyle={{ background: '#0a0a0a', border: `1px solid ${GOLD_DIM}`, borderRadius: 8 }}
-          labelStyle={{ color: GOLD, fontSize: 11 }}
-          itemStyle={{ color: GOLD_DIM, fontSize: 11 }}
-          formatter={(v: number) => [v, 'tickers']}
-        />
-        <Bar dataKey="value" radius={4} barSize={22}>
-          {chartData.map((entry, i) => (
-            <Cell key={i} fill={entry.fill} fillOpacity={0.75} />
-          ))}
-        </Bar>
-      </BarChart>
-    </ResponsiveContainer>
-  );
-}
-
-// ── Section views ─────────────────────────────────────────────────────────────
-
-function OverviewSection({ data }: { data: ReportData }) {
-  return (
-    <div className="space-y-6">
-      {/* Executive summary */}
-      <div className="border border-[#e3bf17]/25 rounded-2xl p-8 space-y-6">
-        <div className="flex items-start justify-between flex-wrap gap-4">
-          <div>
-            <h2 className="font-jersey text-5xl text-[#e3bf17] uppercase">Executive Summary</h2>
-            <p className="font-mono text-xs text-[#e3bf17]/40 tracking-widest mt-1">
-              {data.exec.runDate}{data.exec.newsWindow ? ` · ${data.exec.newsWindow}` : ''}
-            </p>
-          </div>
-          <Chip label={`Bias: ${data.exec.marketBias}`} color="gold" />
-        </div>
-
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          <StatCard label="Articles Analysed" value={data.exec.articlesAnalysed} />
-          <StatCard label="Buy Signals"  value={String(data.exec.buyCandidates.length)} />
-          <StatCard label="Watch List"   value={String(data.exec.watchList.length)} />
-          <StatCard label="Avoid"        value={String(data.exec.avoidList.length)} />
-        </div>
-
-        {data.tickers.length > 0 && (
-          <div className="space-y-2">
-            <p className="font-mono text-[9px] tracking-[0.35em] text-[#e3bf17]/40 uppercase">
-              Verdict Distribution
-            </p>
-            <VerdictBarChart data={data} />
-            <div className="flex flex-wrap gap-2 mt-2">
-              {data.exec.buyCandidates.map(s => <Chip key={s} label={s} color="green" />)}
-              {data.exec.watchList.map(s => <Chip key={s} label={s} color="yellow" />)}
-              {data.exec.avoidList.map(s => <Chip key={s} label={s} color="red" />)}
-            </div>
-          </div>
-        )}
-
-        {data.exec.topThemes && (
-          <div className="border-t border-[#e3bf17]/10 pt-4">
-            <p className="font-mono text-[9px] tracking-[0.35em] text-[#e3bf17]/40 uppercase mb-1">Top Themes</p>
-            <p className="font-mono text-xs text-[#e3bf17]/60 leading-relaxed">{data.exec.topThemes}</p>
-          </div>
-        )}
-      </div>
-
-      {/* Macro environment */}
-      {(data.macroSummary || data.favouredSectors.length > 0) && (
-        <div className="border border-[#e3bf17]/25 rounded-2xl p-8 space-y-5">
-          <h3 className="font-mono text-[10px] tracking-[0.4em] text-[#e3bf17]/50 uppercase">
-            Macro Environment
-          </h3>
-          {data.macroSummary && (
-            <blockquote className="border-l-2 border-[#e3bf17]/40 pl-4 font-mono text-sm text-[#e3bf17]/60 italic leading-relaxed">
-              {data.macroSummary}
-            </blockquote>
-          )}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            {data.favouredSectors.length > 0 && (
-              <div>
-                <p className="font-mono text-[9px] tracking-[0.35em] text-[#e3bf17]/40 uppercase mb-2">Favoured</p>
-                <div className="flex flex-wrap gap-2">
-                  {data.favouredSectors.map(s => <Chip key={s} label={s} color="green" />)}
-                </div>
-              </div>
-            )}
-            {data.avoidSectors.length > 0 && (
-              <div>
-                <p className="font-mono text-[9px] tracking-[0.35em] text-[#e3bf17]/40 uppercase mb-2">Avoid</p>
-                <div className="flex flex-wrap gap-2">
-                  {data.avoidSectors.map(s => <Chip key={s} label={s} color="red" />)}
-                </div>
-              </div>
-            )}
-          </div>
-          {data.exec.keyRisks && (
-            <div className="border-t border-[#e3bf17]/10 pt-4">
-              <p className="font-mono text-[9px] tracking-[0.35em] text-[#e3bf17]/40 uppercase mb-1">Key Risks</p>
-              <p className="font-mono text-xs text-[#e3bf17]/60 leading-relaxed">{data.exec.keyRisks}</p>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function TickersSection({ data }: { data: ReportData }) {
-  const [active, setActive] = useState(data.tickers[0]?.ticker ?? '');
-
-  const tickerTabs = data.tickers.map(t => ({ id: t.ticker, label: t.ticker }));
-  const selected   = data.tickers.find(t => t.ticker === active);
-  const regime     = data.regimes.find(r => r.ticker === active);
-  const strategy   = data.strategies.find(s => s.ticker === active);
-  const col        = selected ? verdictColor(selected.verdict) : 'gold';
-
-  const verdictBgMap = {
-    green:  'bg-green-500/10  border-green-500/25',
-    red:    'bg-red-500/10    border-red-500/25',
-    yellow: 'bg-yellow-500/10 border-yellow-500/25',
-    gold:   'bg-[#e3bf17]/8   border-[#e3bf17]/25',
+  const scrollToSection = (idText: string) => {
+    const targetId = idText.replace(/\s+/g, '-').toLowerCase();
+    const element = document.getElementById(targetId);
+    if (element) {
+      element.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
   };
 
-  return (
-    <div className="space-y-4">
-      <TabBar tabs={tickerTabs} active={active} onSelect={setActive} small />
+  const scrollToTicker = (symbol: string) => {
+    const element = document.getElementById(`ticker-${symbol}`);
+    if (element) {
+      element.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  };
 
-      {selected && (
-        <div className={`border rounded-2xl p-6 space-y-5 ${verdictBgMap[col]}`}>
-          <div className="flex items-center gap-4 flex-wrap">
-            <span className="font-jersey text-5xl text-[#e3bf17]">{selected.ticker}</span>
-            <VerdictBadge verdict={selected.verdict} />
-            {regime && <Chip label={regime.regime} color="gold" />}
-            {strategy && <Chip label={strategy.strategy} color="gold" />}
-          </div>
+  // --- 1. DYNAMIC MULTI-TICKER EXTRACTION ---
+  const { tickerDashboards, rawContent } = useMemo(() => {
+    let content = typeof reportData === 'string' ? reportData 
+      : (reportData && typeof reportData === 'object' && 'default' in reportData) ? (reportData as any).default 
+      : String(reportData || "");
 
-          <div>
-            <p className="font-mono text-[9px] tracking-[0.35em] text-[#e3bf17]/40 uppercase mb-2">Reasoning</p>
-            <p className="font-mono text-sm text-[#e3bf17]/70 leading-relaxed">{selected.reasoning}</p>
-          </div>
+    const tickerMetrics: any[] = [];
+    const chunks = content.split(/(?=\n### )/g);
 
-          {regime && (
-            <div>
-              <p className="font-mono text-[9px] tracking-[0.35em] text-[#e3bf17]/40 uppercase mb-2">Regime Data</p>
-              <MdTable rows={[{
-                Ticker: regime.ticker,
-                Regime: regime.regime,
-                'Hurst Exponent': regime.hurst,
-                'ATR / Price': regime.atrPct,
-              }]} />
-            </div>
-          )}
+    chunks.forEach(chunk => {
+      if (chunk.includes('Walk-Forward Returns') || chunk.includes('Best 3 trades') || chunk.includes('SPY Buy-and-Hold')) {
+        
+        const lines = chunk.trim().split('\n');
+        const rawTitle = lines[0].replace(/#/g, '').trim();
 
-          {strategy && (
-            <div>
-              <p className="font-mono text-[9px] tracking-[0.35em] text-[#e3bf17]/40 uppercase mb-2">Entry Signal</p>
-              <div className={`font-mono text-xs px-4 py-3 rounded-lg border ${
-                strategy.entryStatus.includes('ACTIVE')
-                  ? 'text-green-400 border-green-500/30 bg-green-500/5'
-                  : 'text-[#e3bf17]/50 border-[#e3bf17]/15 bg-black/30'
-              }`}>
-                {strategy.entryStatus || 'No entry signal data'}
-                {strategy.entryDetails && (
-                  <div className="mt-1 text-[#e3bf17]/40 text-[10px]">{strategy.entryDetails}</div>
-                )}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
+        if (rawTitle.toUpperCase().includes('PORTFOLIO') || rawTitle.toUpperCase().includes('SUMMARY')) {
+          return; 
+        }
 
-function RegimeSection({ data }: { data: ReportData }) {
-  return (
-    <div className="space-y-6">
-      <div className="border border-[#e3bf17]/25 rounded-2xl p-8 space-y-4">
-        <h3 className="font-mono text-[10px] tracking-[0.4em] text-[#e3bf17]/50 uppercase">
-          Regime Classification Table
-        </h3>
-        <MdTable rows={data.regimes.map(r => ({
-          Ticker: r.ticker,
-          Regime: r.regime,
-          'Hurst': r.hurst,
-          'ATR/Price': r.atrPct,
-        }))} />
-      </div>
+        let spyLine = '';
+        let tickerLine = '';
+        let descLines: string[] = [];
+        
+        const topSectionMatch = chunk.match(/[\s\S]*?(?=\n(?:###|####|\*\*Best|\*\*Worst|Walk-Forward|Return Dist))/i);
+        const topSectionRaw = topSectionMatch ? topSectionMatch[0] : chunk;
+        
+        const topLines = topSectionRaw.split('\n').slice(1);
+        topLines.forEach(line => {
+          const lower = line.toLowerCase();
+          if (lower.includes('spy buy-and-hold')) {
+            spyLine = line.replace(/\*\*/g, '').trim();
+          } else if (lower.includes('alphacombined') && line.includes(':')) {
+            tickerLine = line.replace(/\*\*/g, '').trim();
+          } else if (line.trim().length > 0 && !line.startsWith('#')) {
+            descLines.push(line.replace(/\*\*/g, '').trim());
+          }
+        });
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="border border-[#e3bf17]/25 rounded-2xl p-6 space-y-4">
-          <h3 className="font-mono text-[10px] tracking-[0.4em] text-[#e3bf17]/50 uppercase">
-            Hurst Exponent by Ticker
-          </h3>
-          <HurstChart regimes={data.regimes} />
-        </div>
+        const extractBlock = (text: string, keyword: string) => {
+          const regex = new RegExp(`(?:### |#### |\\*\\*|)*${keyword}[\\s\\S]*?(?=\\n(?:####|###|##|#)\\s|$)`, 'i');
+          const match = text.match(regex);
+          return match ? match[0].trim() : '';
+        };
 
-        <div className="border border-[#e3bf17]/25 rounded-2xl p-6 space-y-4">
-          <h3 className="font-mono text-[10px] tracking-[0.4em] text-[#e3bf17]/50 uppercase">
-            Daily Volatility (ATR/Price) by Ticker
-          </h3>
-          <AtrChart regimes={data.regimes} />
-        </div>
-      </div>
-    </div>
-  );
-}
+        const extractAndFormatCodeBlock = (text: string, keyword: string) => {
+          const rawText = extractBlock(text, keyword);
+          if (!rawText) return '';
+          const blockLines = rawText.split('\n');
+          if (blockLines.length <= 1) return rawText;
+          const title = blockLines[0];
+          const body = blockLines.slice(1).join('\n');
+          return `${title}\n\n\`\`\`text\n${body}\n\`\`\``;
+        };
 
-function StrategyDetail({ strat }: { strat: StrategyTicker }) {
-  return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center gap-4 flex-wrap">
-        <span className="font-jersey text-5xl text-[#e3bf17]">{strat.ticker}</span>
-        <Chip label={strat.strategy} color="gold" />
-        <Chip label={strat.regime} color="gold" />
-      </div>
+        tickerMetrics.push({
+          title: rawTitle,
+          spyLine,
+          tickerLine,
+          description: descLines.join(' '), 
+          bestTrades: extractBlock(chunk, 'Best 3 trades'),
+          worstTrades: extractBlock(chunk, 'Worst 3 trades'),
+          walkForward: extractAndFormatCodeBlock(chunk, 'Walk-Forward Returns'),
+          returnDist: extractAndFormatCodeBlock(chunk, 'Return Distribution'),
+        });
+      }
+    });
 
-      {strat.reasoning && (
-        <div>
-          <p className="font-mono text-[9px] tracking-[0.35em] text-[#e3bf17]/40 uppercase mb-1">LLM Reasoning</p>
-          <p className="font-mono text-xs text-[#e3bf17]/60 leading-relaxed">{strat.reasoning}</p>
-        </div>
-      )}
-
-      {/* Entry conditions + exit rules in two columns */}
-      {(strat.entryConditions.length > 0 || strat.exitRules.length > 0) && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          {strat.entryConditions.length > 0 && (
-            <div className="border border-[#e3bf17]/15 rounded-xl p-4">
-              <p className="font-mono text-[9px] tracking-[0.35em] text-[#e3bf17]/40 uppercase mb-3">
-                Entry Conditions
-              </p>
-              <ul className="space-y-1">
-                {strat.entryConditions.map((c, i) => (
-                  <li key={i} className="font-mono text-[10px] text-[#e3bf17]/60 flex gap-2">
-                    <span className="text-[#e3bf17]/30 shrink-0">›</span>{c}
-                  </li>
-                ))}
-              </ul>
-              {strat.positionSizing && (
-                <div className="border-t border-[#e3bf17]/10 pt-2 mt-2">
-                  <p className="font-mono text-[9px] text-[#e3bf17]/40 uppercase mb-1">Sizing</p>
-                  <p className="font-mono text-[10px] text-[#e3bf17]/60">{strat.positionSizing}</p>
-                </div>
-              )}
-            </div>
-          )}
-          {strat.exitRules.length > 0 && (
-            <div className="border border-[#e3bf17]/15 rounded-xl p-4">
-              <p className="font-mono text-[9px] tracking-[0.35em] text-[#e3bf17]/40 uppercase mb-3">
-                Exit Rules (priority order)
-              </p>
-              <ol className="space-y-1 list-none">
-                {strat.exitRules.map((r, i) => (
-                  <li key={i} className="font-mono text-[10px] text-[#e3bf17]/60 flex gap-2">
-                    <span className="text-[#e3bf17]/30 shrink-0 w-4">{i + 1}.</span>{r}
-                  </li>
-                ))}
-              </ol>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Adjusted Parameters table */}
-      {strat.adjustedParams.length > 0 && (
-        <div className="border border-[#e3bf17]/25 rounded-xl p-5 space-y-3">
-          <p className="font-mono text-[9px] tracking-[0.35em] text-[#e3bf17]/40 uppercase">
-            Adjusted Parameters
-          </p>
-          <MdTable rows={strat.adjustedParams.map(p => ({ Parameter: p.parameter, Value: p.value }))} />
-        </div>
-      )}
-
-      {/* LLM adjustments */}
-      {strat.llmAdjustments.length > 0 && (
-        <div className="border border-[#e3bf17]/15 rounded-xl p-5 space-y-2">
-          <p className="font-mono text-[9px] tracking-[0.35em] text-[#e3bf17]/40 uppercase mb-2">
-            LLM Parameter Adjustments
-          </p>
-          <ul className="space-y-2">
-            {strat.llmAdjustments.map((a, i) => (
-              <li key={i} className="font-mono text-[10px] text-[#e3bf17]/60 flex gap-2 leading-relaxed">
-                <span className="text-[#e3bf17]/30 shrink-0">→</span>{a}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {/* Entry signal */}
-      <div className="border border-[#e3bf17]/15 rounded-xl p-5 space-y-2">
-        <p className="font-mono text-[9px] tracking-[0.35em] text-[#e3bf17]/40 uppercase">
-          Current Entry Signal
-        </p>
-        <div className={`font-mono text-xs px-4 py-3 rounded-lg border ${
-          strat.entryStatus.includes('ACTIVE')
-            ? 'text-green-400 border-green-500/30 bg-green-500/5'
-            : 'text-[#e3bf17]/50 border-[#e3bf17]/15 bg-black/30'
-        }`}>
-          {strat.entryStatus || '—'}
-          {strat.entryDetails && (
-            <div className="mt-1 text-[#e3bf17]/40 text-[10px]">{strat.entryDetails}</div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function StrategySection({ data }: { data: ReportData }) {
-  const [active, setActive] = useState(data.strategies[0]?.ticker ?? '');
-
-  if (!data.strategies.length) {
-    return (
-      <div className="border border-[#e3bf17]/15 rounded-2xl p-10 text-center">
-        <p className="font-mono text-[#e3bf17]/40 text-sm">No strategy parameters found in report.</p>
-      </div>
-    );
-  }
-
-  const tabs     = data.strategies.map(s => ({ id: s.ticker, label: s.ticker }));
-  const selected = data.strategies.find(s => s.ticker === active);
-
-  return (
-    <div className="space-y-4">
-      <TabBar tabs={tabs} active={active} onSelect={setActive} small />
-      {selected && (
-        <div className="border border-[#e3bf17]/25 rounded-2xl p-6">
-          <StrategyDetail strat={selected} />
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ── Main component ────────────────────────────────────────────────────────────
-
-export const ReportSummary = ({ onBack }: Props) => {
-  const [state,   setState]   = useState<'loading' | 'no-data' | 'error' | 'loaded'>('loading');
-  const [data,    setData]    = useState<ReportData | null>(null);
-  const [section, setSection] = useState<Section>('overview');
-
-  useEffect(() => {
-    fetch('/api/report')
-      .then(async r => {
-        if (r.status === 404) { setState('no-data'); return; }
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        const md = await r.text();
-        setData(parseReport(md));
-        setState('loaded');
-      })
-      .catch(() => setState('error'));
+    return { 
+      tickerDashboards: tickerMetrics,
+      rawContent: content
+    };
   }, []);
+  // -----------------------------------
 
-  const sectionTabs = data ? [
-    { id: 'overview',  label: 'Overview' },
-    { id: 'tickers',   label: `Tickers (${data.tickers.length})` },
-    { id: 'regime',    label: `Regime (${data.regimes.length})` },
-    { id: 'strategy',  label: `Strategy (${data.strategies.length})` },
-  ] : [];
+  // --- 2. PREMIUM TERMINAL STYLING ---
+  const sharedMarkdownComponents: any = {
+    h1: () => null,
+    h2: ({node, children, ...props}: any) => {
+      const sectionId = String(children).replace(/\s+/g, '-').toLowerCase();
+      return (
+        <h2 id={sectionId} className="font-jersey text-5xl text-[#e3bf17] mt-16 mb-6 uppercase border-b border-[#e3bf17]/10 pb-2 scroll-mt-32" {...props}>
+          {children}
+        </h2>
+      );
+    },
+    h3: ({node, ...props}: any) => <h3 className="font-jersey text-4xl text-[#e3bf17]/80 mt-10 mb-4 uppercase" {...props} />,
+    h4: ({node, ...props}: any) => <h4 className="font-jersey text-3xl text-[#e3bf17]/60 mt-8 mb-4 uppercase" {...props} />,
+    p: ({node, ...props}: any) => <p className="font-jersey text-2xl text-[#e3bf17]/80 leading-relaxed mb-6 tracking-wide" {...props} />,
+    strong: ({node, ...props}: any) => <strong className="font-jersey text-[#e3bf17] font-normal border-b border-[#e3bf17]/30" {...props} />,
+    li: ({node, ...props}: any) => <li className="font-jersey text-xl text-[#e3bf17]/70 mb-4 list-none border-l-2 border-[#e3bf17]/20 pl-4 hover:border-[#e3bf17] transition-colors" {...props} />,
+    
+    pre: ({node, ...props}: any) => (
+      <div className="relative mt-8 mb-12 group">
+        <div className="absolute top-0 left-0 right-0 h-7 bg-[#e3bf17]/20 rounded-t-xl border-b border-[#e3bf17]/30 flex items-center px-4 gap-2 backdrop-blur-md z-10">
+          <div className="w-2.5 h-2.5 rounded-full bg-red-500/80"></div>
+          <div className="w-2.5 h-2.5 rounded-full bg-yellow-500/80"></div>
+          <div className="w-2.5 h-2.5 rounded-full bg-green-500/80"></div>
+          <span className="ml-3 font-mono text-[9px] text-[#e3bf17]/50 tracking-widest uppercase">SYS_DATA_GRID</span>
+        </div>
+        <pre className="pt-10 pb-6 px-5 font-mono text-[11.5px] leading-relaxed text-[#e3bf17]/90 overflow-x-auto custom-scrollbar bg-gradient-to-b from-black/90 to-[#e3bf17]/5 border border-[#e3bf17]/30 rounded-xl shadow-[0_10px_40px_rgba(227,191,23,0.08)] group-hover:border-[#e3bf17]/60 transition-colors" {...props} />
+      </div>
+    ),
+
+    code: ({node, inline, children, ...props}: any) => {
+      if (inline) return <code className="font-mono text-[#e3bf17] bg-[#e3bf17]/10 px-1 py-0.5 rounded" {...props}>{children}</code>;
+      
+      const content = String(children || '').replace(/\n$/, '');
+      const lines = content.split('\n');
+      let headerFound = false;
+
+      return (
+        <code className="font-mono text-[11.5px] leading-[1.6]" {...props}>
+          {lines.map((line: string, i: number) => {
+            if (line.trim() === '') return <div key={i} className="h-4"></div>;
+            
+            const isHeader = !headerFound;
+            if (isHeader) headerFound = true;
+
+            return (
+              <div key={i} className={isHeader 
+                ? "font-bold text-[#e3bf17] border-b border-[#e3bf17]/40 pb-2 mb-3 tracking-wide uppercase whitespace-pre" 
+                : "text-[#e3bf17]/80 hover:text-white transition-colors whitespace-pre"
+              }>
+                {line}
+              </div>
+            );
+          })}
+        </code>
+      );
+    },
+
+    table: ({node, ...props}: any) => (
+      <div className="overflow-x-auto overflow-y-auto max-h-[400px] border border-[#e3bf17]/20 rounded-lg mb-8 custom-scrollbar bg-black/50">
+        <table className="w-full text-left border-collapse" {...props} />
+      </div>
+    ),
+    th: ({node, ...props}: any) => <th className="sticky top-0 bg-black border-b-2 border-[#e3bf17]/30 p-4 font-jersey text-2xl text-[#e3bf17]" {...props} />,
+    td: ({node, ...props}: any) => <td className="border-b border-[#e3bf17]/10 p-4 font-mono text-[#e3bf17]/80" {...props} />,
+    blockquote: ({node, ...props}: any) => <blockquote className="border-l-4 border-[#e3bf17] bg-[#e3bf17]/5 p-8 my-10 font-jersey text-2xl text-[#e3bf17]/90 rounded-r-xl tracking-tight" {...props} />,
+  };
 
   return (
-    <motion.div
+    <motion.div 
+      onClick={(e) => e.stopPropagation()} 
       initial={{ x: '100vw' }}
       animate={{ x: 0 }}
       exit={{ x: '100vw' }}
-      transition={{ type: 'spring', damping: 25, stiffness: 120 }}
-      className="absolute inset-0 flex flex-col bg-black/95 backdrop-blur-3xl z-[100] overflow-y-auto"
+      transition={{ type: "spring", damping: 25, stiffness: 120 }}
+      className="absolute inset-0 bg-black/95 backdrop-blur-3xl z-[100] overflow-y-auto"
     >
-      {/* Nav bar */}
-      <div className="sticky top-0 z-10 bg-black/80 backdrop-blur border-b border-[#e3bf17]/15 px-10 py-5 flex items-center justify-between shrink-0">
-        <button
+      <div className="fixed top-0 left-0 right-0 p-6 md:p-8 flex justify-between items-center z-[110] pointer-events-none bg-gradient-to-b from-black/95 via-black/80 to-transparent">
+        <button 
           onClick={onBack}
-          className="font-jersey text-2xl text-[#e3bf17] hover:tracking-[0.2em] transition-all uppercase flex items-center gap-3 group"
+          className="pointer-events-auto font-jersey text-3xl text-[#e3bf17] hover:tracking-widest transition-all uppercase flex items-center gap-4"
         >
-          <span className="group-hover:-translate-x-1 transition-transform">{'<<<'}</span>
-          Return_to_Hub
+          {'<<<'} RETURN_TO_HUB
         </button>
-        <span className="font-mono text-[10px] tracking-[0.4em] text-[#e3bf17]/40 uppercase">
-          Report_Summary_v2.0
-        </span>
+        <div className="font-jersey text-sm text-[#e3bf17]/40 tracking-[0.4em] uppercase text-right">
+          QUANT_ENGINE: ACTIVE // REPORT_ID: RS_V1.0 // STATUS: VERIFIED
+        </div>
       </div>
 
-      {/* Section tab bar (sticky below nav) */}
-      {state === 'loaded' && data && (
-        <div className="sticky top-[73px] z-10 bg-black/90 backdrop-blur px-10">
-          <TabBar tabs={sectionTabs} active={section} onSelect={id => setSection(id as Section)} />
+      <div className="flex w-full max-w-[1600px] mx-auto px-4 md:px-8 pt-24 pb-32 gap-8 relative items-start">
+        
+        {/* LEFT COLUMN */}
+        <div className="hidden xl:flex w-44 flex-col gap-1 sticky top-24 self-start max-h-[85vh] overflow-y-auto custom-scrollbar shrink-0">
+          <div className="border-b border-[#e3bf17]/30 pb-1 mb-1">
+            <h3 className="font-jersey text-base text-[#e3bf17]/60 tracking-widest uppercase">
+              TARGET_INDEX
+            </h3>
+          </div>
+          
+          {tickerDashboards.map((ticker, index) => {
+            const symbol = ticker.title.split(' ')[0]; 
+            return (
+              <button 
+                key={index}
+                onClick={() => scrollToTicker(symbol)}
+                className="group text-left border border-[#e3bf17]/20 bg-black/60 backdrop-blur-md py-1.5 px-3 hover:bg-[#e3bf17]/10 hover:border-[#e3bf17]/60 transition-all flex items-center justify-between overflow-hidden shrink-0"
+              >
+                <span className="font-jersey text-lg text-[#e3bf17] uppercase group-hover:tracking-wider transition-all whitespace-nowrap">
+                  {symbol}
+                </span>
+                <span className="font-mono text-[9px] text-[#e3bf17]/40 opacity-0 group-hover:opacity-100 transition-opacity ml-2 shrink-0">
+                  LOCATE
+                </span>
+              </button>
+            );
+          })}
         </div>
-      )}
 
-      <div className="flex-1 px-10 py-8 max-w-6xl mx-auto w-full">
-
-        {state === 'loading' && (
-          <div className="flex flex-col items-center justify-center h-64">
-            <p className="font-mono text-[#e3bf17]/60 text-sm animate-pulse tracking-widest">
-              FETCHING_DATA_STREAM...
+        {/* MIDDLE COLUMN: Main Content */}
+        <div className="flex-1 space-y-8 min-w-0">
+          <div className="border-l-4 border-[#e3bf17] bg-[#e3bf17]/5 p-8 backdrop-blur-md">
+            <h1 className="font-jersey text-8xl text-[#e3bf17] uppercase m-0 leading-none">
+              REPORT_SUMMARY
+            </h1>
+            <p className="font-jersey text-2xl text-[#e3bf17]/60 mt-4 tracking-[0.1em] uppercase">
+              SYSTEM_ANALYSIS_LOG // ARCHIVE_DATA_LOADED
             </p>
           </div>
-        )}
 
-        {state === 'no-data' && (
-          <div className="flex flex-col items-center justify-center h-64 gap-4">
-            <p className="font-mono text-[#e3bf17]/60 text-sm animate-pulse">[!] NO_ACTIVE_DATA_STREAM</p>
-            <p className="font-mono text-[#e3bf17]/30 text-xs tracking-widest">
-              Run the pipeline via Generate_Module first
-            </p>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12">
+            <div className="border border-[#e3bf17]/20 p-5 bg-black/40">
+              <p className="font-jersey text-sm text-[#e3bf17]/40 uppercase mb-2">Algorithm_Win_Rate</p>
+              <p className="font-jersey text-4xl text-[#e3bf17]">0.0%</p>
+            </div>
+            <div className="border border-[#e3bf17]/20 p-5 bg-black/40">
+              <p className="font-jersey text-sm text-[#e3bf17]/40 uppercase mb-2">Profit_Factor</p>
+              <p className="font-jersey text-4xl text-zinc-600">N/A</p>
+            </div>
+            <div className="border border-[#e3bf17]/20 p-5 bg-black/40">
+              <p className="font-jersey text-sm text-[#e3bf17]/40 uppercase mb-2">System_State</p>
+              <p className="font-jersey text-4xl text-[#e3bf17] animate-pulse uppercase">Idle</p>
+            </div>
           </div>
-        )}
 
-        {state === 'error' && (
-          <div className="flex flex-col items-center justify-center h-64">
-            <p className="font-mono text-red-400/80 text-sm">[!] STREAM_ERROR — check api_server.py</p>
-          </div>
-        )}
+          {/* --- DYNAMIC TICKER DASHBOARDS --- */}
+          {tickerDashboards.map((ticker, index) => {
+            const symbol = ticker.title.split(' ')[0];
+            return (
+              <div 
+                id={`ticker-${symbol}`} 
+                key={index} 
+                className="border border-[#e3bf17]/20 p-8 bg-black/40 rounded-3xl mb-16 relative overflow-hidden scroll-mt-32"
+              >
+                <div className="absolute top-0 right-0 w-64 h-64 bg-[#e3bf17]/5 blur-[100px] rounded-full pointer-events-none"></div>
 
-        {state === 'loaded' && data && (
-          <div className="pt-6">
-            {section === 'overview'  && <OverviewSection  data={data} />}
-            {section === 'tickers'   && <TickersSection   data={data} />}
-            {section === 'regime'    && <RegimeSection    data={data} />}
-            {section === 'strategy'  && <StrategySection  data={data} />}
+                <h2 className="font-jersey text-4xl text-[#e3bf17] uppercase mb-8 border-b border-[#e3bf17]/10 pb-4 relative z-10 flex items-center gap-4">
+                  <span className="bg-[#e3bf17] text-black px-4 py-1 rounded-sm text-3xl">TARGET</span>
+                  {ticker.title}
+                </h2>
+
+                <div className="grid grid-cols-1 xl:grid-cols-2 gap-8 relative z-10">
+                  
+                  {/* Left Side: Stats, Description, & Trades */}
+                  <div className="space-y-6">
+                    <div className="space-y-4">
+                      {ticker.spyLine && (
+                        <div className="flex justify-between items-center bg-black/80 border border-[#e3bf17]/30 p-4 rounded-lg shadow-lg">
+                          <span className="font-jersey text-xl text-[#e3bf17]/60 tracking-wider uppercase">{ticker.spyLine.split(':')[0]}</span>
+                          <span className="font-mono text-2xl text-[#e3bf17] font-bold">{ticker.spyLine.split(':')[1]}</span>
+                        </div>
+                      )}
+                      {ticker.tickerLine && (
+                        <div className="flex justify-between items-center bg-[#e3bf17]/10 border border-[#e3bf17]/50 p-4 rounded-lg shadow-lg">
+                          <span className="font-jersey text-xl text-[#e3bf17]/80 tracking-wider uppercase">{ticker.tickerLine.split(':')[0]}</span>
+                          <span className="font-mono text-2xl text-[#e3bf17] font-bold">{ticker.tickerLine.split(':')[1]}</span>
+                        </div>
+                      )}
+                      {ticker.description && (
+                        <div className="bg-black/40 border-l-4 border-[#e3bf17]/40 p-5 rounded-r-lg mt-4 shadow-inner">
+                          <p className="font-mono text-sm text-[#e3bf17]/80 leading-relaxed m-0">{ticker.description}</p>
+                        </div>
+                      )}
+                    </div>
+
+                    {ticker.bestTrades && (
+                      <div className="prose prose-invert prose-yellow max-w-none bg-black/50 p-5 border-l-4 border-green-500 border-y border-r border-[#e3bf17]/10 rounded-r-xl shadow-lg">
+                        <ReactMarkdown components={sharedMarkdownComponents}>{ticker.bestTrades}</ReactMarkdown>
+                      </div>
+                    )}
+
+                    {ticker.worstTrades && (
+                      <div className="prose prose-invert prose-yellow max-w-none bg-black/50 p-5 border-l-4 border-red-500 border-y border-r border-[#e3bf17]/10 rounded-r-xl shadow-lg">
+                        <ReactMarkdown components={sharedMarkdownComponents}>{ticker.worstTrades}</ReactMarkdown>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Right Side: Designed Terminal Data Grids */}
+                  <div className="space-y-0">
+                    {ticker.walkForward && (
+                      <div className="prose prose-invert prose-yellow max-w-none">
+                        <ReactMarkdown components={sharedMarkdownComponents}>{ticker.walkForward}</ReactMarkdown>
+                      </div>
+                    )}
+                    {ticker.returnDist && (
+                      <div className="prose prose-invert prose-yellow max-w-none">
+                        <ReactMarkdown components={sharedMarkdownComponents}>{ticker.returnDist}</ReactMarkdown>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+          {/* ------------------------------------ */}
+
+          {/* FULL MARKDOWN TEXT RENDERING */}
+          <div className="border border-[#e3bf17]/20 p-12 bg-black/40 rounded-br-3xl">
+            <div className="prose prose-invert prose-yellow max-w-none">
+              <ReactMarkdown components={sharedMarkdownComponents}>
+                {rawContent}
+              </ReactMarkdown>
+            </div>
           </div>
-        )}
+        </div>
+
+        {/* RIGHT COLUMN */}
+        <div className="hidden lg:flex w-44 flex-col gap-1 sticky top-24 self-start max-h-[85vh] overflow-y-auto custom-scrollbar shrink-0">
+          <div className="border-b border-[#e3bf17]/30 pb-1 mb-1">
+            <h3 className="font-jersey text-base text-[#e3bf17]/60 tracking-widest uppercase">
+              DATA_INDEX
+            </h3>
+          </div>
+          
+          {categories.map((category, index) => (
+            <button 
+              key={index}
+              onClick={() => scrollToSection(category)}
+              className="group text-left border border-[#e3bf17]/20 bg-black/60 backdrop-blur-md py-1.5 px-3 hover:bg-[#e3bf17]/10 hover:border-[#e3bf17]/60 transition-all flex items-center justify-between overflow-hidden shrink-0"
+            >
+              <span className="font-jersey text-[16px] text-[#e3bf17] uppercase group-hover:tracking-wider transition-all whitespace-nowrap">
+                {category}
+              </span>
+              <span className="font-mono text-[9px] text-[#e3bf17]/40 opacity-0 group-hover:opacity-100 transition-opacity ml-2 shrink-0">
+                JUMP
+              </span>
+            </button>
+          ))}
+        </div>
+
       </div>
     </motion.div>
   );
