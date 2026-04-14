@@ -145,3 +145,8 @@ No report available yet	-> Pipeline hasn't completed yet, or it errored mid-run
 409 A pipeline run is already in progress	->   Wait for the current run to finish
 Frontend can't reach backend	-> Make sure the backend is on port 8000; Vite proxies /api to it
 Benzinga errors ->	Check your .env has BENZINGA_API set correctly
+If there is error when you run api_server.py just paste code below on the cmd:
+rmdir /s /q node_modules
+del package-lock.json
+npm cache clean --force
+npm install
