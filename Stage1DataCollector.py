@@ -38,8 +38,8 @@ STOCK_CHANNELS    = "News"
 GLOBAL_CHANNELS   = "Global,Economics,Markets"
 INDUSTRY_CHANNELS = "Healthcare,Technology,Energy,Finance,Industrials,ConsumerGoods"
 
-# S&P 500 watchlist — top ~150 by market cap
-# Benzinga ticker-filtered news will only tag articles that mention these symbols
+# S&P 500 watchlist — top ~150 by market cap (kept as fallback)
+# When dynamic universe is enabled, this is expanded to 2000+ tickers
 SP500_WATCHLIST = [
     "AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","BRK.B","AVGO","JPM",
     "LLY","UNH","V","XOM","MA","COST","HD","PG","ORCL","WMT","BAC","ABBV",
@@ -54,6 +54,39 @@ SP500_WATCHLIST = [
     "CRWD","SNOW","COIN","PLTR","SOFI","RBLX","RIVN","LCID","NIO","BIDU",
     "JNJ","GE","HON","MMM","BA","DIS","SBUX","NKE","PYPL","SQ","SHOP",
 ]
+
+# Whether to build the watchlist dynamically from multiple sources
+# Set to False to use only the hardcoded SP500_WATCHLIST above
+_USE_DYNAMIC_UNIVERSE = True
+_dynamic_watchlist_cache: dict[str, list[str]] = {}
+
+
+def _build_watchlist(cache_dir: str = "data/cache", mode: str = "broad") -> list[str]:
+    """
+    Build the watchlist — dynamically expanded beyond S&P 500 when
+    _USE_DYNAMIC_UNIVERSE is True, otherwise falls back to hardcoded list.
+    Results are cached by mode for the process lifetime.
+    """
+    if mode in _dynamic_watchlist_cache:
+        return _dynamic_watchlist_cache[mode]
+
+    if not _USE_DYNAMIC_UNIVERSE:
+        _dynamic_watchlist_cache[mode] = list(SP500_WATCHLIST)
+        return _dynamic_watchlist_cache[mode]
+
+    try:
+        from stock_universe import StockUniverseBuilder
+        builder = StockUniverseBuilder(cache_dir=cache_dir)
+        expanded = builder.build(mode=mode)
+        print(f"  [Watchlist] Dynamic universe: {len(expanded)} tickers "
+              f"(vs {len(SP500_WATCHLIST)} in hardcoded S&P 500 list)")
+        _dynamic_watchlist_cache[mode] = expanded
+        return expanded
+    except Exception as e:
+        print(f"  [Watchlist] Dynamic universe build failed ({e}), "
+              f"falling back to {len(SP500_WATCHLIST)} hardcoded tickers")
+        _dynamic_watchlist_cache[mode] = list(SP500_WATCHLIST)
+        return _dynamic_watchlist_cache[mode]
 
 # ──────────────────────────────────────────────────────────────
 # Scoring: keyword lists
@@ -481,7 +514,7 @@ class Stage1DataCollector:
             result[source] = df
 
         # Ticker-specific news (Option B: Benzinga tickers= param)
-        wl   = watchlist if watchlist is not None else SP500_WATCHLIST
+        wl   = watchlist if watchlist is not None else _build_watchlist(self.cache_dir)
         rows = self._collect_ticker_news(date, wl)
         df   = pd.DataFrame(rows)
         if not df.empty:

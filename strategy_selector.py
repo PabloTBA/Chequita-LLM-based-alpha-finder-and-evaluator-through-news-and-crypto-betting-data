@@ -6,20 +6,6 @@ deterministic rule-based algorithm (no LLM numeric decisions).  The LLM is
 called once only to produce a plain-English explanation of the final params
 for the report — it has no influence on the numbers.
 
-<<<<<<< HEAD
-Regime -> Strategy mapping  (see _REGIME_TO_STRATEGY for the authoritative dict)
---------------------------
-    Trending-Up      -> Momentum           (follow the confirmed uptrend)
-    Trending-Down    -> Mean-Reversion     (fade oversold exhaustion within the
-                                            downtrend; long-only VolatilityBreakout
-                                            buying above the upper-BB fights the trend)
-    High-Volatility  -> VolatilityBreakout  (BB squeeze → expansion alpha)
-    Crisis           -> VolatilityBreakout  (trade the next breakout, not the dip)
-    Mean-Reverting   -> AlphaCombined       (multi-factor MR signal)
-    Low-Volatility   -> MLSignal            (quiet markets: ML detects subtle patterns)
-    Neutral          -> MLSignal            (no strong structural signal: let ML decide)
-    Event-Driven     -> EventDriven         (post-earnings PEAD drift)
-=======
 Regime -> Strategy mapping (current)
 ------------------------------------
     Trending-Up      -> Momentum                (follow trend long)
@@ -33,7 +19,6 @@ Regime -> Strategy mapping (current)
     Neutral          -> MLSignal                (no structural bias — learn from data)
     Joint Crisis     -> All strategies tightened via `joint_crisis` flag
                         (market crisis ATR > 6% AND news bearish w/ ≥2 active risks)
->>>>>>> main
 
 Parameter adjustment rules (Momentum)
 --------------------------------------
@@ -46,7 +31,7 @@ Parameter adjustment rules (Momentum)
     max_holding_days  : 20 base
         -> 30 if Hurst > 0.75   (very strong trend — allow longer ride)
     entry_lookback    : 10 (fixed)
-    ma_exit_period    : 50 (fixed — institutional 50d MA; 20d fired prematurely)
+    ma_exit_period    : 10 (fixed)
 
 Parameter adjustment rules (Mean-Reversion)
 --------------------------------------------
@@ -75,18 +60,13 @@ import json
 # ── PRD base templates ────────────────────────────────────────────────────────
 
 MOMENTUM_BASE: dict = {
-    "entry_lookback":       10,
-    "volume_multiplier":    1.2,
-    "trailing_stop_atr":    2.0,
-    "ma_exit_period":       50,    # widened from 20 → 50 — 20d MA fires too early in trending regimes,
-                                   # cutting winners short before the trend exhausts.
-                                   # 50d MA is the institutional standard for trend-following exits
-                                   # and aligns with the ~3-month holding horizon of Jegadeesh-Titman
-                                   # cross-sectional momentum (the regime this strategy exploits).
-    "stop_loss_atr":        1.5,
-    "max_holding_days":     20,
-    "momentum_lookback":    252,   # 12-1 month momentum gate: only enter if 11m return (skip last month) > 0
-    "momentum_gate_active": True,  # set False in Crisis/High-Vol to allow entries after crashes
+    "entry_lookback":    10,
+    "volume_multiplier": 1.2,
+    "trailing_stop_atr": 2.0,
+    "ma_exit_period":    20,    # widened from 10 — 10d MA fires too early, cutting winners short
+    "stop_loss_atr":     1.5,
+    "max_holding_days":  20,
+    "momentum_lookback": 252,   # 12-1 month momentum gate: only enter if 11m return (skip last month) > 0
 }
 
 MEAN_REVERSION_BASE: dict = {
@@ -202,28 +182,17 @@ EVENT_DRIVEN_BASE: dict = {
 
 _REGIME_TO_STRATEGY: dict[str, str] = {
     # Directional trend regimes
-    "Trending-Up":      "Momentum",          # follow the confirmed uptrend long
-    # Trending-Down: in a long-only system, VolatilityBreakout (which buys above the
-    # upper BB) fights the downtrend — the breakout signal fires against momentum, not
-    # with it.  Mean-Reversion fades oversold exhaustion within a downtrend, which is
-    # the correct long-only posture: wait for RSI compression and a lower-BB touch,
-    # capture the bounce, exit quickly.  If no oversold setup appears, no trade is taken.
-    "Trending-Down":    "Mean-Reversion",    # fade oversold exhaustion in the downtrend
+    "Trending-Up":      "Momentum",            # follow the trend long
+    "Trending-Down":    "AlphaCombined",        # multi-signal: idiosyncratic reversion + volume exhaustion
     # Volatility regimes
     "High-Volatility":  "VolatilityBreakout",  # squeeze → expansion alpha
     "Low-Volatility":   "MLSignal",             # quiet markets: ML detects subtle nonlinear patterns
-<<<<<<< HEAD
-    "Crisis":           "VolatilityBreakout",  # extreme vol: trade the next directional breakout, not the dip
-    # Statistical regimes
-    "Mean-Reverting":   "AlphaCombined",        # primary regime for multi-factor MR
-=======
     "Crisis":           "AlphaCombined",        # extreme moves: use alpha signal with tight stops
     # Statistical regimes — Mean-Reverting is special-cased in _route_strategy()
     # and may map to either "Mean-Reversion" (classical RSI/BB, low-vol) or
     # "AlphaCombined" (multi-factor, normal/high-vol). The entry here is the
     # default fallback if atr_pct cannot be evaluated.
     "Mean-Reverting":   "AlphaCombined",
->>>>>>> main
     "Neutral":          "MLSignal",             # no strong structural bias: ML learns from data
     # Exogenous event regime — dedicated PEAD strategy
     "Event-Driven":     "EventDriven",          # post-earnings drift: enter after blackout, ride PEAD
@@ -276,7 +245,7 @@ NEWS REASONING: {news_reasoning}
 AVAILABLE STRATEGY CLASSES:
 1. Momentum            — N-day high breakout + volume confirmation. Edge: trend persistence (Hurst > 0.55).
 2. Mean-Reversion      — RSI oversold + below lower Bollinger Band. Edge: oscillation in low-Hurst assets.
-3. VolatilityBreakout  — BB squeeze → expansion + ATR surge. Edge: compressed volatility preceding directional move. Works in both up and down breakouts — direction-agnostic.
+3. VolatilityBreakout  — BB squeeze → expansion + ATR surge. Edge: compressed volatility preceding directional move.
 4. AlphaCombined       — Cross-sectional multi-factor signal (CS-MR + residual + vol-spike + momentum). Edge: diversified alpha, higher trade frequency, market-neutral component.
 5. MLSignal            — Gradient-boosting ML probability signal. Edge: learns nonlinear patterns from lagged features in low-structural-bias regimes.
 6. EventDriven         — Post-Earnings Announcement Drift (PEAD): enter after blackout, ride earnings gap drift. Edge: systematic under-reaction to earnings surprises (Bernard & Thomas 1989).
@@ -412,6 +381,15 @@ def _compute_alpha_combined_params(
         rules.append(
             "Event-Driven: max_holding_days=7, alpha_threshold=0.45 "
             "(target post-event gap fill within 7 bars)"
+        )
+
+    # Trending-Down: want stronger reversion signal before buying the dip
+    if regime_label == "Trending-Down":
+        p["alpha_threshold"]   = 0.55   # require stronger signal in downtrend
+        p["max_holding_days"]  = 7
+        rules.append(
+            "Trending-Down: alpha_threshold=0.55, max_holding_days=7 "
+            "(only trade strongest idiosyncratic bounce signals)"
         )
 
     # High ATR: widen stops slightly
@@ -589,65 +567,6 @@ def _compute_pair_trading_params(
     return p, rules
 
 
-def _apply_market_state_overrides(
-    params: dict,
-    rule_log: list[str],
-    strategy: str,
-    market_state: str,
-) -> tuple[dict, list[str]]:
-    """
-    Apply portfolio-level market state overrides on top of per-ticker regime params.
-
-    Crisis
-    ------
-    - Disable 12-1 month momentum gate (momentum_gate_active = False).
-      Rationale: 12-1m gate filters out tickers that crashed recently — which is
-      exactly the universe in a crisis. The gate is designed for normal trending
-      markets; keeping it active in a crash guarantees zero entries.
-    - Cap max_holding_days at 5 days across ALL strategies.
-      Rationale: holding 10-30 days through a crash gets whipsawed by 5-10%
-      intraday reversals. Short holds cut risk; the market can reverse completely
-      in days during panic conditions.
-
-    High-Volatility
-    ---------------
-    - Cap max_holding_days at 10 days across ALL strategies.
-      Rationale: elevated vol means larger intraday noise relative to signal;
-      shorter holds reduce the probability of being stopped out by noise rather
-      than signal.
-    - Tighten volume_multiplier for entry confirmation where applicable.
-    """
-    import copy as _copy
-    p = _copy.deepcopy(params)
-
-    if market_state == "Crisis":
-        # Disable 12-1 month momentum gate
-        if "momentum_gate_active" in p:
-            p["momentum_gate_active"] = False
-            rule_log.append(
-                "[MarketState=Crisis] momentum_gate_active=False — "
-                "12-1m gate disabled; gate is calibrated for trending markets, not crashes"
-            )
-        # Cap holding days to 5 across all strategies
-        if p.get("max_holding_days", 999) > 5:
-            p["max_holding_days"] = 5
-            rule_log.append(
-                f"[MarketState=Crisis] max_holding_days capped at 5 — "
-                f"holding > 5 days through a crash risks full reversal whipsaw"
-            )
-
-    elif market_state == "High-Volatility":
-        # Cap holding days to 10 across all strategies
-        if p.get("max_holding_days", 999) > 10:
-            p["max_holding_days"] = 10
-            rule_log.append(
-                f"[MarketState=High-Volatility] max_holding_days capped at 10 — "
-                f"elevated vol shortens the signal-to-noise window"
-            )
-
-    return p, rule_log
-
-
 class StrategySelector:
     def __init__(self, llm_client: callable, verbose: bool = False):
         self.llm_client = llm_client
@@ -659,18 +578,12 @@ class StrategySelector:
 
     def select(self, ticker: str, regime: dict,
                ohlcv_features: dict, macro: dict,
-               ticker_verdict: dict | None = None,
-               market_state: str = "Normal") -> dict:
+               ticker_verdict: dict | None = None) -> dict:
         """
         Deterministically compute strategy parameters, then call LLM twice:
           1. Alpha hypothesis: does the LLM agree with the regime-rule strategy?
              If it disagrees, the disagreement is logged as a signal for the trader.
           2. Reasoning: plain-English explanation of the final params.
-
-        market_state : "Normal" | "High-Volatility" | "Crisis"
-            Portfolio-level market environment from MarketStateDetector.
-            Crisis  → disable 12-1m momentum gate; cap max_holding_days at 5.
-            High-Vol → cap max_holding_days at 10; tighten entry thresholds.
         """
         regime_label = regime.get("regime", "Neutral")
         atr_pct      = float(regime.get("atr_pct", 0.02))
@@ -721,29 +634,17 @@ class StrategySelector:
             )
 
         # ── Regime-specific overrides ─────────────────────────────────────────
-        # Crisis downgrade guard: Momentum is structurally wrong in panic regimes
-        # (trend-following buys into collapsing tapes). If anything hand-routes
-        # Momentum into a Crisis regime, force a downgrade to VolatilityBreakout
-        # — the correct crisis posture (wait for directional expansion, not dip-buy).
+        # Crisis: tighten stops and shorten max hold to reduce exposure in panic conditions
         if regime_label == "Crisis" and strategy == "Momentum":
-            strategy        = "VolatilityBreakout"
-            base_params     = copy.deepcopy(_STRATEGY_TO_BASE[strategy])
-            adjusted_params, rule_log_vb = _compute_volatility_breakout_params(atr_pct, hurst)
-            rule_log.append("Crisis downgrade: Momentum -> VolatilityBreakout")
-            rule_log.extend(rule_log_vb)
+            adjusted_params["stop_loss_atr"]    = min(adjusted_params.get("stop_loss_atr", 1.5), 1.0)
+            adjusted_params["max_holding_days"] = min(adjusted_params.get("max_holding_days", 10), 5)
+            rule_log.append("Crisis override: stop_loss_atr <= 1.0, max_holding_days <= 5")
 
         # Trending-Down: tighten entry to only buy deep oversold, reduce hold
         if regime_label == "Trending-Down" and strategy == "Mean-Reversion":
             adjusted_params["rsi_entry_threshold"] = min(adjusted_params.get("rsi_entry_threshold", 30), 25)
             adjusted_params["max_holding_days"]    = min(adjusted_params.get("max_holding_days", 10), 8)
             rule_log.append("Trending-Down override: rsi_entry_threshold <= 25, max_holding_days <= 8")
-
-        # ── Market-state adaptive overrides ──────────────────────────────────
-        # Applied on top of regime overrides — portfolio-level environment takes
-        # precedence over per-ticker regime for holding-period risk management.
-        adjusted_params, rule_log = _apply_market_state_overrides(
-            adjusted_params, rule_log, strategy, market_state
-        )
 
         print(f"  [Strategy] {ticker}: {regime_label} -> {strategy} | "
               f"Hurst={hurst:.3f} ATR%={atr_pct:.2%} VolRatio={vol_ratio:.2f}")

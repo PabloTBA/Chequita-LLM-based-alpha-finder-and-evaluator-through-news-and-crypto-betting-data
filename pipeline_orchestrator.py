@@ -39,6 +39,9 @@ import pandas as pd
 
 
 # ── sector map for diversity enforcement ──────────────────────────────────────
+# Base map covers S&P 500 constituents.  _extend_sector_map() dynamically
+# fills in missing tickers via yfinance so the diversity cap works across
+# the full expanded universe, not just the hardcoded S&P 500 names.
 
 _SECTOR_MAP: dict[str, str] = {
     # Technology
@@ -123,16 +126,51 @@ def _deduplicate_aliases(tickers: list[str]) -> list[str]:
             if not (_TICKER_ALIASES.get(t) in ticker_set)]
 
 
+def _extend_sector_map(tickers: list[str]) -> dict[str, str]:
+    """
+    Build a merged sector map: base _SECTOR_MAP + yfinance lookups for unknown tickers.
+    Returns a NEW dict — does NOT mutate _SECTOR_MAP.
+    Unknown tickers that fail lookup are absent from the returned dict.
+    """
+    result = dict(_SECTOR_MAP)  # shallow copy
+    missing = [t for t in tickers if t not in result]
+    if not missing:
+        return result
+
+    for i in range(0, len(missing), 50):
+        batch = missing[i:i + 50]
+        try:
+            ticker_objects = __import__("yfinance").Tickers(" ".join(batch))
+            for t in batch:
+                try:
+                    info = ticker_objects.tickers.get(t)
+                    if info and hasattr(info, "info"):
+                        d = info.info or {}
+                        sector = d.get("sector") or d.get("industry") or ""
+                        if sector:
+                            result[t] = str(sector)
+                except Exception:
+                    pass
+            __import__("time").sleep(0.3)
+        except Exception as e:
+            print(f"  [SectorMap] Batch lookup failed: {e}")
+
+    return result
+
+
 def _enforce_sector_diversity(tickers: list[str], max_per_sector: int = _MAX_PER_SECTOR) -> list[str]:
     """
     Cap tickers per GICS sector to avoid concentrated bets.
-    Unknown tickers (not in _SECTOR_MAP) are treated as their own sector
+    Dynamically extends the sector map for unknown tickers via yfinance.
+    Tickers that still can't be resolved are treated as their own sector
     so they always pass through.
     """
+    sector_map = _extend_sector_map(tickers)
+
     sector_count: dict[str, int] = {}
     result: list[str] = []
     for ticker in tickers:
-        sector = _SECTOR_MAP.get(ticker)
+        sector = sector_map.get(ticker)
         if sector is None:
             result.append(ticker)   # unknown — let it through
             continue
@@ -348,6 +386,13 @@ class PipelineOrchestrator:
 
         tickers = top50["ticker"].tolist()
 
+        # max_markets cap: limit how many tickers proceed to OHLCV fetch
+        max_markets = self._cfg.get("max_markets", 100)
+        if len(tickers) > max_markets:
+            tickers = tickers[:max_markets]
+            top50 = top50.head(max_markets)
+            print(f"  [MaxMarkets] Capped prefilter to top {max_markets} tickers")
+
         # ── Stage 5: fetch OHLCV (tickers + SPY benchmark) ───────────────────
         print(f"[{_ts()}] [Stage 5] Fetching OHLCV for {len(tickers)} tickers + SPY benchmark ...")
         all_tickers = list(dict.fromkeys(tickers + ["SPY"]))  # deduplicate, preserve order
@@ -482,7 +527,25 @@ class PipelineOrchestrator:
         )
         shortlisted = shortlisted or tickers
         shortlisted = _deduplicate_aliases(shortlisted)
+        shortlisted = _enforce_sector_diversity(shortlisted)
         max_tickers = self._cfg.get("max_tickers", 15)
+
+        # ── Stage 6b: volume filter ──────────────────────────────────────────────
+        min_volume = self._cfg.get("min_volume", 0)
+        if min_volume > 0 and features:
+            dropped = []
+            for t in list(features):
+                adv = features[t].get("adv_20d", 0)
+                if adv < min_volume:
+                    dropped.append(t)
+                    del features[t]
+                    if t in tickers:
+                        tickers.remove(t)
+            if dropped:
+                print(f"  [Volume] Dropped {len(dropped)} ticker(s) below {min_volume:,} ADV: {dropped}")
+            # Also trim top50 so backfill candidates respect volume filter
+            if top50 is not None and not top50.empty and dropped:
+                top50 = top50[~top50["ticker"].isin(dropped)]
 
         # Backfill: if shortlist is below max_tickers, pull the next-best
         # candidates from top50 that are not already shortlisted.
@@ -1351,7 +1414,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MFT Alpha Finder pipeline")
     parser.add_argument("date",          nargs="?",  default=None,  help="Run date YYYY-MM-DD (default: yesterday UTC+8)")
     parser.add_argument("--days",        type=int,   default=7,     help="News summary window in days (default: 7, max: 14)")
-    parser.add_argument("--max-tickers", type=int,   default=15,       help="Max tickers to fully analyse (default: 15)")
+    parser.add_argument("--max-tickers", type=int,   default=15,    help="Max tickers to fully analyse (default: 15)")
+    parser.add_argument("--min-volume",  type=int,   default=0,     help="Minimum avg daily volume to include (default: 0 = no filter)")
+    parser.add_argument("--max-markets", type=int,   default=100,   help="Max tickers to prefilter from news (default: 100)")
     args = parser.parse_args()
 
     def llm(prompt: str) -> str:
@@ -1367,6 +1432,8 @@ if __name__ == "__main__":
         "initial_portfolio": 100_000.0,
         "window_days":       min(args.days, 14),
         "max_tickers":       args.max_tickers,
+        "min_volume":        args.min_volume,
+        "max_markets":       min(args.max_markets, 100),
     }
 
     date = args.date
