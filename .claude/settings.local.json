@@ -90,7 +90,17 @@
       "Bash(python -c \"from portfolio_manager import PortfolioManager; print\\(''import OK''\\)\")",
       "Bash(wc -l /c/Users/panal/Downloads/Chequita-LLM-based-alpha-finder-and-evaluator-through-news-and-crypto-betting-data/*.py)",
       "Bash(xargs wc:*)",
+<<<<<<< Updated upstream
       "Bash(npm --version)"
+=======
+      "Bash(python -c ':*)",
+      "Bash(npm install:*)",
+      "Bash(npx tsc:*)",
+      "Bash(npx vite:*)",
+      "mcp__plugin_claude-mem_mcp-search__smart_outline",
+      "mcp__plugin_claude-mem_mcp-search__get_observations",
+      "mcp__plugin_claude-mem_mcp-search__search"
+>>>>>>> Stashed changes
     ],
     "additionalDirectories": [
       "c:\\Users\\panal\\Downloads\\Chequita-LLM-based-alpha-finder-and-evaluator-through-news-and-crypto-betting-data"
