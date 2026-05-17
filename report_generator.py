@@ -203,17 +203,26 @@ class ReportGenerator:
             sig = s.get("current_signal", {})
             if sig.get("signal_active"):
                 active_any = True
-                setup = sig.get("setup", {})
+                setup     = sig.get("setup", {})
+                direction = str(setup.get("direction") or sig.get("direction") or "long").lower()
+                dir_tag   = "LONG" if direction == "long" else "SHORT"
+                order_verb = "Sell-to-open (short)" if direction == "short" else "Buy market order"
+                stop_side  = "(above entry)" if direction == "short" else "(below entry)"
                 lines += [
-                    f"### {ticker} — ENTER NOW ({s.get('strategy', '')})",
+                    f"### {ticker} — ENTER NOW ({s.get('strategy', '')}, {dir_tag})",
                     "",
-                    f"- **Order:** Market order at next session open (~${setup.get('entry_price', 0):,.2f})",
-                    f"- **Stop loss:** ${setup.get('stop_price', 0):,.2f} "
+                    f"- **Order:** {order_verb} at next session open (~${setup.get('entry_price', 0):,.2f})",
+                    f"- **Stop loss:** ${setup.get('stop_price', 0):,.2f} {stop_side} "
                     f"(risk ${setup.get('dollar_risk', 0):,.0f} = 1% of portfolio)",
                     f"- **Position size:** {setup.get('position_size', 0):,} shares",
                     f"- **Current ATR₁₄:** ${setup.get('current_atr', 0):,.2f}",
-                    "",
                 ]
+                if direction == "short":
+                    lines.append(
+                        "- **Short leg notes:** locate borrow first; "
+                        "~50 bps/yr borrow cost applies. Cover on stop, reversal, or max-hold."
+                    )
+                lines.append("")
         if not active_any:
             lines += [
                 "_No entry signals are active today across all qualified tickers._  ",
@@ -976,18 +985,20 @@ class ReportGenerator:
                 "",
             ]
 
-            # Trade log table
+            # Trade log table (Dir column shows L/S for AlphaCombined/MLSignal
+            # which can now trade both sides)
             blocks += [
                 "#### Trade Log",
                 "",
-                "| Entry Date | Entry $ | Exit Date | Exit $ | Days | Size | P&L | Exit Reason |",
-                "|------------|---------|-----------|--------|------|------|-----|-------------|",
+                "| Entry Date | Dir | Entry $ | Exit Date | Exit $ | Days | Size | P&L | Exit Reason |",
+                "|------------|-----|---------|-----------|--------|------|------|-----|-------------|",
             ]
             for t in trade_log:
                 edate = t["entry_date"].strftime("%Y-%m-%d") if hasattr(t["entry_date"], "strftime") else str(t["entry_date"])
                 xdate = t["exit_date"].strftime("%Y-%m-%d")  if hasattr(t["exit_date"],  "strftime") else str(t["exit_date"])
+                tdir  = str(t.get("direction", "long")).upper()[0]
                 blocks.append(
-                    f"| {edate} | {t['entry_price']:.2f} | {xdate} | {t['exit_price']:.2f}"
+                    f"| {edate} | {tdir} | {t['entry_price']:.2f} | {xdate} | {t['exit_price']:.2f}"
                     f" | {t['holding_days']} | {t['position_size']:.1f}"
                     f" | {t['pnl']:+.2f} | {t['exit_reason']} |"
                 )
@@ -1344,15 +1355,25 @@ class ReportGenerator:
                 lines.append(f"- WARNING: {w}")
 
         def _render_brief(b: dict, active_signal: bool) -> list[str]:
-            status = "ENTER NOW" if active_signal else "PENDING — conditions not yet met"
+            direction = str(b.get("direction") or "long").lower()
+            strategy  = b.get("strategy") or ""
+            dir_tag   = "LONG" if direction == "long" else "SHORT"
+            status    = (
+                f"ENTER NOW ({dir_tag})" if active_signal
+                else f"PENDING — conditions not yet met ({dir_tag} setup)"
+            )
+            stop_label = "Stop loss (above entry)" if direction == "short" else "Stop loss"
+
             out = [
                 "",
                 f"### {b['ticker']} — {status}",
                 "",
+                f"**Strategy:** {strategy}  |  **Direction:** {dir_tag}",
+                "",
                 "| Field | Value |",
                 "|-------|-------|",
                 f"| Entry price | ${b['entry_price']:,.2f} |" if b.get("entry_price") else "| Entry price | — |",
-                f"| Stop loss | ${b['stop_price']:,.2f} |" if b.get("stop_price") else "| Stop loss | — |",
+                f"| {stop_label} | ${b['stop_price']:,.2f} |" if b.get("stop_price") else f"| {stop_label} | — |",
                 f"| Position size | {b['position_size']:,} shares |",
                 f"| Dollar risk (1% rule) | ${b['dollar_risk']:,.0f} |",
                 f"| Slippage est. | ${b['slippage_per_share']:.4f}/share → ${b['slippage_total']:,.2f} total |",
@@ -1362,8 +1383,22 @@ class ReportGenerator:
             ]
             if b.get("target"):
                 out.append(f"| Mean-reversion target | ${b['target']:,.2f} |")
+
+            # Short-leg execution notes — spell out mechanics so the trader has
+            # everything they need to execute without leaving the report.
+            if direction == "short":
+                out += [
+                    "",
+                    "**Short execution notes:**",
+                    "- Sell to open at entry price (locate borrow first; route "
+                    "short-sale limit order)",
+                    "- Stop is set **above** entry — buy-to-cover if price breaches it",
+                    "- Borrow cost: ~50 bps/yr of notional (already modelled in backtest)",
+                    "- Exit rule: buy-to-cover on trailing stop, signal reversal, or max-hold",
+                ]
             if not active_signal:
                 out += ["", "**Conditions to watch (enter when ALL are met):**", ""]
+<<<<<<< HEAD
                 trig = b.get("entry_trigger")
                 is_str_trig = isinstance(trig, str)
 
@@ -1398,8 +1433,61 @@ class ReportGenerator:
                     out.append(f"- Close must **break above upper Bollinger Band (${trig:,.2f})**")
                     if b.get("squeeze_pct_threshold") is not None:
                         out.append(f"- BB width must be in the bottom {int(b.get('squeeze_pct_threshold', 0)*100 if isinstance(b.get('squeeze_pct_threshold'), float) else 20)}% of its rolling history (squeeze)")
+=======
+                trigger = b.get("entry_trigger")
+                # Dispatch by strategy name first (most reliable), then fall
+                # back to legacy shape-based detection for backward compat.
+                if strategy == "Momentum":
+                    if trigger is not None and b.get("volume_needed") is not None:
+                        out.append(f"- Price must close **above ${trigger:,.2f}** (N-day high breakout)")
+                        out.append(f"- Volume must exceed **{b['volume_needed']:,.0f} shares** (volume confirmation)")
+                elif strategy == "Mean-Reversion":
+                    if b.get("rsi_needed") is not None:
+                        out.append(
+                            f"- RSI(14) must drop **below {b['rsi_needed']}** (oversold) "
+                            "AND price ≤ lower Bollinger Band"
+                        )
+                elif strategy == "AlphaCombined":
+                    if trigger is not None:
+                        side = "SHORT entry fires below the mirror threshold" if direction == "short" else "LONG entry fires above threshold"
+                        out.append(f"- Entry condition: **{trigger}** (cross-sectional multi-factor alpha; {side})")
+                elif strategy == "MLSignal":
+                    if trigger is not None:
+                        side = (
+                            "SHORT entry when model probability < 1 − threshold"
+                            if direction == "short"
+                            else "LONG entry when model probability > threshold"
+                        )
+                        out.append(f"- Entry condition: **{trigger}** (walk-forward GBM classifier; {side})")
+                elif strategy == "EventDriven":
+                    if isinstance(trigger, str):
+                        out.append(f"- Entry condition: **{trigger}**")
+                    if b.get("pead_signal") is not None:
+                        out.append(f"- Current PEAD signal: **{b['pead_signal']:.2f}**")
+                    if b.get("volume_needed") is not None:
+                        out.append(f"- Volume must exceed **{b['volume_needed']:,.0f} shares** (post-earnings flow)")
+                    out.append("- Must be **outside** the ±3-bar earnings blackout window")
+                elif strategy == "VolatilityBreakout":
+                    if isinstance(trigger, (int, float)):
+                        out.append(f"- Close must **break above upper Bollinger Band (${trigger:,.2f})**")
+                    sq = b.get("squeeze_pct_threshold")
+                    if sq is not None:
+                        sq_pct = int(sq * 100) if isinstance(sq, float) else 20
+                        out.append(f"- BB width must be in the bottom {sq_pct}% of its rolling history (squeeze)")
+>>>>>>> main
                     if b.get("min_atr_expansion") is not None:
                         out.append(f"- ATR must expand to ≥{b['min_atr_expansion']}× its 20-day average (expansion confirmed)")
+                else:
+                    # Fallback: legacy shape-based dispatch for any unlabeled brief.
+                    if trigger is not None and b.get("volume_needed") is not None:
+                        out.append(f"- Price must close **above ${trigger:,.2f}** (breakout)")
+                        out.append(f"- Volume must exceed **{b['volume_needed']:,.0f} shares**")
+                    elif b.get("rsi_needed") is not None:
+                        out.append(f"- RSI(14) must drop **below {b['rsi_needed']}**")
+                    elif isinstance(trigger, str):
+                        out.append(f"- Entry condition: **{trigger}**")
+                    elif isinstance(trigger, (int, float)):
+                        out.append(f"- Close must **break above ${trigger:,.2f}**")
                 out.append("")
                 out.append("_Setup above is projected at current ATR/price. Actual size/stop will be recalculated at entry bar._")
             out.append(f"")

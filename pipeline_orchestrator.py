@@ -398,6 +398,69 @@ class PipelineOrchestrator:
                 ohlcv_raw,
             )
 
+        # ── Stage 5e: joint market+news crisis detector ──────────────────────
+        # Systemic risk-off circuit breaker. Fires when BOTH conditions are
+        # true simultaneously, producing a `joint_crisis` flag on the macro
+        # dict that StrategySelector reads to force AlphaCombined with Crisis
+        # parameters for every ticker (tighter stops, higher alpha threshold,
+        # shorter holds) regardless of its individual Hurst/ATR regime.
+        #
+        #   1. SPY 14d ATR / SPY close > 6% (ATR_CRISIS threshold — a market
+        #      event, not a single-stock event). Uses the same RegimeClassifier
+        #      ATR math so the threshold stays in lockstep with per-ticker logic.
+        #
+        #   2. Macro screener bias == "bearish" AND ≥2 active_macro_risks. One
+        #      bearish tweet doesn't trigger it — the news classifier must have
+        #      flagged multiple independent systemic risks (e.g. Fed hike +
+        #      credit-spread blowout + liquidity squeeze).
+        #
+        # Without this, the per-ticker Hurst regime would keep routing names
+        # like AAPL into Momentum during a Lehman-style panic.
+        try:
+            from regime_classifier import RegimeClassifier, ATR_CRISIS
+            _spy_df = (ohlcv_raw or {}).get("SPY")
+            _market_atr_pct: float | None = None
+            if _spy_df is not None and len(_spy_df) >= 30:
+                _clf = RegimeClassifier()
+                _high  = _spy_df["High"].astype(float).values
+                _low   = _spy_df["Low"].astype(float).values
+                _close = _spy_df["Close"].astype(float).values
+                _atr   = _clf._atr(_high, _low, _close, period=14)
+                if _close[-1] > 0:
+                    _market_atr_pct = float(_atr / _close[-1])
+
+            _bias           = str((macro or {}).get("market_bias", "neutral")).lower()
+            _active_risks   = list((macro or {}).get("active_macro_risks", []) or [])
+            _market_crisis  = (_market_atr_pct is not None) and (_market_atr_pct > ATR_CRISIS)
+            _news_crisis    = (_bias == "bearish") and (len(_active_risks) >= 2)
+            _joint_crisis   = bool(_market_crisis and _news_crisis)
+
+            if isinstance(macro, dict):
+                macro["joint_crisis"]    = _joint_crisis
+                macro["market_atr_pct"]  = _market_atr_pct
+                macro["market_crisis"]   = _market_crisis
+                macro["news_crisis"]     = _news_crisis
+
+            _mkt_str = f"{_market_atr_pct:.2%}" if _market_atr_pct is not None else "n/a"
+            if _joint_crisis:
+                print(
+                    f"[{_ts()}] [Stage 5e] JOINT CRISIS DETECTED — "
+                    f"SPY ATR%={_mkt_str} (>6%) AND bearish macro with "
+                    f"{len(_active_risks)} active risks. Forcing AlphaCombined "
+                    f"+ Crisis params for all tickers."
+                )
+            else:
+                print(
+                    f"[{_ts()}] [Stage 5e] Joint crisis check: "
+                    f"market_crisis={_market_crisis} (SPY ATR%={_mkt_str}), "
+                    f"news_crisis={_news_crisis} (bias={_bias}, "
+                    f"risks={len(_active_risks)}) — normal routing."
+                )
+        except Exception as _e:
+            print(f"[{_ts()}] [Stage 5e] Joint crisis detector failed: {_e} — defaulting to no override")
+            if isinstance(macro, dict):
+                macro.setdefault("joint_crisis", False)
+
         # ── Stage 6: compute features ─────────────────────────────────────────
         print(f"[{_ts()}] [Stage 6] Computing features ...")
         features: dict[str, Any] = {}
@@ -1299,7 +1362,7 @@ if __name__ == "__main__":
     config = {
         "benzinga_api_key":  os.getenv("BENZINGA_API"),
         "llm_client":        llm,
-        "output_dir":        "front-end/md",
+        "output_dir":        "reports",
         "cache_dir":         "data/cache",
         "initial_portfolio": 100_000.0,
         "window_days":       min(args.days, 14),

@@ -13,7 +13,7 @@ export const SystemManifesto = () => {
       </h2>
       
       <div className="space-y-6 font-mono text-lg text-[#e3bf17]/90 text-center max-w-2xl">
-        <p className="tracking-widest">[STATUS] ACTIVE_QUANT_LINK</p>
+        <p className="tracking-widest">[STATUS] A MEDIUM FREQUENCY QUANT RESEARCHER</p>
         <p>
           Chequita turns alpha ideas into actionable trades: precise 
           entries/exits, smart sizing, realistic holds explained clearly

@@ -214,7 +214,13 @@ class ExecutionAdvisor:
 
         return {
             "ticker":              ticker,
+            "strategy":            strat.get("strategy"),
             "signal_active":       signal_active,
+            # Trade direction — "long" (default) or "short". Populated by
+            # strategies that can go symmetric (AlphaCombined, MLSignal, and
+            # PairTrading legs). Read by the report renderer to pick the
+            # right entry/exit/stop copy and direction-specific trigger text.
+            "direction":           (setup.get("direction") or "long"),
             "bid":                 bid,
             "ask":                 ask,
             "spread":              spread,
@@ -237,6 +243,7 @@ class ExecutionAdvisor:
             "squeeze_pct_threshold": setup.get("squeeze_pct_threshold"),
             "min_atr_expansion":     setup.get("min_atr_expansion"),
             "atr_expansion_ratio":   setup.get("atr_expansion_ratio"),
+<<<<<<< HEAD
             # MLSignal conditions
             "ml_signal":             sig.get("ml_signal"),
             "ml_threshold":          sig.get("ml_threshold"),
@@ -244,6 +251,10 @@ class ExecutionAdvisor:
             "pead_signal":           sig.get("pead_signal"),
             "pead_threshold":        sig.get("pead_threshold"),
             "ma_filter_period":      setup.get("ma_filter_period", 5),
+=======
+            # EventDriven (PEAD) conditions
+            "pead_signal":         setup.get("pead_signal"),
+>>>>>>> main
             # ADV for market impact display
             "_adv":                adv,
         }, warnings

@@ -30,6 +30,7 @@ Design rationale
     structural regime information for any ticker with an upcoming earnings date,
     routing everything into AlphaCombined regardless of actual market structure.
 
+<<<<<<< HEAD
 Strategy mapping  (authoritative source: strategy_selector._REGIME_TO_STRATEGY)
 ----------------
     Trending-Up    → Momentum        (follow the confirmed uptrend)
@@ -42,6 +43,24 @@ Strategy mapping  (authoritative source: strategy_selector._REGIME_TO_STRATEGY)
     Low-Volatility → MLSignal           (quiet markets: ML detects subtle patterns)
     Event-Driven   → EventDriven        (post-earnings PEAD drift)
     Neutral        → MLSignal           (no strong structural bias; let ML decide)
+=======
+Strategy mapping (authoritative source: strategy_selector._route_strategy)
+---------------------------------------------------------------------------
+    Trending-Up    → Momentum            (follow direction)
+    Trending-Down  → AlphaCombined       (multi-factor idiosyncratic reversion)
+    High-Volatility→ VolatilityBreakout  (BB squeeze → expansion)
+    Low-Volatility → MLSignal            (subtle nonlinear patterns in quiet tape)
+    Mean-Reverting → Mean-Reversion      when ATR/price < 2% (classical RSI/BB)
+                   → AlphaCombined       otherwise (multi-factor MR)
+    Crisis         → AlphaCombined       (tight stops, tighter alpha threshold)
+    Event-Driven   → EventDriven         (PEAD drift after blackout lifts)
+    Neutral        → MLSignal            (no structural bias — model-driven)
+
+Joint-crisis override (from macro_screener): when the market is BOTH in an
+ATR-based crisis AND the news classifier reports a bearish bias with multiple
+active macro risks, every ticker is routed to AlphaCombined with Crisis-tight
+parameters regardless of its individual regime. See strategy_selector.
+>>>>>>> main
 
 Public interface
 ----------------

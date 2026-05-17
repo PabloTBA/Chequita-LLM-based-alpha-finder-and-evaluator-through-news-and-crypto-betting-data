@@ -1117,7 +1117,7 @@ class Backtester:
 
     def _run_alpha_combined(self, ohlcv: pd.DataFrame, params: dict, slip: float = 0.0) -> list[dict]:
         """
-        AlphaCombined strategy engine.
+        AlphaCombined strategy engine — LONG and SHORT legs.
 
         Alpha source: pre-computed cross-sectional multi-factor signal injected
         by AlphaEngine as the ``alpha_signal`` column.  The signal combines:
@@ -1126,15 +1126,29 @@ class Backtester:
           - Volume-spike exhaustion fade (20%)
           - 2-day short-term momentum (10%)
 
-        Entry:  alpha_signal > alpha_threshold  AND  not in earnings blackout
-        Exit (priority order):
+        The signal is inherently symmetric — a z-score of +0.8 implies a long
+        opportunity, −0.8 implies a mirror short opportunity. Treating it as
+        long-only throws away half the information and biases the strategy
+        toward up-markets.  Both legs share the same threshold magnitude.
+
+        Entries:
+          Long:  alpha_signal >  alpha_threshold  AND  not in blackout
+          Short: alpha_signal < -alpha_threshold  AND  not in blackout
+
+        Long exits (priority order):
           1. Hard stop  : close < entry - stop_loss_atr × ATR
           2. Trailing   : close < peak  - trailing_stop_atr × ATR
-          3. Reversal   : alpha_signal < reversal_threshold (signal flips negative)
+          3. Reversal   : alpha_signal < reversal_threshold
           4. Max hold   : holding_days ≥ max_holding_days
 
-        Trade frequency is much higher than RSI+BB because the cross-sectional
-        z-score threshold fires on the bottom ~30-40% of the universe each day.
+        Short exits (mirror):
+          1. Hard stop  : close > entry + stop_loss_atr × ATR
+          2. Trailing   : close > trough + trailing_stop_atr × ATR
+          3. Reversal   : alpha_signal > -reversal_threshold (signal flipped positive)
+          4. Max hold   : holding_days ≥ max_holding_days
+
+        Short PnL: (entry − exit) × size. Stock borrow cost charged at
+        BORROW_RATE_DAILY × notional × holding_days, deducted from gross PnL.
         """
         close  = ohlcv["Close"].astype(float)
         high   = ohlcv["High"].astype(float)
@@ -1162,14 +1176,17 @@ class Backtester:
 
         start = max(ATR_PERIOD + 5, 25)
 
-        trades       = []
-        in_position  = False
-        equity       = self.initial_portfolio
-        entry_price  = stop_price = trail_stop = pos_size = peak = 0.0
-        entry_date   = None
-        holding_days = 0
-        target_1r    = 0.0
-        reached_1r   = False
+        trades        = []
+        in_position   = False
+        direction: str | None = None          # "long" | "short"
+        equity        = self.initial_portfolio
+        entry_price   = stop_price = trail_stop = pos_size = 0.0
+        peak          = 0.0     # running high  — long leg
+        trough        = 0.0     # running low   — short leg
+        entry_date    = None
+        holding_days  = 0
+        target_1r     = 0.0
+        reached_1r    = False
 
         for i in range(start, len(ohlcv)):
             c = float(close.iloc[i])
@@ -1180,9 +1197,17 @@ class Backtester:
                 continue
 
             if not in_position:
-                if s > alpha_th and not bool(blackout.iloc[i]):
+                if bool(blackout.iloc[i]):
+                    continue
+                if s > alpha_th:
+                    # ── LONG entry ────────────────────────────────────────
                     in_position  = True
+<<<<<<< HEAD
                     entry_price  = c * (1 + slip)
+=======
+                    direction    = "long"
+                    entry_price  = c * (1 + self._slip)
+>>>>>>> main
                     entry_date   = close.index[i]
                     stop_price   = entry_price - stop_atr * a
                     trail_stop   = stop_price
@@ -1191,25 +1216,27 @@ class Backtester:
                     holding_days = 0
                     target_1r    = entry_price + stop_atr * a
                     reached_1r   = False
+                elif s < -alpha_th:
+                    # ── SHORT entry ───────────────────────────────────────
+                    # Short fill: seller receives bid-side fill, so entry price
+                    # is below mid by slippage (symmetric with long, which pays
+                    # the ask). Dollar risk per ATR of adverse move is the same.
+                    in_position  = True
+                    direction    = "short"
+                    entry_price  = c * (1 - self._slip)
+                    entry_date   = close.index[i]
+                    stop_price   = entry_price + stop_atr * a
+                    trail_stop   = stop_price
+                    pos_size     = (equity * RISK_PER_TRADE) / (stop_atr * a)
+                    trough       = c
+                    holding_days = 0
+                    target_1r    = entry_price - stop_atr * a
+                    reached_1r   = False
             else:
                 holding_days += 1
-                peak          = max(peak, c)
-                trail_stop    = max(peak - trail_atr * a, stop_price)
-                h_bar         = float(high.iloc[i])
-                if h_bar >= target_1r:
-                    reached_1r = True
-
                 exit_reason: str | None = None
-                if c < trail_stop:
-                    exit_reason = (
-                        "stop_loss" if trail_stop <= stop_price + 1e-6
-                        else "trailing_stop"
-                    )
-                elif s < rev_th:
-                    exit_reason = "alpha_reversal"
-                elif holding_days >= max_hold:
-                    exit_reason = "max_holding"
 
+<<<<<<< HEAD
                 if exit_reason:
                     exit_price  = c * (1 - slip)
                     gross_pnl   = (c - (entry_price / (1 + slip))) * pos_size
@@ -1223,24 +1250,113 @@ class Backtester:
                         reached_1r=reached_1r,
                     ))
                     in_position = False
+=======
+                if direction == "long":
+                    peak       = max(peak, c)
+                    trail_stop = max(peak - trail_atr * a, stop_price)
+                    h_bar      = float(high.iloc[i])
+                    if h_bar >= target_1r:
+                        reached_1r = True
+
+                    if c < trail_stop:
+                        exit_reason = (
+                            "stop_loss" if trail_stop <= stop_price + 1e-6
+                            else "trailing_stop"
+                        )
+                    elif s < rev_th:
+                        exit_reason = "alpha_reversal"
+                    elif holding_days >= max_hold:
+                        exit_reason = "max_holding"
+
+                    if exit_reason:
+                        exit_price = c * (1 - self._slip)
+                        gross_pnl  = (c - (entry_price / (1 + self._slip))) * pos_size
+                        pnl        = (exit_price - entry_price) * pos_size
+                        equity    += pnl
+                        trades.append(_make_trade(
+                            entry_date, entry_price, close.index[i], exit_price,
+                            holding_days, pos_size, pnl, exit_reason,
+                            gross_pnl=gross_pnl,
+                            slippage_cost=abs(gross_pnl - pnl),
+                            reached_1r=reached_1r,
+                            direction="long",
+                        ))
+                        in_position = False
+
+                else:  # direction == "short"
+                    trough     = min(trough, c)
+                    trail_stop = min(trough + trail_atr * a, stop_price)
+                    l_bar      = float(low.iloc[i])
+                    if l_bar <= target_1r:
+                        reached_1r = True
+
+                    if c > trail_stop:
+                        exit_reason = (
+                            "stop_loss" if trail_stop >= stop_price - 1e-6
+                            else "trailing_stop"
+                        )
+                    elif s > -rev_th:
+                        # reversal_threshold is negative (e.g. −0.5); the short
+                        # reversal trigger is alpha_signal > +|rev_th|, i.e. a
+                        # flip to strong positive signal.
+                        exit_reason = "alpha_reversal"
+                    elif holding_days >= max_hold:
+                        exit_reason = "max_holding"
+
+                    if exit_reason:
+                        exit_price  = c * (1 + self._slip)
+                        mid_entry   = entry_price / (1 - self._slip)
+                        gross_pnl   = (mid_entry - c) * pos_size
+                        pnl         = (entry_price - exit_price) * pos_size
+                        borrow_cost = (
+                            BORROW_RATE_DAILY * entry_price * pos_size * holding_days
+                        )
+                        pnl        -= borrow_cost
+                        equity     += pnl
+                        trades.append(_make_trade(
+                            entry_date, entry_price, close.index[i], exit_price,
+                            holding_days, pos_size, pnl, exit_reason,
+                            gross_pnl=gross_pnl,
+                            slippage_cost=abs(gross_pnl - pnl) - borrow_cost,
+                            reached_1r=reached_1r,
+                            direction="short",
+                            borrow_cost=borrow_cost,
+                        ))
+                        in_position = False
+>>>>>>> main
 
         return trades
 
     def _run_ml_signal(self, ohlcv: pd.DataFrame, params: dict, slip: float = 0.0) -> list[dict]:
         """
-        MLSignal strategy engine.
+        MLSignal strategy engine — LONG and SHORT legs.
 
         Alpha source: per-ticker gradient-boosting classifier probability
         injected by MLSignalEngine as the ``ml_signal`` column.  The signal
         represents P(5-day forward return > 0) and is fully out-of-sample
         (walk-forward trained) with all features shift(1)-lagged.
 
-        Entry:  ml_signal > ml_threshold  AND  not in earnings blackout
-        Exit (priority order):
+        Because ml_signal is a probability in [0, 1], the short threshold is
+        the mirror image of the long threshold across 0.5:
+            long  iff  ml_signal > ml_threshold              (e.g. > 0.60)
+            short iff  ml_signal < (1 − ml_threshold)        (e.g. < 0.40)
+        This keeps the expected-edge magnitude symmetric on both sides and
+        avoids throwing away the model's negative-direction conviction.
+
+        Long exits (priority order):
           1. Hard stop    : close < entry - stop_loss_atr × ATR
           2. Trailing     : close < peak  - trailing_stop_atr × ATR
-          3. ML reversal  : ml_signal < reversal_threshold (model loses conviction)
+          3. ML reversal  : ml_signal < reversal_threshold  (default 0.40)
           4. Max hold     : holding_days ≥ max_holding_days
+
+        Short exits (mirror):
+          1. Hard stop    : close > entry + stop_loss_atr × ATR
+          2. Trailing     : close > trough + trailing_stop_atr × ATR
+          3. ML reversal  : ml_signal > (1 − reversal_threshold)  (e.g. > 0.60)
+          4. Max hold     : holding_days ≥ max_holding_days
+
+        Short PnL: (entry − exit) × size, minus stock-borrow cost at
+        BORROW_RATE_DAILY × notional × holding_days.
 
         Falls back gracefully when ``ml_signal`` column is absent (returns []).
         """
@@ -1253,6 +1369,10 @@ class Backtester:
         stop_atr  = float(params.get("stop_loss_atr",      1.5))
         trail_atr = float(params.get("trailing_stop_atr",  2.0))
         max_hold  = int(params.get("max_holding_days",     10))
+
+        # Symmetric thresholds for short leg
+        short_entry_th   = 1.0 - ml_th          # e.g. 0.40 when ml_th=0.60
+        short_rev_th     = 1.0 - rev_th         # e.g. 0.60 when rev_th=0.40
 
         atr = self._atr(high, low, close)
 
@@ -1269,14 +1389,17 @@ class Backtester:
 
         start = max(ATR_PERIOD + 5, 25)
 
-        trades       = []
-        in_position  = False
-        equity       = self.initial_portfolio
-        entry_price  = stop_price = trail_stop = pos_size = peak = 0.0
-        entry_date   = None
-        holding_days = 0
-        target_1r    = 0.0
-        reached_1r   = False
+        trades        = []
+        in_position   = False
+        direction: str | None = None
+        equity        = self.initial_portfolio
+        entry_price   = stop_price = trail_stop = pos_size = 0.0
+        peak          = 0.0
+        trough        = 0.0
+        entry_date    = None
+        holding_days  = 0
+        target_1r     = 0.0
+        reached_1r    = False
 
         for i in range(start, len(ohlcv)):
             c = float(close.iloc[i])
@@ -1290,9 +1413,17 @@ class Backtester:
                 # Skip bars where ml_signal is not yet available (early history)
                 if np.isnan(s):
                     continue
-                if s > ml_th and not bool(blackout.iloc[i]):
+                if bool(blackout.iloc[i]):
+                    continue
+                if s > ml_th:
+                    # ── LONG entry ────────────────────────────────────────
                     in_position  = True
+<<<<<<< HEAD
                     entry_price  = c * (1 + slip)
+=======
+                    direction    = "long"
+                    entry_price  = c * (1 + self._slip)
+>>>>>>> main
                     entry_date   = close.index[i]
                     stop_price   = entry_price - stop_atr * a
                     trail_stop   = stop_price
@@ -1301,25 +1432,24 @@ class Backtester:
                     holding_days = 0
                     target_1r    = entry_price + stop_atr * a
                     reached_1r   = False
+                elif s < short_entry_th:
+                    # ── SHORT entry ───────────────────────────────────────
+                    in_position  = True
+                    direction    = "short"
+                    entry_price  = c * (1 - self._slip)
+                    entry_date   = close.index[i]
+                    stop_price   = entry_price + stop_atr * a
+                    trail_stop   = stop_price
+                    pos_size     = (equity * RISK_PER_TRADE) / (stop_atr * a)
+                    trough       = c
+                    holding_days = 0
+                    target_1r    = entry_price - stop_atr * a
+                    reached_1r   = False
             else:
                 holding_days += 1
-                peak          = max(peak, c)
-                trail_stop    = max(peak - trail_atr * a, stop_price)
-                h_bar         = float(high.iloc[i])
-                if h_bar >= target_1r:
-                    reached_1r = True
-
                 exit_reason: str | None = None
-                if c < trail_stop:
-                    exit_reason = (
-                        "stop_loss" if trail_stop <= stop_price + 1e-6
-                        else "trailing_stop"
-                    )
-                elif not np.isnan(s) and s < rev_th:
-                    exit_reason = "ml_reversal"
-                elif holding_days >= max_hold:
-                    exit_reason = "max_holding"
 
+<<<<<<< HEAD
                 if exit_reason:
                     exit_price = c * (1 - slip)
                     gross_pnl  = (c - (entry_price / (1 + slip))) * pos_size
@@ -1333,6 +1463,77 @@ class Backtester:
                         reached_1r=reached_1r,
                     ))
                     in_position = False
+=======
+                if direction == "long":
+                    peak       = max(peak, c)
+                    trail_stop = max(peak - trail_atr * a, stop_price)
+                    h_bar      = float(high.iloc[i])
+                    if h_bar >= target_1r:
+                        reached_1r = True
+
+                    if c < trail_stop:
+                        exit_reason = (
+                            "stop_loss" if trail_stop <= stop_price + 1e-6
+                            else "trailing_stop"
+                        )
+                    elif not np.isnan(s) and s < rev_th:
+                        exit_reason = "ml_reversal"
+                    elif holding_days >= max_hold:
+                        exit_reason = "max_holding"
+
+                    if exit_reason:
+                        exit_price = c * (1 - self._slip)
+                        gross_pnl  = (c - (entry_price / (1 + self._slip))) * pos_size
+                        pnl        = (exit_price - entry_price) * pos_size
+                        equity    += pnl
+                        trades.append(_make_trade(
+                            entry_date, entry_price, close.index[i], exit_price,
+                            holding_days, pos_size, pnl, exit_reason,
+                            gross_pnl=gross_pnl,
+                            slippage_cost=abs(gross_pnl - pnl),
+                            reached_1r=reached_1r,
+                            direction="long",
+                        ))
+                        in_position = False
+
+                else:  # direction == "short"
+                    trough     = min(trough, c)
+                    trail_stop = min(trough + trail_atr * a, stop_price)
+                    l_bar      = float(low.iloc[i])
+                    if l_bar <= target_1r:
+                        reached_1r = True
+
+                    if c > trail_stop:
+                        exit_reason = (
+                            "stop_loss" if trail_stop >= stop_price - 1e-6
+                            else "trailing_stop"
+                        )
+                    elif not np.isnan(s) and s > short_rev_th:
+                        exit_reason = "ml_reversal"
+                    elif holding_days >= max_hold:
+                        exit_reason = "max_holding"
+
+                    if exit_reason:
+                        exit_price  = c * (1 + self._slip)
+                        mid_entry   = entry_price / (1 - self._slip)
+                        gross_pnl   = (mid_entry - c) * pos_size
+                        pnl         = (entry_price - exit_price) * pos_size
+                        borrow_cost = (
+                            BORROW_RATE_DAILY * entry_price * pos_size * holding_days
+                        )
+                        pnl        -= borrow_cost
+                        equity     += pnl
+                        trades.append(_make_trade(
+                            entry_date, entry_price, close.index[i], exit_price,
+                            holding_days, pos_size, pnl, exit_reason,
+                            gross_pnl=gross_pnl,
+                            slippage_cost=abs(gross_pnl - pnl) - borrow_cost,
+                            reached_1r=reached_1r,
+                            direction="short",
+                            borrow_cost=borrow_cost,
+                        ))
+                        in_position = False
+>>>>>>> main
 
         return trades
 
@@ -1858,7 +2059,15 @@ class Backtester:
     def _alpha_combined_signal(
         self, ohlcv: pd.DataFrame, params: dict, portfolio: float
     ) -> dict:
-        """Current-bar signal check for AlphaCombined strategy."""
+        """
+        Current-bar signal check for AlphaCombined strategy — long and short.
+
+        Emits `direction` on both `setup` and `projected_setup` so the
+        execution advisor and report generator can render the brief correctly.
+        When |alpha_signal| is in neither tail the projected setup defaults to
+        the long side (the trader is watching for either breakout; the report
+        shows which threshold needs to trip).
+        """
         close = ohlcv["Close"].astype(float)
         high  = ohlcv["High"].astype(float)
         low   = ohlcv["Low"].astype(float)
@@ -1874,16 +2083,22 @@ class Backtester:
             alpha_sig = pd.Series(0.0, index=ohlcv.index)
 
         c = float(close.iloc[-1])
-        a = float(atr.iloc[-1])   if not pd.isna(atr.iloc[-1])        else 0.0
+        a = float(atr.iloc[-1])       if not pd.isna(atr.iloc[-1])       else 0.0
         s = float(alpha_sig.iloc[-1]) if not pd.isna(alpha_sig.iloc[-1]) else 0.0
 
-        active = s > alpha_th
+        long_active  = s >  alpha_th
+        short_active = s < -alpha_th
+        active       = long_active or short_active
+        direction    = "long" if long_active else ("short" if short_active else None)
 
         setup = None
         if active and a > 0:
             stop_dist   = stop_atr * a
             pos_size    = int((portfolio * RISK_PER_TRADE) / stop_dist)
-            stop_price  = c - stop_dist
+            if direction == "long":
+                stop_price = c - stop_dist
+            else:
+                stop_price = c + stop_dist
             setup = {
                 "entry_price":   c,
                 "stop_price":    stop_price,
@@ -1892,13 +2107,24 @@ class Backtester:
                 "dollar_risk":   portfolio * RISK_PER_TRADE,
                 "current_atr":   a,
                 "target":        None,
+                "direction":     direction,
             }
 
         projected_setup = None
         if a > 0:
+            # Pending setup: default to long side (trader watches the stronger
+            # of the two thresholds). Direction will flip when the short
+            # threshold is actually breached at live time.
+            proj_dir   = direction or "long"
             stop_dist  = stop_atr * a
-            proj_entry = c * (1 + self._slip)
-            proj_stop  = proj_entry - stop_dist
+            if proj_dir == "long":
+                proj_entry = c * (1 + self._slip)
+                proj_stop  = proj_entry - stop_dist
+                trigger    = f"alpha_signal > {alpha_th:.2f}"
+            else:
+                proj_entry = c * (1 - self._slip)
+                proj_stop  = proj_entry + stop_dist
+                trigger    = f"alpha_signal < -{alpha_th:.2f}"
             proj_size  = int((portfolio * RISK_PER_TRADE) / stop_dist)
             projected_setup = {
                 "entry_price":   proj_entry,
@@ -1908,31 +2134,40 @@ class Backtester:
                 "dollar_risk":   portfolio * RISK_PER_TRADE,
                 "current_atr":   a,
                 "target":        None,
-                "entry_trigger": f"alpha_signal > {alpha_th:.2f}",
+                "entry_trigger": trigger,
+                "direction":     proj_dir,
             }
 
         return {
             "signal_active":    active,
+            "direction":        direction,
             "close":            c,
             "alpha_signal":     s,
             "alpha_threshold":  alpha_th,
             "setup":            setup,
             "projected_setup":  projected_setup,
             "details": (
-                f"alpha_signal {s:.3f} {'>' if active else '<='} threshold {alpha_th:.2f}"
+                f"alpha_signal {s:.3f} vs ±{alpha_th:.2f} "
+                f"[{'LONG' if long_active else 'SHORT' if short_active else 'flat'}]"
             ),
         }
 
     def _ml_signal_signal(
         self, ohlcv: pd.DataFrame, params: dict, portfolio: float
     ) -> dict:
-        """Current-bar signal check for MLSignal strategy."""
+        """
+        Current-bar signal check for MLSignal strategy — long and short.
+
+        Because ml_signal is a probability in [0, 1], short entries use the
+        symmetric lower threshold (1 − ml_threshold).
+        """
         close = ohlcv["Close"].astype(float)
         high  = ohlcv["High"].astype(float)
         low   = ohlcv["Low"].astype(float)
 
         ml_th    = float(params.get("ml_threshold",  0.60))
         stop_atr = float(params.get("stop_loss_atr", 1.5))
+        short_entry_th = 1.0 - ml_th
 
         atr = self._atr(high, low, close)
 
@@ -1945,13 +2180,20 @@ class Backtester:
         a = float(atr.iloc[-1])    if not pd.isna(atr.iloc[-1])    else 0.0
         s = float(ml_sig.iloc[-1]) if not pd.isna(ml_sig.iloc[-1]) else np.nan
 
-        active = (not np.isnan(s)) and s > ml_th
+        has_s        = not np.isnan(s)
+        long_active  = has_s and s > ml_th
+        short_active = has_s and s < short_entry_th
+        active       = long_active or short_active
+        direction    = "long" if long_active else ("short" if short_active else None)
 
         setup = None
         if active and a > 0:
             stop_dist   = stop_atr * a
             pos_size    = int((portfolio * RISK_PER_TRADE) / stop_dist)
-            stop_price  = c - stop_dist
+            if direction == "long":
+                stop_price = c - stop_dist
+            else:
+                stop_price = c + stop_dist
             setup = {
                 "entry_price":   c,
                 "stop_price":    stop_price,
@@ -1960,13 +2202,21 @@ class Backtester:
                 "dollar_risk":   portfolio * RISK_PER_TRADE,
                 "current_atr":   a,
                 "target":        None,
+                "direction":     direction,
             }
 
         projected_setup = None
         if a > 0:
-            stop_dist  = stop_atr * a
-            proj_entry = c * (1 + self._slip)
-            proj_stop  = proj_entry - stop_dist
+            proj_dir  = direction or "long"
+            stop_dist = stop_atr * a
+            if proj_dir == "long":
+                proj_entry = c * (1 + self._slip)
+                proj_stop  = proj_entry - stop_dist
+                trigger    = f"ml_signal > {ml_th:.2f}"
+            else:
+                proj_entry = c * (1 - self._slip)
+                proj_stop  = proj_entry + stop_dist
+                trigger    = f"ml_signal < {short_entry_th:.2f}"
             proj_size  = int((portfolio * RISK_PER_TRADE) / stop_dist)
             projected_setup = {
                 "entry_price":   proj_entry,
@@ -1976,19 +2226,23 @@ class Backtester:
                 "dollar_risk":   portfolio * RISK_PER_TRADE,
                 "current_atr":   a,
                 "target":        None,
-                "entry_trigger": f"ml_signal > {ml_th:.2f}",
+                "entry_trigger": trigger,
+                "direction":     proj_dir,
             }
 
-        s_display = f"{s:.3f}" if not np.isnan(s) else "N/A"
+        s_display = f"{s:.3f}" if has_s else "N/A"
         return {
             "signal_active":   active,
+            "direction":       direction,
             "close":           c,
-            "ml_signal":       s if not np.isnan(s) else None,
+            "ml_signal":       s if has_s else None,
             "ml_threshold":    ml_th,
+            "short_entry_threshold": short_entry_th,
             "setup":           setup,
             "projected_setup": projected_setup,
             "details": (
-                f"ml_signal {s_display} {'>' if active else '<='} threshold {ml_th:.2f}"
+                f"ml_signal {s_display} vs long>{ml_th:.2f}/short<{short_entry_th:.2f} "
+                f"[{'LONG' if long_active else 'SHORT' if short_active else 'flat'}]"
             ),
         }
 
@@ -2423,7 +2677,18 @@ def _make_trade(
     holding_days, position_size, pnl, exit_reason,
     gross_pnl: float = 0.0, slippage_cost: float = 0.0,
     reached_1r: bool = False,
+    direction: str = "long",
+    borrow_cost: float = 0.0,
 ) -> dict:
+    """
+    Build a standardised trade dict.
+
+    direction  : "long" (default) or "short". Short trades use inverted PnL
+                 ((entry - exit) * size) and accrue borrow_cost on the notional
+                 value of the position.
+    borrow_cost: cumulative stock-borrow fee charged over the holding period
+                 for short trades. Already subtracted from pnl when applicable.
+    """
     return {
         "entry_date":    entry_date,
         "entry_price":   float(entry_price),
@@ -2436,6 +2701,8 @@ def _make_trade(
         "slippage_cost": float(slippage_cost),
         "exit_reason":   exit_reason,
         "reached_1r":    bool(reached_1r),
+        "direction":     str(direction),
+        "borrow_cost":   float(borrow_cost),
     }
 
 

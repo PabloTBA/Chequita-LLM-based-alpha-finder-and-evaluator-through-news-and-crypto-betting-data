@@ -6,6 +6,7 @@ deterministic rule-based algorithm (no LLM numeric decisions).  The LLM is
 called once only to produce a plain-English explanation of the final params
 for the report — it has no influence on the numbers.
 
+<<<<<<< HEAD
 Regime -> Strategy mapping  (see _REGIME_TO_STRATEGY for the authoritative dict)
 --------------------------
     Trending-Up      -> Momentum           (follow the confirmed uptrend)
@@ -18,6 +19,21 @@ Regime -> Strategy mapping  (see _REGIME_TO_STRATEGY for the authoritative dict)
     Low-Volatility   -> MLSignal            (quiet markets: ML detects subtle patterns)
     Neutral          -> MLSignal            (no strong structural signal: let ML decide)
     Event-Driven     -> EventDriven         (post-earnings PEAD drift)
+=======
+Regime -> Strategy mapping (current)
+------------------------------------
+    Trending-Up      -> Momentum                (follow trend long)
+    Trending-Down    -> AlphaCombined           (multi-factor reversion in downtrend)
+    High-Volatility  -> VolatilityBreakout      (BB squeeze → expansion alpha)
+    Low-Volatility   -> MLSignal                (ML finds subtle nonlinear patterns)
+    Mean-Reverting   -> Mean-Reversion (classical RSI/BB) when atr_pct < 2%
+                     -> AlphaCombined           otherwise (multi-factor MR)
+    Crisis           -> AlphaCombined           (tight params; alpha with defensive stops)
+    Event-Driven     -> EventDriven             (PEAD — post-earnings drift)
+    Neutral          -> MLSignal                (no structural bias — learn from data)
+    Joint Crisis     -> All strategies tightened via `joint_crisis` flag
+                        (market crisis ATR > 6% AND news bearish w/ ≥2 active risks)
+>>>>>>> main
 
 Parameter adjustment rules (Momentum)
 --------------------------------------
@@ -196,15 +212,45 @@ _REGIME_TO_STRATEGY: dict[str, str] = {
     # Volatility regimes
     "High-Volatility":  "VolatilityBreakout",  # squeeze → expansion alpha
     "Low-Volatility":   "MLSignal",             # quiet markets: ML detects subtle nonlinear patterns
+<<<<<<< HEAD
     "Crisis":           "VolatilityBreakout",  # extreme vol: trade the next directional breakout, not the dip
     # Statistical regimes
     "Mean-Reverting":   "AlphaCombined",        # primary regime for multi-factor MR
+=======
+    "Crisis":           "AlphaCombined",        # extreme moves: use alpha signal with tight stops
+    # Statistical regimes — Mean-Reverting is special-cased in _route_strategy()
+    # and may map to either "Mean-Reversion" (classical RSI/BB, low-vol) or
+    # "AlphaCombined" (multi-factor, normal/high-vol). The entry here is the
+    # default fallback if atr_pct cannot be evaluated.
+    "Mean-Reverting":   "AlphaCombined",
+>>>>>>> main
     "Neutral":          "MLSignal",             # no strong structural bias: ML learns from data
     # Exogenous event regime — dedicated PEAD strategy
     "Event-Driven":     "EventDriven",          # post-earnings drift: enter after blackout, ride PEAD
     # Legacy label — kept for backward compatibility with any cached data
     "Trending":         "Momentum",
 }
+
+# ATR threshold below which Mean-Reverting regime routes to the classical
+# RSI+Bollinger Mean-Reversion engine instead of the multi-factor AlphaCombined
+# engine. Classical MR thrives in quiet tape (<2% ATR/price); AlphaCombined
+# handles the noisier end of mean-reversion regimes.
+_MR_LOW_VOL_CUTOFF = 0.020
+
+
+def _route_strategy(regime_label: str, atr_pct: float) -> str:
+    """
+    Deterministic regime→strategy router.
+
+    Encapsulates the one conditional override on top of ``_REGIME_TO_STRATEGY``:
+    Mean-Reverting regimes with low realised volatility (< 2% ATR/price) route
+    to the classical Mean-Reversion engine; everything else uses the static
+    mapping. This keeps all routing logic in one place and ensures the
+    Mean-Reversion branch is actually reachable.
+    """
+    if regime_label == "Mean-Reverting" and atr_pct < _MR_LOW_VOL_CUTOFF:
+        return "Mean-Reversion"
+    return _REGIME_TO_STRATEGY.get(regime_label, "Momentum")
 
 _STRATEGY_TO_BASE: dict[str, dict] = {
     "Momentum":           MOMENTUM_BASE,
@@ -627,11 +673,21 @@ class StrategySelector:
             High-Vol → cap max_holding_days at 10; tighten entry thresholds.
         """
         regime_label = regime.get("regime", "Neutral")
-        strategy     = _REGIME_TO_STRATEGY.get(regime_label, "Momentum")
+        atr_pct      = float(regime.get("atr_pct", 0.02))
+        strategy     = _route_strategy(regime_label, atr_pct)
+
+        # Joint crisis override: when macro signals a systemic panic
+        # (market ATR extreme AND multiple active news risks with bearish bias),
+        # force AlphaCombined with Crisis-tight params regardless of per-ticker
+        # regime. This is the circuit-breaker for system-wide risk-off events.
+        joint_crisis = bool(macro.get("joint_crisis", False))
+        if joint_crisis:
+            strategy     = "AlphaCombined"
+            regime_label = "Crisis"  # treat ticker as crisis for downstream param tuning
+
         base_params  = copy.deepcopy(_STRATEGY_TO_BASE[strategy])
 
         hurst              = float(regime.get("hurst", 0.5))
-        atr_pct            = float(regime.get("atr_pct", 0.02))
         vol_ratio          = float((ohlcv_features or {}).get("volume_ratio_30d", 1.0))
         rsi                = float((ohlcv_features or {}).get("rsi_14", 50.0))
         ret_20d            = float((ohlcv_features or {}).get("return_20d", 0.0))
@@ -648,8 +704,21 @@ class StrategySelector:
             adjusted_params, rule_log = _compute_ml_signal_params(atr_pct, regime_label)
         elif strategy == "EventDriven":
             adjusted_params, rule_log = _compute_event_driven_params(atr_pct, pead_signal_recent)
-        else:
+        elif strategy == "Mean-Reversion":
             adjusted_params, rule_log = _compute_mean_reversion_params(atr_pct)
+        elif strategy == "PairTrading":
+            adjusted_params, rule_log = _compute_pair_trading_params(hurst, atr_pct)
+        else:
+            # Unknown strategy name — should not happen under current routing,
+            # but fall back to Momentum rather than silently mis-dispatching.
+            adjusted_params, rule_log = _compute_momentum_params(hurst, atr_pct, vol_ratio)
+            rule_log.append(f"unknown strategy '{strategy}' — fell back to Momentum")
+
+        if joint_crisis:
+            rule_log.append(
+                "JOINT CRISIS override: market ATR > 6% AND bearish macro with "
+                "multiple active risks — forcing AlphaCombined/Crisis params"
+            )
 
         # ── Regime-specific overrides ─────────────────────────────────────────
         # Crisis downgrade guard: Momentum is structurally wrong in panic regimes
