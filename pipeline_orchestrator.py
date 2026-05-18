@@ -110,7 +110,14 @@ _SECTOR_MAP: dict[str, str] = {
     "NIO": "Speculative",
 }
 
-_MAX_PER_SECTOR = 2  # hard cap on tickers per sector in the shortlist
+# ── tiered diversity quotas ──────────────────────────────────────────────────
+# Each GICS sector gets separate per-tier caps so large-caps don't crowd out
+# small-caps competing in the same sector (e.g. ALMU vs AAPL in Technology).
+_MEGA_CAP_THRESHOLD      = 200_000_000_000   # $200B+
+_LARGE_CAP_THRESHOLD     =  10_000_000_000   # $10B+
+_MEGA_CAP_PER_SECTOR     = 1
+_LARGE_CAP_PER_SECTOR    = 2
+_SMALL_MID_CAP_PER_SECTOR = 3
 
 # Tickers that are economic duplicates of a preferred ticker.
 # If the preferred ticker is present, the alias is always dropped.
@@ -158,27 +165,96 @@ def _extend_sector_map(tickers: list[str]) -> dict[str, str]:
     return result
 
 
-def _enforce_sector_diversity(tickers: list[str], max_per_sector: int = _MAX_PER_SECTOR) -> list[str]:
+def _fetch_market_caps(tickers: list[str]) -> dict[str, float]:
     """
-    Cap tickers per GICS sector to avoid concentrated bets.
-    Dynamically extends the sector map for unknown tickers via yfinance.
-    Tickers that still can't be resolved are treated as their own sector
-    so they always pass through.
+    Fetch market cap (USD) for every ticker via yfinance.
+    Returns a dict of ticker → float (0.0 on lookup failure).
+    """
+    result: dict[str, float] = {t: 0.0 for t in tickers}
+    if not tickers:
+        return result
+
+    for i in range(0, len(tickers), 50):
+        batch = tickers[i:i + 50]
+        try:
+            ticker_objects = __import__("yfinance").Tickers(" ".join(batch))
+            for t in batch:
+                try:
+                    obj = ticker_objects.tickers.get(t)
+                    if obj and hasattr(obj, "info"):
+                        d = obj.info or {}
+                        mkt_cap = d.get("marketCap") or 0
+                        result[t] = float(mkt_cap)
+                except Exception:
+                    pass
+            __import__("time").sleep(0.3)
+        except Exception as e:
+            print(f"  [MarketCap] Batch lookup failed: {e}")
+
+    return result
+
+
+def _classify_market_cap(market_cap: float) -> str:
+    """Bucket a market-cap figure into a tier label."""
+    if market_cap >= _MEGA_CAP_THRESHOLD:
+        return "mega"
+    if market_cap >= _LARGE_CAP_THRESHOLD:
+        return "large"
+    return "small_mid"
+
+
+def _enforce_sector_diversity(
+    tickers: list[str],
+    *,
+    market_caps: dict[str, float] | None = None,
+) -> list[str]:
+    """
+    Cap tickers per GICS sector using tiered quotas.
+
+    Tiers (per sector):
+        mega      (>$200B):  {mega} slot
+        large     ($10B–$200B): {large} slots
+        small_mid (<$10B): {small_mid} slots
+
+    Unknown market cap → classified as small_mid (most permissive).
+    Unknown sector → passed through unhindered.
     """
     sector_map = _extend_sector_map(tickers)
+    caps = market_caps or {}
 
-    sector_count: dict[str, int] = {}
+    mega_counts:      dict[str, int] = {}
+    large_counts:     dict[str, int] = {}
+    small_mid_counts: dict[str, int] = {}
+
     result: list[str] = []
     for ticker in tickers:
         sector = sector_map.get(ticker)
         if sector is None:
             result.append(ticker)   # unknown — let it through
             continue
-        if sector_count.get(sector, 0) < max_per_sector:
-            result.append(ticker)
-            sector_count[sector] = sector_count.get(sector, 0) + 1
+
+        tier = _classify_market_cap(caps.get(ticker, 0))
+
+        if tier == "mega":
+            quota = _MEGA_CAP_PER_SECTOR
+            counter = mega_counts
+        elif tier == "large":
+            quota = _LARGE_CAP_PER_SECTOR
+            counter = large_counts
         else:
-            print(f"  [Diversity] {ticker} dropped — {sector} sector already has {max_per_sector} tickers")
+            quota = _SMALL_MID_CAP_PER_SECTOR
+            counter = small_mid_counts
+
+        current = counter.get(sector, 0)
+        if current < quota:
+            result.append(ticker)
+            counter[sector] = current + 1
+        else:
+            print(
+                f"  [Diversity] {ticker} ({tier}) dropped — "
+                f"{sector} sector already has {quota} {tier} ticker(s)"
+            )
+
     return result
 
 
@@ -527,7 +603,8 @@ class PipelineOrchestrator:
         )
         shortlisted = shortlisted or tickers
         shortlisted = _deduplicate_aliases(shortlisted)
-        shortlisted = _enforce_sector_diversity(shortlisted)
+        mkt_caps = _fetch_market_caps(shortlisted)
+        shortlisted = _enforce_sector_diversity(shortlisted, market_caps=mkt_caps)
         max_tickers = self._cfg.get("max_tickers", 15)
 
         # ── Stage 6b: volume filter ──────────────────────────────────────────────
