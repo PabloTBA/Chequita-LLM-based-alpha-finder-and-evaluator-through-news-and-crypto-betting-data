@@ -796,11 +796,9 @@ class PipelineOrchestrator:
                         # leg sizing, z-score, exit/stop bands) without
                         # requiring additional research by the trader.
                         _pair_signal = self._safe(
-                            f"backtester.pair_signal_status({_ta}/{_tb})",
-                            lambda _oa2=_oa, _ob2=_ob, _p=_params,
-                                   _hr=_pair["hedge_ratio"]: m["backtester"].pair_signal_status(
-                                _oa2, _ob2, _p,
-                                hedge_ratio=_hr,
+                            f"backtester.signal_status({_ta}/{_tb})",
+                            lambda _oa2=_oa, _p=_params: m["backtester"].signal_status(
+                                "Mean-Reverting", _oa2, _p,
                                 initial_portfolio=self._cfg.get("initial_portfolio", 100_000.0),
                             ),
                             {"signal_active": None, "details": "unavailable",
@@ -879,8 +877,8 @@ class PipelineOrchestrator:
 
             strategy = self._safe(
                 f"selector.select({ticker})",
-                lambda _t=ticker, _r=regime, _f=feats, _v=tv, _ms=_market_state: m["selector"].select(
-                    _t, _r, _f, macro, ticker_verdict=_v, market_state=_ms
+                lambda _t=ticker, _r=regime, _f=feats, _v=tv: m["selector"].select(
+                    _t, _r, _f, macro, ticker_verdict=_v
                 ),
                 None,
             )
@@ -912,6 +910,7 @@ class PipelineOrchestrator:
                         ],
                     }
 
+            adv = 0  # initialised before conditional — backtest block uses it below
             if strategy and ohlcv is not None:
                 sig = self._safe(
                     f"backtester.signal_status({ticker})",
@@ -976,7 +975,9 @@ class PipelineOrchestrator:
                         }
                         alt_backtest = self._safe(
                             f"backtester.run({ticker})[alt]",
-                            lambda _t=ticker, _s=alt_strategy, _o=ohlcv: m["backtester"].run(_t, _s, _o),
+                            lambda _t=ticker, _s=alt_strategy, _o=ohlcv, _adv=adv: m["backtester"].run(
+                                _t, _s, _o, adv_shares=float(_adv)
+                            ),
                             None,
                         )
                         if alt_backtest:
