@@ -77,6 +77,8 @@ Public interface
 
 from __future__ import annotations
 
+import threading
+
 import numpy as np
 import pandas as pd
 
@@ -115,7 +117,23 @@ class Backtester:
     def __init__(self, initial_portfolio: float = 100_000.0, slippage_bps: float = DEFAULT_SLIP_BPS):
         self.initial_portfolio = initial_portfolio
         self._default_slip_bps = slippage_bps
-        self._slip = slippage_bps / 10_000  # convert to fraction
+        self._tlocal = threading.local()
+        self._tlocal.slip = slippage_bps / 10_000
+
+    def __getattr__(self, name: str):
+        # Intercept _slip reads → thread-local storage so concurrent backtests
+        # from the ThreadPoolExecutor never leak slippage between threads.
+        if name == "_slip":
+            return getattr(self._tlocal, "slip", self._default_slip_bps / 10_000)
+        raise AttributeError(
+            f"'{type(self).__name__}' object has no attribute '{name}'"
+        )
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name == "_slip":
+            self._tlocal.slip = value
+        else:
+            super().__setattr__(name, value)
 
     # ── public ────────────────────────────────────────────────────────────────
 

@@ -5,17 +5,17 @@ Runs the full alpha-finder pipeline end-to-end.
 
 Stage order
 -----------
-1.  collect_range(start, end)       → articles dict
-2.  summarize(articles, as_of_date) → market summary
-3.  screen(summary)                 → macro analysis
-4.  prefilter(articles)             → top-50 DataFrame
-5.  fetch(tickers)                  → OHLCV dict
-6.  compute_features(df)            → feature dict (per ticker)
-7.  shortlist(tickers, features, macro) → shortlisted tickers
-8.  screen_tickers(tickers, …)      → verdicts list
-9.  classify_all(tickers, ohlcv)    → regime list
+1.  collect_range(start, end)       â†’ articles dict
+2.  summarize(articles, as_of_date) â†’ market summary
+3.  screen(summary)                 â†’ macro analysis
+4.  prefilter(articles)             â†’ top-50 DataFrame
+5.  fetch(tickers)                  â†’ OHLCV dict
+6.  compute_features(df)            â†’ feature dict (per ticker)
+7.  shortlist(tickers, features, macro) â†’ shortlisted tickers
+8.  screen_tickers(tickers, â€¦)      â†’ verdicts list
+9.  classify_all(tickers, ohlcv)    â†’ regime list
 10. (per regime) select + backtest + diagnostics
-11. generate(pipeline_output)       → report path
+11. generate(pipeline_output)       â†’ report path
 
 Dependency injection
 --------------------
@@ -38,227 +38,11 @@ import numpy as np
 import pandas as pd
 
 
-# ── sector map for diversity enforcement ──────────────────────────────────────
-# Base map covers S&P 500 constituents.  _extend_sector_map() dynamically
-# fills in missing tickers via yfinance so the diversity cap works across
-# the full expanded universe, not just the hardcoded S&P 500 names.
+from sector_diversity import (
+    deduplicate_aliases, enforce_sector_diversity, resolve_ticker_info,
+)
 
-_SECTOR_MAP: dict[str, str] = {
-    # Technology
-    "AAPL": "Technology", "MSFT": "Technology", "NVDA": "Technology",
-    "AVGO": "Technology", "ORCL": "Technology", "AMD": "Technology",
-    "QCOM": "Technology", "AMAT": "Technology", "LRCX": "Technology",
-    "KLAC": "Technology", "ADI": "Technology", "MU": "Technology",
-    "CSCO": "Technology", "IBM": "Technology", "TXN": "Technology",
-    "INTU": "Technology", "ADBE": "Technology", "CRM": "Technology",
-    "NOW": "Technology", "PANW": "Technology", "CRWD": "Technology",
-    "SNOW": "Technology", "PLTR": "Technology", "ACN": "Technology",
-    # Communication
-    "GOOGL": "Communication", "GOOG": "Communication", "META": "Communication",
-    "NFLX": "Communication", "T": "Communication", "DIS": "Communication",
-    "BIDU": "Communication",
-    # Consumer Discretionary
-    "AMZN": "Consumer Discretionary", "TSLA": "Consumer Discretionary",
-    "HD": "Consumer Discretionary", "MCD": "Consumer Discretionary",
-    "BKNG": "Consumer Discretionary", "MAR": "Consumer Discretionary",
-    "TGT": "Consumer Discretionary", "SBUX": "Consumer Discretionary",
-    "NKE": "Consumer Discretionary", "ABNB": "Consumer Discretionary",
-    "GM": "Consumer Discretionary", "F": "Consumer Discretionary",
-    "UBER": "Consumer Discretionary", "RBLX": "Consumer Discretionary",
-    "RIVN": "Consumer Discretionary", "LCID": "Consumer Discretionary",
-    "SHOP": "Consumer Discretionary", "LOW": "Consumer Discretionary",
-    "TJX": "Consumer Discretionary",
-    # Consumer Staples
-    "WMT": "Consumer Staples", "COST": "Consumer Staples",
-    "PG": "Consumer Staples", "KO": "Consumer Staples",
-    "PEP": "Consumer Staples", "MDLZ": "Consumer Staples",
-    "MO": "Consumer Staples", "PM": "Consumer Staples", "CL": "Consumer Staples",
-    # Healthcare
-    "LLY": "Healthcare", "UNH": "Healthcare", "ABBV": "Healthcare",
-    "MRK": "Healthcare", "TMO": "Healthcare", "ABT": "Healthcare",
-    "DHR": "Healthcare", "AMGN": "Healthcare", "ISRG": "Healthcare",
-    "SYK": "Healthcare", "GILD": "Healthcare", "VRTX": "Healthcare",
-    "BSX": "Healthcare", "REGN": "Healthcare", "MDT": "Healthcare",
-    "EW": "Healthcare", "ZTS": "Healthcare", "BDX": "Healthcare",
-    "HUM": "Healthcare", "HCA": "Healthcare", "JNJ": "Healthcare",
-    # Financials
-    "JPM": "Financials", "BRK.B": "Financials", "V": "Financials",
-    "MA": "Financials", "BAC": "Financials", "WFC": "Financials",
-    "GS": "Financials", "MS": "Financials", "SPGI": "Financials",
-    "AXP": "Financials", "C": "Financials", "SCHW": "Financials",
-    "CB": "Financials", "MMC": "Financials", "AON": "Financials",
-    "MCO": "Financials", "ICE": "Financials", "CME": "Financials",
-    "USB": "Financials", "AIG": "Financials", "FI": "Financials",
-    "PYPL": "Financials", "SQ": "Financials", "SOFI": "Financials",
-    "COIN": "Financials",
-    # Energy
-    "XOM": "Energy", "CVX": "Energy", "COP": "Energy",
-    "EOG": "Energy", "FCX": "Energy",
-    # Industrials
-    "GE": "Industrials", "HON": "Industrials", "CAT": "Industrials",
-    "ETN": "Industrials", "RTX": "Industrials", "NOC": "Industrials",
-    "DE": "Industrials", "ITW": "Industrials", "EMR": "Industrials",
-    "NSC": "Industrials", "GD": "Industrials", "BA": "Industrials",
-    "MMM": "Industrials", "PH": "Industrials", "ROP": "Industrials",
-    # Materials
-    "LIN": "Materials", "SHW": "Materials",
-    # Real Estate
-    "PLD": "Real Estate", "PSA": "Real Estate",
-    # Utilities
-    "NEE": "Utilities", "SO": "Utilities", "DUK": "Utilities",
-    # Speculative / Other
-    "NIO": "Speculative",
-}
-
-# ── tiered diversity quotas ──────────────────────────────────────────────────
-# Each GICS sector gets separate per-tier caps so large-caps don't crowd out
-# small-caps competing in the same sector (e.g. ALMU vs AAPL in Technology).
-_MEGA_CAP_THRESHOLD      = 200_000_000_000   # $200B+
-_LARGE_CAP_THRESHOLD     =  10_000_000_000   # $10B+
-_MEGA_CAP_PER_SECTOR     = 1
-_LARGE_CAP_PER_SECTOR    = 2
-_SMALL_MID_CAP_PER_SECTOR = 3
-
-# Tickers that are economic duplicates of a preferred ticker.
-# If the preferred ticker is present, the alias is always dropped.
-_TICKER_ALIASES: dict[str, str] = {
-    "GOOG": "GOOGL",   # GOOG class-C and GOOGL class-A are >0.99 correlated — keep GOOGL
-}
-
-
-def _deduplicate_aliases(tickers: list[str]) -> list[str]:
-    """Drop any ticker whose preferred alias is already in the list."""
-    ticker_set = set(tickers)
-    return [t for t in tickers
-            if not (_TICKER_ALIASES.get(t) in ticker_set)]
-
-
-def _extend_sector_map(tickers: list[str]) -> dict[str, str]:
-    """
-    Build a merged sector map: base _SECTOR_MAP + yfinance lookups for unknown tickers.
-    Returns a NEW dict — does NOT mutate _SECTOR_MAP.
-    Unknown tickers that fail lookup are absent from the returned dict.
-    """
-    result = dict(_SECTOR_MAP)  # shallow copy
-    missing = [t for t in tickers if t not in result]
-    if not missing:
-        return result
-
-    for i in range(0, len(missing), 50):
-        batch = missing[i:i + 50]
-        try:
-            ticker_objects = __import__("yfinance").Tickers(" ".join(batch))
-            for t in batch:
-                try:
-                    info = ticker_objects.tickers.get(t)
-                    if info and hasattr(info, "info"):
-                        d = info.info or {}
-                        sector = d.get("sector") or d.get("industry") or ""
-                        if sector:
-                            result[t] = str(sector)
-                except Exception:
-                    pass
-            __import__("time").sleep(0.3)
-        except Exception as e:
-            print(f"  [SectorMap] Batch lookup failed: {e}")
-
-    return result
-
-
-def _fetch_market_caps(tickers: list[str]) -> dict[str, float]:
-    """
-    Fetch market cap (USD) for every ticker via yfinance.
-    Returns a dict of ticker → float (0.0 on lookup failure).
-    """
-    result: dict[str, float] = {t: 0.0 for t in tickers}
-    if not tickers:
-        return result
-
-    for i in range(0, len(tickers), 50):
-        batch = tickers[i:i + 50]
-        try:
-            ticker_objects = __import__("yfinance").Tickers(" ".join(batch))
-            for t in batch:
-                try:
-                    obj = ticker_objects.tickers.get(t)
-                    if obj and hasattr(obj, "info"):
-                        d = obj.info or {}
-                        mkt_cap = d.get("marketCap") or 0
-                        result[t] = float(mkt_cap)
-                except Exception:
-                    pass
-            __import__("time").sleep(0.3)
-        except Exception as e:
-            print(f"  [MarketCap] Batch lookup failed: {e}")
-
-    return result
-
-
-def _classify_market_cap(market_cap: float) -> str:
-    """Bucket a market-cap figure into a tier label."""
-    if market_cap >= _MEGA_CAP_THRESHOLD:
-        return "mega"
-    if market_cap >= _LARGE_CAP_THRESHOLD:
-        return "large"
-    return "small_mid"
-
-
-def _enforce_sector_diversity(
-    tickers: list[str],
-    *,
-    market_caps: dict[str, float] | None = None,
-) -> list[str]:
-    """
-    Cap tickers per GICS sector using tiered quotas.
-
-    Tiers (per sector):
-        mega      (>$200B):  {mega} slot
-        large     ($10B–$200B): {large} slots
-        small_mid (<$10B): {small_mid} slots
-
-    Unknown market cap → classified as small_mid (most permissive).
-    Unknown sector → passed through unhindered.
-    """
-    sector_map = _extend_sector_map(tickers)
-    caps = market_caps or {}
-
-    mega_counts:      dict[str, int] = {}
-    large_counts:     dict[str, int] = {}
-    small_mid_counts: dict[str, int] = {}
-
-    result: list[str] = []
-    for ticker in tickers:
-        sector = sector_map.get(ticker)
-        if sector is None:
-            result.append(ticker)   # unknown — let it through
-            continue
-
-        tier = _classify_market_cap(caps.get(ticker, 0))
-
-        if tier == "mega":
-            quota = _MEGA_CAP_PER_SECTOR
-            counter = mega_counts
-        elif tier == "large":
-            quota = _LARGE_CAP_PER_SECTOR
-            counter = large_counts
-        else:
-            quota = _SMALL_MID_CAP_PER_SECTOR
-            counter = small_mid_counts
-
-        current = counter.get(sector, 0)
-        if current < quota:
-            result.append(ticker)
-            counter[sector] = current + 1
-        else:
-            print(
-                f"  [Diversity] {ticker} ({tier}) dropped — "
-                f"{sector} sector already has {quota} {tier} ticker(s)"
-            )
-
-    return result
-
-
-# ── parameter validation alternatives (tried if LLM params yield Sharpe < 0) ──
+# â”€â”€ parameter validation alternatives (tried if LLM params yield Sharpe < 0) â”€â”€
 
 _PARAM_ALTERNATIVES: dict[str, list[dict]] = {
     "Momentum": [
@@ -270,7 +54,7 @@ _PARAM_ALTERNATIVES: dict[str, list[dict]] = {
          "ma_exit_period": 15, "stop_loss_atr": 1.0, "max_holding_days": 15},
     ],
     "Mean-Reversion": [
-        # Deeper oversold, wider BB — enters on more extreme dislocations only
+        # Deeper oversold, wider BB â€” enters on more extreme dislocations only
         {"rsi_entry_threshold": 25, "rsi_exit_threshold": 60, "bb_period": 20,
          "bb_std": 2.5, "stop_loss_atr": 2.0, "max_holding_days": 15},
         # Quicker cycle: tighter BB, earlier RSI exit
@@ -278,7 +62,7 @@ _PARAM_ALTERNATIVES: dict[str, list[dict]] = {
          "bb_std": 1.8, "stop_loss_atr": 1.5, "max_holding_days": 8},
     ],
     "VolatilityBreakout": [
-        # Tighter squeeze — only enter the most compressed setups
+        # Tighter squeeze â€” only enter the most compressed setups
         {"bb_period": 20, "squeeze_pct": 0.10, "squeeze_lookback": 5,
          "volume_mult": 1.5, "stop_loss_atr": 2.0, "trailing_stop_atr": 2.5, "max_holding_days": 15},
         # Looser squeeze, longer hold, higher volume bar
@@ -289,7 +73,7 @@ _PARAM_ALTERNATIVES: dict[str, list[dict]] = {
         # Higher conviction required, wider stops, shorter hold
         {"ml_threshold": 0.65, "reversal_threshold": 0.45,
          "stop_loss_atr": 2.0, "trailing_stop_atr": 2.5, "max_holding_days": 7},
-        # Looser entry, tighter stops — higher frequency
+        # Looser entry, tighter stops â€” higher frequency
         {"ml_threshold": 0.55, "reversal_threshold": 0.38,
          "stop_loss_atr": 1.0, "trailing_stop_atr": 1.5, "max_holding_days": 15},
     ],
@@ -308,7 +92,7 @@ def _quick_sharpe(returns: pd.Series) -> float:
     return float(returns.mean() / std * (252 ** 0.5))
 
 
-# ── helpers ───────────────────────────────────────────────────────────────────
+# â”€â”€ helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _yesterday() -> str:
     tz_ph = timezone(timedelta(hours=8))
@@ -324,26 +108,26 @@ def _subtract_days(date_str: str, days: int) -> str:
     return (dt - timedelta(days=days)).strftime("%Y-%m-%d")
 
 
-# ── orchestrator ──────────────────────────────────────────────────────────────
+# â”€â”€ orchestrator â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class PipelineOrchestrator:
     def __init__(self, config: dict, _modules: dict | None = None):
         self._cfg = config
         self._modules = _modules if _modules is not None else self._build_modules()
 
-    # ── public ────────────────────────────────────────────────────────────────
+    # â”€â”€ public â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def run(self, date: str | None = None) -> dict:
         run_date     = date if date is not None else _yesterday()
         start        = _subtract_days(run_date, 90)
         collect_end  = _today_utc()   # include today's UTC articles even if run_date is yesterday
 
-        # ── Meta-learning: read historical verdict outcomes ────────────────────
+        # â”€â”€ Meta-learning: read historical verdict outcomes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         # Computes per-regime/strategy pass rates from prior runs so the report
         # can flag combinations with historically poor OOS performance.
         meta_insights = PipelineOrchestrator._load_meta_insights()
         if meta_insights.get("insights"):
-            print(f"  [MetaLearning] Loaded {meta_insights['total_runs']} historical runs — "
+            print(f"  [MetaLearning] Loaded {meta_insights['total_runs']} historical runs â€” "
                   f"{len(meta_insights['insights'])} regime/strategy combinations tracked.")
         if meta_insights.get("warnings"):
             for w in meta_insights["warnings"]:
@@ -351,13 +135,13 @@ class PipelineOrchestrator:
 
         m = self._modules
 
-        # ── Stage 1: collect ──────────────────────────────────────────────────
+        # â”€â”€ Stage 1: collect â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         benzinga_key = self._cfg.get("benzinga_api_key")
         if not benzinga_key:
-            print("[ERROR] Stage 1: BENZINGA_API is not set — news collection will be empty. "
+            print("[ERROR] Stage 1: BENZINGA_API is not set â€” news collection will be empty. "
                   "Set BENZINGA_API in your .env file.")
 
-        print(f"\n[{_ts()}] [Stage 1] Collecting news {start} → {collect_end} ...")
+        print(f"\n[{_ts()}] [Stage 1] Collecting news {start} â†’ {collect_end} ...")
         articles = self._safe(
             "collector",
             lambda: m["collector"].collect_range(start, collect_end),
@@ -375,10 +159,10 @@ class PipelineOrchestrator:
         else:
             print(f"[{_ts()}] [Stage 1] Collected {total_articles} articles total.")
 
-        # ── Stage 1c: Crucix OSINT enrichment ────────────────────────────────
+        # â”€â”€ Stage 1c: Crucix OSINT enrichment â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         # Pulls real-time macro/geopolitical intelligence from the Crucix sidecar
         # (node server.mjs in Crucix-master/, port 3117).  Gracefully skipped when
-        # Crucix is not running — the pipeline continues with Benzinga data only.
+        # Crucix is not running â€” the pipeline continues with Benzinga data only.
         crucix_snapshot  = None
         crucix_macro_ctx = {}
         _crucix          = None   # kept in scope so Stage 3 can call to_summary_text
@@ -392,18 +176,18 @@ class PipelineOrchestrator:
             if crucix_snapshot:
                 crucix_macro_ctx = _crucix.to_macro_context(crucix_snapshot)
                 crucix_df        = _crucix.to_dataframe(crucix_snapshot)
-                # articles is {source_type: DataFrame} — add Crucix as its own source
+                # articles is {source_type: DataFrame} â€” add Crucix as its own source
                 # so RAG store and NewsSummarizer can iterate it like any other source.
                 if not crucix_df.empty:
                     articles["crucix_osint"] = crucix_df
                 print(f"[{_ts()}] [Stage 1c] Crucix: {len(crucix_df)} OSINT articles merged. "
                       f"Macro signals: {len(crucix_macro_ctx.get('cross_domain_risk_signals', []))}")
             else:
-                print(f"[{_ts()}] [Stage 1c] Crucix not available — continuing without OSINT enrichment.")
+                print(f"[{_ts()}] [Stage 1c] Crucix not available â€” continuing without OSINT enrichment.")
         except Exception as _e:
-            print(f"[{_ts()}] [Stage 1c] Crucix enrichment error ({_e}) — continuing.")
+            print(f"[{_ts()}] [Stage 1c] Crucix enrichment error ({_e}) â€” continuing.")
 
-        # ── Stage 1b: RAG insert news ─────────────────────────────────────────
+        # â”€â”€ Stage 1b: RAG insert news â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         print(f"[{_ts()}] [Stage 1b] Inserting news into RAG store ...")
         self._safe(
             "rag_store.insert_news",
@@ -411,7 +195,7 @@ class PipelineOrchestrator:
             None,
         )
 
-        # ── Stage 2: summarize ────────────────────────────────────────────────
+        # â”€â”€ Stage 2: summarize â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         print(f"[{_ts()}] [Stage 2] Summarizing news ...")
         summary = self._safe(
             "summarizer",
@@ -419,7 +203,7 @@ class PipelineOrchestrator:
             {},
         )
 
-        # ── Stage 3: macro screen ─────────────────────────────────────────────
+        # â”€â”€ Stage 3: macro screen â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         print(f"[{_ts()}] [Stage 3] Running macro screen ...")
         # Merge Crucix live macro data into the summary so MacroScreener has
         # real-time FRED, EIA, VIX, yield curve, and conflict signals.
@@ -434,7 +218,7 @@ class PipelineOrchestrator:
             {},
         )
 
-        # ── Stage 4: prefilter ────────────────────────────────────────────────
+        # â”€â”€ Stage 4: prefilter â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         print(f"[{_ts()}] [Stage 4] Prefiltering tickers ...")
         top50 = self._safe(
             "screener.prefilter",
@@ -469,7 +253,7 @@ class PipelineOrchestrator:
             top50 = top50.head(max_markets)
             print(f"  [MaxMarkets] Capped prefilter to top {max_markets} tickers")
 
-        # ── Stage 5: fetch OHLCV (tickers + SPY benchmark) ───────────────────
+        # â”€â”€ Stage 5: fetch OHLCV (tickers + SPY benchmark) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         print(f"[{_ts()}] [Stage 5] Fetching OHLCV for {len(tickers)} tickers + SPY benchmark ...")
         all_tickers = list(dict.fromkeys(tickers + ["SPY"]))  # deduplicate, preserve order
         ohlcv_raw = self._safe(
@@ -478,7 +262,7 @@ class PipelineOrchestrator:
             {},
         )
 
-        # ── Stage 5b: data integrity check ───────────────────────────────────
+        # â”€â”€ Stage 5b: data integrity check â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         if ohlcv_raw:
             close_map = {
                 t: df["Close"].astype(float).round(2)
@@ -491,10 +275,10 @@ class PipelineOrchestrator:
                     ta, tb = ticker_list_check[i], ticker_list_check[j]
                     sa, sb = close_map[ta].align(close_map[tb], join="inner", axis=0)
                     if len(sa) > 10 and sa.equals(sb):
-                        print(f"  [WARN] Data integrity: {ta} and {tb} have identical Close series — possible yfinance cache collision. {tb} will be dropped.")
+                        print(f"  [WARN] Data integrity: {ta} and {tb} have identical Close series â€” possible yfinance cache collision. {tb} will be dropped.")
                         ohlcv_raw[tb] = None
 
-        # ── Stage 5c: earnings blackout dates ────────────────────────────────
+        # â”€â”€ Stage 5c: earnings blackout dates â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         print(f"[{_ts()}] [Stage 5c] Fetching earnings blackout dates ...")
         for _t in tickers:
             if (ohlcv_raw or {}).get(_t) is not None:
@@ -504,11 +288,11 @@ class PipelineOrchestrator:
                     ohlcv_raw[_t],
                 )
 
-        # ── Stage 5d: cross-sectional alpha signal enrichment ─────────────────
+        # â”€â”€ Stage 5d: cross-sectional alpha signal enrichment â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         # AlphaEngine computes CS-MR, residual reversion, volume-spike, and
         # short-term momentum signals across the full universe, then injects
         # alpha_signal into each OHLCV DataFrame.  The backtester reads this
-        # column when running AlphaCombined strategy — no look-ahead because
+        # column when running AlphaCombined strategy â€” no look-ahead because
         # AlphaEngine uses shift(1) throughout.
         print(f"[{_ts()}] [Stage 5d] Computing cross-sectional alpha signals ...")
         if ohlcv_raw:
@@ -519,19 +303,19 @@ class PipelineOrchestrator:
                 ohlcv_raw,
             )
 
-        # ── Stage 5e: joint market+news crisis detector ──────────────────────
+        # â”€â”€ Stage 5e: joint market+news crisis detector â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         # Systemic risk-off circuit breaker. Fires when BOTH conditions are
         # true simultaneously, producing a `joint_crisis` flag on the macro
         # dict that StrategySelector reads to force AlphaCombined with Crisis
         # parameters for every ticker (tighter stops, higher alpha threshold,
         # shorter holds) regardless of its individual Hurst/ATR regime.
         #
-        #   1. SPY 14d ATR / SPY close > 6% (ATR_CRISIS threshold — a market
+        #   1. SPY 14d ATR / SPY close > 6% (ATR_CRISIS threshold â€” a market
         #      event, not a single-stock event). Uses the same RegimeClassifier
         #      ATR math so the threshold stays in lockstep with per-ticker logic.
         #
-        #   2. Macro screener bias == "bearish" AND ≥2 active_macro_risks. One
-        #      bearish tweet doesn't trigger it — the news classifier must have
+        #   2. Macro screener bias == "bearish" AND â‰¥2 active_macro_risks. One
+        #      bearish tweet doesn't trigger it â€” the news classifier must have
         #      flagged multiple independent systemic risks (e.g. Fed hike +
         #      credit-spread blowout + liquidity squeeze).
         #
@@ -565,7 +349,7 @@ class PipelineOrchestrator:
             _mkt_str = f"{_market_atr_pct:.2%}" if _market_atr_pct is not None else "n/a"
             if _joint_crisis:
                 print(
-                    f"[{_ts()}] [Stage 5e] JOINT CRISIS DETECTED — "
+                    f"[{_ts()}] [Stage 5e] JOINT CRISIS DETECTED â€” "
                     f"SPY ATR%={_mkt_str} (>6%) AND bearish macro with "
                     f"{len(_active_risks)} active risks. Forcing AlphaCombined "
                     f"+ Crisis params for all tickers."
@@ -575,14 +359,14 @@ class PipelineOrchestrator:
                     f"[{_ts()}] [Stage 5e] Joint crisis check: "
                     f"market_crisis={_market_crisis} (SPY ATR%={_mkt_str}), "
                     f"news_crisis={_news_crisis} (bias={_bias}, "
-                    f"risks={len(_active_risks)}) — normal routing."
+                    f"risks={len(_active_risks)}) â€” normal routing."
                 )
         except Exception as _e:
-            print(f"[{_ts()}] [Stage 5e] Joint crisis detector failed: {_e} — defaulting to no override")
+            print(f"[{_ts()}] [Stage 5e] Joint crisis detector failed: {_e} â€” defaulting to no override")
             if isinstance(macro, dict):
                 macro.setdefault("joint_crisis", False)
 
-        # ── Stage 6: compute features ─────────────────────────────────────────
+        # â”€â”€ Stage 6: compute features â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         print(f"[{_ts()}] [Stage 6] Computing features ...")
         features: dict[str, Any] = {}
         for ticker in tickers:
@@ -594,7 +378,7 @@ class PipelineOrchestrator:
                     {},
                 )
 
-        # ── Stage 7: shortlist ────────────────────────────────────────────────
+        # â”€â”€ Stage 7: shortlist â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         print(f"[{_ts()}] [Stage 7] Shortlisting tickers ...")
         shortlisted = self._safe(
             "screener.shortlist",
@@ -602,12 +386,12 @@ class PipelineOrchestrator:
             tickers,
         )
         shortlisted = shortlisted or tickers
-        shortlisted = _deduplicate_aliases(shortlisted)
-        mkt_caps = _fetch_market_caps(shortlisted)
-        shortlisted = _enforce_sector_diversity(shortlisted, market_caps=mkt_caps)
+        shortlisted = deduplicate_aliases(shortlisted)
+        _smap, mkt_caps = resolve_ticker_info(shortlisted)
+        shortlisted = enforce_sector_diversity(shortlisted, market_caps=mkt_caps, sector_map=_smap)
         max_tickers = self._cfg.get("max_tickers", 15)
 
-        # ── Stage 6b: volume filter ──────────────────────────────────────────────
+        # â”€â”€ Stage 6b: volume filter â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         min_volume = self._cfg.get("min_volume", 0)
         if min_volume > 0 and features:
             dropped = []
@@ -632,7 +416,12 @@ class PipelineOrchestrator:
                 t for t in top50["ticker"].tolist()
                 if t not in shortlisted_set
             ]
-            combined = _deduplicate_aliases(shortlisted + candidates)
+            combined = deduplicate_aliases(shortlisted + candidates)
+            # Re-run tiered diversity so backfilled tickers don't bypass the
+            # per-sector per-tier quotas.
+            _smap2, mkt_caps2 = resolve_ticker_info(combined)
+            mkt_caps.update(mkt_caps2)
+            combined = enforce_sector_diversity(combined, market_caps=mkt_caps, sector_map=_smap2)
             shortlisted = combined[:max_tickers]
             added = [t for t in shortlisted if t not in shortlisted_set]
             if added:
@@ -640,7 +429,7 @@ class PipelineOrchestrator:
 
         shortlisted = shortlisted[:max_tickers]
 
-        # ── Stage 7b: ML signal enrichment (shortlisted tickers only) ────────
+        # â”€â”€ Stage 7b: ML signal enrichment (shortlisted tickers only) â”€â”€â”€â”€â”€â”€â”€â”€
         # Run after shortlisting so the cross-sectional GBM (Model 1) gets
         # meaningful z-scores across the ~15 shortlisted tickers rather than
         # all 50 raw candidates.  Only Low-Volatility and Neutral regime tickers
@@ -656,7 +445,7 @@ class PipelineOrchestrator:
             )
             ohlcv_raw.update(enriched)
 
-        # ── Stage 8: verdicts ─────────────────────────────────────────────────
+        # â”€â”€ Stage 8: verdicts â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         print(f"[{_ts()}] [Stage 8] Screening {len(shortlisted)} tickers ...")
         ticker_verdicts = self._safe(
             "screener.screen_tickers",
@@ -666,7 +455,7 @@ class PipelineOrchestrator:
             [],
         )
 
-        # ── Stage 9: regime classification (skip AVOID tickers) ──────────────
+        # â”€â”€ Stage 9: regime classification (skip AVOID tickers) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         avoid_set = {v["ticker"] for v in (ticker_verdicts or []) if v.get("verdict", "").lower() == "avoid"}
         actionable = [t for t in shortlisted if t not in avoid_set]
         if avoid_set:
@@ -679,7 +468,7 @@ class PipelineOrchestrator:
             [],
         )
 
-        # ── Stage 9c: portfolio-level market state detection ─────────────────
+        # â”€â”€ Stage 9c: portfolio-level market state detection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         # Determines whether the whole market is in Crisis, High-Volatility, or
         # Normal mode.  This single value drives four downstream adaptations:
         #   1. No-trade gate  : Crisis tickers are skipped entirely (no recommendations).
@@ -707,7 +496,7 @@ class PipelineOrchestrator:
         _ms = market_state_info.get("market_state", "Normal")
         if _ms == "Crisis":
             print(
-                f"[{_ts()}] [Stage 9c] CRISIS MODE ACTIVE — "
+                f"[{_ts()}] [Stage 9c] CRISIS MODE ACTIVE â€” "
                 f"Crisis tickers will be skipped (no recommendations). "
                 f"SPY_ATR%={market_state_info['spy_atr_pct']:.2%}  "
                 f"crisis_frac={market_state_info['crisis_fraction']:.0%}  "
@@ -715,24 +504,24 @@ class PipelineOrchestrator:
             )
         elif _ms == "High-Volatility":
             print(
-                f"[{_ts()}] [Stage 9c] HIGH-VOLATILITY MODE — "
+                f"[{_ts()}] [Stage 9c] HIGH-VOLATILITY MODE â€” "
                 f"max_holding_days capped at 10; entry thresholds tightened. "
                 f"recovery_score={market_state_info['recovery_score']:.2f}  "
                 f"stable_days={market_state_info['stable_days']}"
             )
         else:
             print(
-                f"[{_ts()}] [Stage 9c] NORMAL MODE — standard pipeline parameters. "
+                f"[{_ts()}] [Stage 9c] NORMAL MODE â€” standard pipeline parameters. "
                 f"recovery_score={market_state_info['recovery_score']:.2f}  "
                 f"stable_days={market_state_info['stable_days']}"
             )
 
-        # ── Stage 9b: pair trading analysis ──────────────────────────────────
+        # â”€â”€ Stage 9b: pair trading analysis â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         # Runs after regime classification so we have the full shortlisted
-        # universe available.  Pair analysis is cross-sectional — it needs
+        # universe available.  Pair analysis is cross-sectional â€” it needs
         # all tickers' OHLCV simultaneously to find cointegrated pairs.
         pair_analyses: list[dict] = []
-        # Use the full shortlisted universe for pair discovery — AVOID tickers are
+        # Use the full shortlisted universe for pair discovery â€” AVOID tickers are
         # excluded from directional single-leg strategies but can still form valid
         # market-neutral spreads.  A cointegrated pair is evaluated on the spread's
         # own backtest and diagnostic, not on either leg's individual verdict.
@@ -791,7 +580,7 @@ class PipelineOrchestrator:
                             ),
                             None,
                         )
-                        # Live pair signal — computed on latest bar so the
+                        # Live pair signal â€” computed on latest bar so the
                         # report can render a full execution brief (direction,
                         # leg sizing, z-score, exit/stop bands) without
                         # requiring additional research by the trader.
@@ -820,7 +609,7 @@ class PipelineOrchestrator:
                         print(f"[{_ts()}]   [Stage 9b] {_ta}/{_tb}: {status}  "
                               f"Sharpe={sharpe:.3f}  trades={len(_bt_pair['trade_log'])}")
                     else:
-                        print(f"[{_ts()}]   [Stage 9b] {_ta}/{_tb}: skipped — "
+                        print(f"[{_ts()}]   [Stage 9b] {_ta}/{_tb}: skipped â€” "
                               f"insufficient trades ({len((_bt_pair or {}).get('trade_log', []))})")
 
             except Exception as _e:
@@ -829,7 +618,7 @@ class PipelineOrchestrator:
         if pair_analyses:
             print(f"[{_ts()}] [Stage 9b] Found {len(pair_analyses)} pair(s) with sufficient trade history.")
 
-        # ── Stage 10: per-ticker strategy / backtest / diagnostics / MC ─────
+        # â”€â”€ Stage 10: per-ticker strategy / backtest / diagnostics / MC â”€â”€â”€â”€â”€
         print(f"[{_ts()}] [Stage 10] Running per-ticker analysis for {len(regimes or [])} tickers in parallel ...")
         strategies:    list[dict] = []
         backtests:     list[dict] = []
@@ -849,19 +638,19 @@ class PipelineOrchestrator:
             # AVOID gate: skip full analysis if LLM rated this ticker AVOID
             tv = next((v for v in (ticker_verdicts or []) if v["ticker"] == ticker), None)
             if tv and tv.get("verdict", "").lower() == "avoid":
-                print(f"[{_ts()}]   [Stage 10] {ticker} — skipping strategy/backtest (AVOID verdict)")
+                print(f"[{_ts()}]   [Stage 10] {ticker} â€” skipping strategy/backtest (AVOID verdict)")
                 return {"ticker": ticker, "strategy": None, "backtest": None,
                         "diagnostic": None, "mc_result": None}
 
-            # NO-TRADE gate: Crisis market state + Crisis ticker regime → skip entry.
+            # NO-TRADE gate: Crisis market state + Crisis ticker regime â†’ skip entry.
             # Rationale: forcing Mean-Reversion entries into a sustained sell-off
             # (buying falling knives) has negative expected value.  The system outputs
             # no recommendation rather than a low-confidence trade.
-            # High-Volatility market state alone does NOT trigger a skip — the
+            # High-Volatility market state alone does NOT trigger a skip â€” the
             # strategy parameters are adapted instead (shorter holds, tighter gates).
             if _market_state == "Crisis" and ticker_regime == "Crisis":
                 print(
-                    f"[{_ts()}]   [Stage 10] {ticker} — NO TRADE (Crisis market + Crisis ticker). "
+                    f"[{_ts()}]   [Stage 10] {ticker} â€” NO TRADE (Crisis market + Crisis ticker). "
                     f"Skipping to avoid buying falling knives."
                 )
                 return {
@@ -870,10 +659,10 @@ class PipelineOrchestrator:
                     "backtest":   None,
                     "diagnostic": None,
                     "mc_result":  None,
-                    "no_trade_reason": "Crisis market state — no new entries during sustained sell-off",
+                    "no_trade_reason": "Crisis market state â€” no new entries during sustained sell-off",
                 }
 
-            print(f"[{_ts()}]   [Stage 10] {ticker} — strategy select / backtest / diagnostics ...")
+            print(f"[{_ts()}]   [Stage 10] {ticker} â€” strategy select / backtest / diagnostics ...")
 
             strategy = self._safe(
                 f"selector.select({ticker})",
@@ -897,7 +686,7 @@ class PipelineOrchestrator:
                 if no_signal:
                     from strategy_selector import ALPHA_COMBINED_BASE as _AC_BASE
                     import copy as _copy
-                    print(f"[{_ts()}]   [Fallback] {ticker}: MLSignal → AlphaCombined "
+                    print(f"[{_ts()}]   [Fallback] {ticker}: MLSignal â†’ AlphaCombined "
                           f"(insufficient ML training data)")
                     _ac_params = _copy.deepcopy(_AC_BASE)
                     strategy = {
@@ -906,11 +695,11 @@ class PipelineOrchestrator:
                         "base_params":     _ac_params,
                         "adjusted_params": _ac_params,
                         "llm_adjustments": strategy.get("llm_adjustments", []) + [
-                            "[Auto] MLSignal → AlphaCombined fallback (< 252 bars of history)"
+                            "[Auto] MLSignal â†’ AlphaCombined fallback (< 252 bars of history)"
                         ],
                     }
 
-            adv = 0  # initialised before conditional — backtest block uses it below
+            adv = 0  # initialised before conditional â€” backtest block uses it below
             if strategy and ohlcv is not None:
                 sig = self._safe(
                     f"backtester.signal_status({ticker})",
@@ -922,7 +711,7 @@ class PipelineOrchestrator:
                 adv = int(feats.get("adv_20d", 0))
                 strategy = {**strategy, "current_signal": sig, "_adv": adv}
 
-            # ── Param divergence flag ─────────────────────────────────────────
+            # â”€â”€ Param divergence flag â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             # Warn when adjusted params differ materially from base params so the
             # trader knows the live signal uses a different stop/band than the
             # validated backtest.
@@ -937,7 +726,7 @@ class PipelineOrchestrator:
                         diff = abs(a_val - b_val)
                         if diff > 0.5:
                             param_warnings.append(
-                                f"{key}: base={b_val} vs adjusted={a_val} (Δ={diff:.1f} > 0.5) — "
+                                f"{key}: base={b_val} vs adjusted={a_val} (Î”={diff:.1f} > 0.5) â€” "
                                 f"live signal uses wider params than validated backtest"
                             )
                 if param_warnings:
@@ -945,7 +734,7 @@ class PipelineOrchestrator:
                     for w in param_warnings:
                         print(f"  [WARN] {ticker} param divergence: {w}")
 
-            # Use base_params for backtest to avoid circular LLM tuning —
+            # Use base_params for backtest to avoid circular LLM tuning â€”
             # LLM-adjusted params are only used for the live signal check above.
             backtest = self._safe(
                 f"backtester.run({ticker})",
@@ -958,7 +747,7 @@ class PipelineOrchestrator:
                 None,
             )
 
-            # ── Parameter validation loop ──────────────────────────────────────
+            # â”€â”€ Parameter validation loop â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             # If LLM params yield negative Sharpe, try predefined alternatives
             # and keep whichever produces the best Sharpe.
             if backtest and strategy:
@@ -970,7 +759,7 @@ class PipelineOrchestrator:
                             **strategy,
                             "adjusted_params": alt_params,
                             "llm_adjustments": strategy.get("llm_adjustments", []) + [
-                                f"[Auto] alternative params tried — LLM params yielded Sharpe {current_sharpe:.3f}"
+                                f"[Auto] alternative params tried â€” LLM params yielded Sharpe {current_sharpe:.3f}"
                             ],
                         }
                         alt_backtest = self._safe(
@@ -983,18 +772,18 @@ class PipelineOrchestrator:
                         if alt_backtest:
                             alt_sharpe = _quick_sharpe(alt_backtest["returns"])
                             if alt_sharpe > current_sharpe:
-                                print(f"[{_ts()}]   [Stage 10] {ticker} — alt params improved Sharpe {current_sharpe:.3f} → {alt_sharpe:.3f}")
+                                print(f"[{_ts()}]   [Stage 10] {ticker} â€” alt params improved Sharpe {current_sharpe:.3f} â†’ {alt_sharpe:.3f}")
                                 strategy       = alt_strategy
                                 backtest       = alt_backtest
                                 current_sharpe = alt_sharpe
 
-            # ── LLM hypothesis annotation (narrative only — no strategy switch) ──
+            # â”€â”€ LLM hypothesis annotation (narrative only â€” no strategy switch) â”€â”€
             # The LLM may disagree with the regime-rule strategy selection.
             # Its suggestion is surfaced in the report for the trader's awareness,
             # but does NOT trigger a re-backtest or strategy class change.
             #
             # Rationale: selecting a strategy by comparing in-sample Sharpe ratios
-            # (algo vs challenger) is data mining — the challenger that fits the
+            # (algo vs challenger) is data mining â€” the challenger that fits the
             # historical data better wins regardless of whether the fit is genuine
             # or overfit.  The regime-rule mapping is the primary selection;
             # the LLM provides qualitative narrative context only.
@@ -1009,7 +798,7 @@ class PipelineOrchestrator:
                 ch_reason = hypothesis.get("reason", "")
                 print(
                     f"[{_ts()}]   [LLM Hypothesis] {ticker}: LLM suggests {ch_name} "
-                    f"(narrative only — no backtest, no strategy switch) | {ch_reason}"
+                    f"(narrative only â€” no backtest, no strategy switch) | {ch_reason}"
                 )
                 strategy = {
                     **strategy,
@@ -1045,12 +834,12 @@ class PipelineOrchestrator:
                 if should_run_mc:
                     if trade_count < 30:
                         label = "PASS" if diag_passed else "STRESS"
-                        print(f"[{_ts()}]   [Stage 10] {ticker} — MC skipped ({label}, only {trade_count} trades, need 30+)")
+                        print(f"[{_ts()}]   [Stage 10] {ticker} â€” MC skipped ({label}, only {trade_count} trades, need 30+)")
                         mc_result = {"insufficient_sample": True, "trade_count": trade_count,
                                      "stress_test": not diag_passed}
                     else:
                         label = "passed" if diag_passed else f"near-threshold Sharpe={diag_sharpe:.3f}"
-                        print(f"[{_ts()}]   [Stage 10] {ticker} — running Monte Carlo ({label}, {trade_count} trades) ...")
+                        print(f"[{_ts()}]   [Stage 10] {ticker} â€” running Monte Carlo ({label}, {trade_count} trades) ...")
                         _ohlcv_yrs = None
                         _odf = (ohlcv_raw or {}).get(ticker)
                         if _odf is not None and not _odf.empty:
@@ -1096,7 +885,7 @@ class PipelineOrchestrator:
             if res.get("mc_result"):
                 monte_carlos.append({"ticker": ticker, **res["mc_result"]})
 
-        # ── AlphaCombined portfolio backtest ──────────────────────────────────
+        # â”€â”€ AlphaCombined portfolio backtest â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         # AlphaCombined is a cross-sectional strategy: its signals are z-scored
         # across the universe, so individual per-ticker backtests destroy the
         # market-neutral property.  After the per-ticker loop, re-backtest all
@@ -1167,10 +956,10 @@ class PipelineOrchestrator:
                             **ac_mc,
                         })
         elif len(ac_tickers) == 1 and ohlcv_raw:
-            print(f"[{_ts()}] [Stage 10b] Only 1 AlphaCombined ticker ({ac_tickers[0]}) — "
+            print(f"[{_ts()}] [Stage 10b] Only 1 AlphaCombined ticker ({ac_tickers[0]}) â€” "
                   f"cross-sectional portfolio requires >= 2 tickers; per-ticker result retained.")
 
-        # ── Correlation warnings ──────────────────────────────────────────────
+        # â”€â”€ Correlation warnings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         # Flag pairs of shortlisted tickers with >0.95 return correlation (e.g. GOOG/GOOGL)
         correlation_warnings: list[str] = []
         try:
@@ -1188,13 +977,13 @@ class PipelineOrchestrator:
                         c = corr.iloc[i, j]
                         if c > 0.95:
                             correlation_warnings.append(
-                                f"{tlist[i]} / {tlist[j]} — correlation {c:.2f} "
+                                f"{tlist[i]} / {tlist[j]} â€” correlation {c:.2f} "
                                 f"(near-identical exposure, running both doubles concentration risk)"
                             )
         except Exception:
             pass
 
-        # ── Reconcile verdicts against diagnostics ────────────────────────────
+        # â”€â”€ Reconcile verdicts against diagnostics â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         # A BUY verdict that has a failed (or missing) diagnostic is contradictory.
         # Downgrade such tickers to WATCH so the report is self-consistent.
         passed_tickers = {d["ticker"] for d in diagnostics if d.get("passed")}
@@ -1202,12 +991,12 @@ class PipelineOrchestrator:
         for v in (ticker_verdicts or []):
             if v.get("verdict", "").lower() == "buy" and v["ticker"] not in passed_tickers:
                 reconciled_verdicts.append({**v, "verdict": "watch",
-                    "reasoning": f"[Downgraded from BUY — backtest diagnostic did not pass] {v.get('reasoning', '')}"})
+                    "reasoning": f"[Downgraded from BUY â€” backtest diagnostic did not pass] {v.get('reasoning', '')}"})
             else:
                 reconciled_verdicts.append(v)
         ticker_verdicts = reconciled_verdicts
 
-        # ── Stage 11: execution brief ─────────────────────────────────────────
+        # â”€â”€ Stage 11: execution brief â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         print(f"[{_ts()}] [Stage 11] Building execution brief ...")
         execution_brief = self._safe(
             "execution_advisor.advise",
@@ -1219,7 +1008,7 @@ class PipelineOrchestrator:
 
         spy_ohlcv = (ohlcv_raw or {}).get("SPY")
 
-        # ── Stage 11b: portfolio optimisation ────────────────────────────────
+        # â”€â”€ Stage 11b: portfolio optimisation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         print(f"[{_ts()}] [Stage 11b] Running portfolio optimisation ...")
         portfolio_result = self._safe(
             "portfolio_optimizer.optimize",
@@ -1248,7 +1037,7 @@ class PipelineOrchestrator:
             market_state=market_state_info,
         )
 
-    # ── internal helpers ──────────────────────────────────────────────────────
+    # â”€â”€ internal helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     @staticmethod
     def _safe(stage: str, fn, fallback):
@@ -1271,9 +1060,9 @@ class PipelineOrchestrator:
         from datetime import datetime as _dt
         timestamp = _dt.now().strftime("%H%M%S")
 
-        # ── Verdict accountability log ────────────────────────────────────────
+        # â”€â”€ Verdict accountability log â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         # Append {run_date, ticker, verdict, sharpe, passed, strategy, regime} to
-        # a flat CSV so that after 30–50 runs a Kruskal-Wallis test can determine
+        # a flat CSV so that after 30â€“50 runs a Kruskal-Wallis test can determine
         # whether LLM buy/watch/avoid verdicts actually correlate with backtest outcome.
         PipelineOrchestrator._log_verdict_outcomes(run_date, pipeline_output)
 
@@ -1296,11 +1085,11 @@ class PipelineOrchestrator:
         Read data/verdict_log.csv and compute per-(regime+strategy) performance stats.
 
         Returns a dict with keys:
-          insights       : dict[str, dict] — keyed by "Regime+Strategy"
+          insights       : dict[str, dict] â€” keyed by "Regime+Strategy"
                            values: {n, avg_sharpe, pass_rate}
-          warnings       : list[str] — combinations with historically poor pass rate
+          warnings       : list[str] â€” combinations with historically poor pass rate
           total_runs     : int
-          sample_too_small: bool — set when fewer than 10 rows
+          sample_too_small: bool â€” set when fewer than 10 rows
 
         After ~30 runs, this gives the system memory of which strategy/regime
         combinations have historically produced passing OOS Sharpes, allowing
@@ -1354,7 +1143,7 @@ class PipelineOrchestrator:
             if stats["pass_rate"] < 0.10 and stats["n"] >= 10:
                 warnings.append(
                     f"{key}: only {stats['pass_rate']:.0%} historical pass rate "
-                    f"over {stats['n']} runs (avg Sharpe {stats['avg_sharpe']:.3f}) — "
+                    f"over {stats['n']} runs (avg Sharpe {stats['avg_sharpe']:.3f}) â€” "
                     f"this regime/strategy combination has shown weak edge"
                 )
 
@@ -1415,7 +1204,7 @@ class PipelineOrchestrator:
                 if write_header:
                     writer.writeheader()
                 writer.writerows(rows)
-            print(f"  [VerdictLog] Appended {len(rows)} rows → {log_path}")
+            print(f"  [VerdictLog] Appended {len(rows)} rows â†’ {log_path}")
         except Exception as e:
             print(f"  [VerdictLog] Write failed (non-fatal): {e}")
 
@@ -1478,7 +1267,7 @@ class PipelineOrchestrator:
         }
 
 
-# ── CLI entry point ───────────────────────────────────────────────────────────
+# â”€â”€ CLI entry point â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 if __name__ == "__main__":
     import sys
